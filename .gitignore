@@ -1,5 +1,9 @@
-# Data directories
-data/
+# Data directories (keep .gitkeep)
+data/raw/*
+data/staging/*
+data/curated/*
+data/reports/*
+!data/**/.gitkeep
 *.parquet
 *.arrow
 *.feather
