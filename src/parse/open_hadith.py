@@ -29,8 +29,13 @@ _DIACRITICS_RE = re.compile(r"tashkeel|diacritics|mushakkala", re.IGNORECASE)
 
 # Common column name mappings (lowercase -> canonical).
 _TEXT_COLUMNS = {
-    "hadith", "text", "matn", "content", "hadith_text",
-    "\u062d\u062f\u064a\u062b", "\u0645\u062a\u0646",
+    "hadith",
+    "text",
+    "matn",
+    "content",
+    "hadith_text",
+    "\u062d\u062f\u064a\u062b",
+    "\u0645\u062a\u0646",
 }
 _NUMBER_COLUMNS = {"hadith_number", "number", "hadith_no", "\u0631\u0642\u0645", "id"}
 _BOOK_COLUMNS = {"book_number", "book", "book_no", "\u0643\u062a\u0627\u0628"}
