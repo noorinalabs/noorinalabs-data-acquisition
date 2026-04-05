@@ -91,6 +91,18 @@ module = ["camel_tools", "camel_tools.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+module = ["bs4", "bs4.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["tenacity", "tenacity.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["tqdm", "tqdm.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 module = ["kaggle", "kaggle.*"]
 ignore_missing_imports = true
 
