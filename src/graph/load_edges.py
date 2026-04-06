@@ -322,7 +322,11 @@ def _load_appears_in(
                 skipped += 1
                 continue
             hid = f"hdt:{sid}" if not sid.startswith("hdt:") else sid
-            cid = f"col:{cname}" if not cname.startswith("col:") else cname
+            # Collection IDs in staging use "{corpus}:{name}" format (e.g. "lk:bukhari").
+            # Build the same key so we match the Collection nodes that were loaded.
+            corpus = row.get("source_corpus", "")
+            raw_cid = f"{corpus}:{cname}" if corpus else cname
+            cid = f"col:{raw_cid}" if not raw_cid.startswith("col:") else raw_cid
             batch.append(
                 {
                     "hadith_id": hid,
