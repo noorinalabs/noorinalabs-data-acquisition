@@ -136,13 +136,10 @@ class TestRealDataFlow:
         assert report.total_rows >= 3
 
         for file_report in report.files:
-            schema_checks = [
-                c for c in file_report.checks if c.name == "schema_conformance"
-            ]
+            schema_checks = [c for c in file_report.checks if c.name == "schema_conformance"]
             schema_failures = [c for c in schema_checks if c.status == CheckStatus.FAIL]
             assert schema_failures == [], (
-                f"Schema issues in {file_report.file}: "
-                f"{[c.message for c in schema_failures]}"
+                f"Schema issues in {file_report.file}: {[c.message for c in schema_failures]}"
             )
 
     def test_full_pipeline_sample(self, tmp_path: Path, neo4j_client) -> None:
