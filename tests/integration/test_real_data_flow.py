@@ -16,7 +16,7 @@ import pytest
 
 from src.parse import lk_corpus, sanadset
 from src.parse.schemas import HADITH_SCHEMA, NARRATOR_MENTION_SCHEMA
-from src.parse.validate import validate_staging
+from src.parse.validate import CheckStatus, validate_staging
 
 
 def _create_sample_lk_csv(directory: Path) -> Path:
@@ -130,14 +130,19 @@ class TestRealDataFlow:
         staging_dir.mkdir()
 
         lk_corpus.run(tmp_path, staging_dir)
-        summary = validate_staging(staging_dir)
+        report = validate_staging(staging_dir)
 
-        assert summary["total_files"] >= 1
-        assert summary["total_rows"] >= 3
+        assert report.total_files >= 1
+        assert report.total_rows >= 3
 
-        for file_info in summary["files"]:
-            assert file_info["schema_issues"] == [], (
-                f"Schema issues in {file_info['file']}: {file_info['schema_issues']}"
+        for file_report in report.files:
+            schema_checks = [
+                c for c in file_report.checks if c.name == "schema_conformance"
+            ]
+            schema_failures = [c for c in schema_checks if c.status == CheckStatus.FAIL]
+            assert schema_failures == [], (
+                f"Schema issues in {file_report.file}: "
+                f"{[c.message for c in schema_failures]}"
             )
 
     def test_full_pipeline_sample(self, tmp_path: Path, neo4j_client) -> None:
