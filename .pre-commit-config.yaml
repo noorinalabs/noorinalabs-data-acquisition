@@ -1,0 +1,52 @@
+# Pre-commit hooks for noorinalabs-isnad-graph-ingestion
+# Install: pre-commit install
+# Docs: https://pre-commit.com/
+#
+# Hook execution order (fail-fast, cheapest first):
+#   1. Ruff format check
+#   2. Ruff lint
+#   3. gitleaks (secret detection)
+#   4. mypy type checking
+#   5. Unit tests
+#
+# Prerequisites:
+#   - Python 3.14+ with uv
+
+repos:
+  # --- Ruff formatter & linter ---
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.6
+    hooks:
+      - id: ruff-format
+        args: [--check]
+        name: ruff-format
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+        name: ruff-lint
+
+  # --- Secret detection ---
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.24.3
+    hooks:
+      - id: gitleaks
+        name: gitleaks
+
+  # --- Local hooks (mypy, tests) ---
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: uv run mypy src/
+        language: system
+        pass_filenames: false
+        types: [python]
+        stages: [pre-commit]
+
+      - id: pytest-unit
+        name: pytest-unit
+        entry: bash -c 'ENVIRONMENT=test uv run pytest tests/ -x --tb=short -q -m "not integration"'
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+
+      # Integration tests require external services — run in CI only.
