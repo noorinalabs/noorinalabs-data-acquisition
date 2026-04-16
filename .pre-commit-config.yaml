@@ -14,14 +14,14 @@
 
 repos:
   # --- Ruff formatter & linter ---
+  # ruff-format runs first so format fixes don't trigger re-lint.
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.11.6
     hooks:
       - id: ruff-format
-        args: [--check]
         name: ruff-format
       - id: ruff
-        args: [--fix, --exit-non-zero-on-fix]
+        args: [--fix]
         name: ruff-lint
 
   # --- Secret detection ---
