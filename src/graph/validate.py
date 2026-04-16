@@ -63,7 +63,7 @@ def _classify_collection_coverage(
     failures: list[str] = []
     for row in rows:
         dev = row.get("deviation_pct")
-        if dev is not None and isinstance(dev, (int, float)) and dev > deviation_threshold:
+        if dev is not None and isinstance(dev, int | float) and dev > deviation_threshold:
             cid = row.get("collection_id", "?")
             failures.append(f"{cid}: {dev:.1f}% deviation")
     passed = len(failures) == 0
