@@ -12,6 +12,7 @@ from pathlib import Path
 
 from src.acquire.base import ensure_dir, fetch_json_paginated, write_manifest
 from src.config import get_settings
+from src.messaging import emit_raw_new_for_manifest
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -84,6 +85,7 @@ def run(raw_dir: Path) -> Path | None:
         time.sleep(RATE_LIMIT_SECONDS)
 
     write_manifest(dest, saved_files)
+    emit_raw_new_for_manifest(source="sunnah_api", local_dir=dest, files=saved_files)
     logger.info(
         "sunnah_acquired",
         collections=len(raw_collections),

@@ -21,6 +21,7 @@ dependencies = [
     "tqdm>=4.66",
     "tenacity>=8.2",
     "rapidfuzz>=3.6",
+    "kafka-python>=2.3.1",
 ]
 
 [project.scripts]
@@ -104,6 +105,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["kaggle", "kaggle.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["kafka", "kafka.*"]
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]

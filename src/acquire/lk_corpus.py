@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.acquire.base import clone_repo, ensure_dir, write_manifest
+from src.messaging import emit_raw_new_for_manifest
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -27,4 +28,5 @@ def run(raw_dir: Path) -> Path:
         raise AssertionError(msg)
     logger.info("lk_acquired", file_count=len(csv_files))
     write_manifest(dest, csv_files)
+    emit_raw_new_for_manifest(source="lk_corpus", local_dir=dest, files=csv_files)
     return dest

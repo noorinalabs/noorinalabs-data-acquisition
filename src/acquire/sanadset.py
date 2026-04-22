@@ -20,6 +20,7 @@ from pathlib import Path
 
 from src.acquire.base import download_file, ensure_dir, write_manifest
 from src.config import get_settings
+from src.messaging import emit_raw_new_for_manifest
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -224,4 +225,5 @@ def download_sanadset(dest: Path | None = None) -> Path:
 
     all_files = [*hadith_csvs, *narrators_csvs]
     write_manifest(dest, all_files)
+    emit_raw_new_for_manifest(source="sanadset", local_dir=dest, files=all_files)
     return dest

@@ -19,6 +19,7 @@ from src.acquire.base import (
     fetch_json,
     write_manifest,
 )
+from src.messaging import emit_raw_new_for_manifest
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -79,6 +80,7 @@ def run(raw_dir: Path) -> Path:
             ara_count=len(existing_ara),
         )
         write_manifest(dest, all_existing)
+        emit_raw_new_for_manifest(source="fawaz", local_dir=dest, files=all_existing)
         return dest
 
     # 2. Download editions.json (small catalog file)
@@ -129,4 +131,5 @@ def run(raw_dir: Path) -> Path:
         ara_count=len(ara_files),
     )
     write_manifest(dest, downloaded)
+    emit_raw_new_for_manifest(source="fawaz", local_dir=dest, files=downloaded)
     return dest

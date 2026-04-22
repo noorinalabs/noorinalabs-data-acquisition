@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.acquire.base import clone_repo, ensure_dir, write_manifest
+from src.messaging import emit_raw_new_for_manifest
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -32,4 +33,5 @@ def run(raw_dir: Path) -> Path:
     all_csvs = list(dest.rglob("*.csv"))
     logger.info("muhaddithat_acquired", file_count=len(all_csvs))
     write_manifest(dest, all_csvs)
+    emit_raw_new_for_manifest(source="muhaddithat", local_dir=dest, files=all_csvs)
     return dest
