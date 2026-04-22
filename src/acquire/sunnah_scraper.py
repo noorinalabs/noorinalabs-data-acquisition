@@ -20,6 +20,7 @@ import httpx
 from bs4 import BeautifulSoup, Tag
 
 from src.acquire.base import ensure_dir, select_first, write_manifest
+from src.messaging import emit_raw_new_for_manifest
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -306,6 +307,7 @@ def run(raw_dir: Path) -> Path | None:
 
         if saved_files:
             write_manifest(dest, saved_files)
+            emit_raw_new_for_manifest(source="sunnah_scraper", local_dir=dest, files=saved_files)
 
         logger.info(
             "sunnah_scraper_acquired",

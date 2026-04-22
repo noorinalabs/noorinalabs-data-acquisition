@@ -586,6 +586,7 @@ source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "httpx" },
+    { name = "kafka-python" },
     { name = "kaggle" },
     { name = "lxml" },
     { name = "neo4j" },
@@ -628,6 +629,7 @@ ml = [
 requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.12" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "kafka-python", specifier = ">=2.3.1" },
     { name = "kaggle", specifier = ">=1.6" },
     { name = "lxml", specifier = ">=5.1" },
     { name = "neo4j", specifier = ">=5.15" },
@@ -685,6 +687,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/41/f2/d34e8b3a08a9cc79a50b2208a93dce981fe615b64d5a4d4abee421d898df/joblib-1.5.3.tar.gz", hash = "sha256:8561a3269e6801106863fd0d6d84bb737be9e7631e33aaed3fb9ce5953688da3", size = 331603, upload-time = "2025-12-15T08:41:46.427Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/7b/91/984aca2ec129e2757d1e4e3c81c3fcda9d0f85b74670a094cc443d9ee949/joblib-1.5.3-py3-none-any.whl", hash = "sha256:5fc3c5039fc5ca8c0276333a188bbd59d6b7ab37fe6632daa76bc7f9ec18e713", size = 309071, upload-time = "2025-12-15T08:41:44.973Z" },
+]
+
+[[package]]
+name = "kafka-python"
+version = "2.3.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a4/98/cbecbe20ec9e4e6f978c42229e7c777f498eec5061f986b4acfa34a7ec46/kafka_python-2.3.1.tar.gz", hash = "sha256:90f1caa12d8faa9fd059852b0c73adf169b979279aa2e3ff370f9fe615d654b6", size = 357302, upload-time = "2026-04-09T21:10:22.861Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/78/83/6f79b5e03f7d259cba60d3e48c97f7b76a86d20486a515e8ffadea97434e/kafka_python-2.3.1-py2.py3-none-any.whl", hash = "sha256:4908865da9e57f0f966a83788c71cb0ae91c33451a26ab6e6984a00b15c6ed71", size = 326065, upload-time = "2026-04-09T21:10:24.685Z" },
 ]
 
 [[package]]
