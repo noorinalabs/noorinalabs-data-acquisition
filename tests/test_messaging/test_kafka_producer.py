@@ -1,4 +1,4 @@
-"""Tests for the ``pipeline.raw.new`` Kafka producer wrapper."""
+"""Tests for the ``pipeline.raw.landed`` Kafka producer wrapper."""
 
 from __future__ import annotations
 
@@ -151,6 +151,7 @@ class TestEmitRawNew:
         assert len(fake.sent) == 1
         topic, value, key = fake.sent[0]
         assert topic == DEFAULT_TOPIC
+        assert topic == "pipeline.raw.landed"
         assert key == b"raw/sunnah_api/2026-04-21/c.json"
         payload = json.loads(value)
         assert payload["source"] == "sunnah_api"
@@ -158,8 +159,13 @@ class TestEmitRawNew:
         assert payload["checksum_sha256"] == _VALID_SHA
         assert payload["acquired_at"] == "2026-04-21T12:00:00+00:00"
 
+    def test_default_topic_matches_canonical_constant(self) -> None:
+        from src.messaging.topics import PIPELINE_RAW_LANDED
+
+        assert DEFAULT_TOPIC == PIPELINE_RAW_LANDED == "pipeline.raw.landed"
+
     def test_custom_topic_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("KAFKA_RAW_NEW_TOPIC", "alt.raw.new")
+        monkeypatch.setenv("KAFKA_RAW_LANDED_TOPIC", "alt.raw.landed")
         fake = _FakeProducer()
         emit_raw_new(
             source="lk_corpus",
@@ -169,7 +175,7 @@ class TestEmitRawNew:
             checksum_sha256=_VALID_SHA,
             producer=fake,
         )
-        assert fake.sent[0][0] == "alt.raw.new"
+        assert fake.sent[0][0] == "alt.raw.landed"
 
     def test_returns_false_and_swallows_send_failure(self) -> None:
         fake = _FakeProducer(fail_on_send=True)

@@ -1,8 +1,9 @@
-"""Kafka producer for the ``pipeline.raw.new`` signal topic.
+"""Kafka producer for the ``pipeline.raw.landed`` signal topic.
 
 After an acquire connector lands a raw artifact in B2, emit one
-``pipeline.raw.new`` message per file so downstream pipeline workers
-(dedup, enrich, normalize, graph-load) can consume.
+``pipeline.raw.landed`` message per file so downstream pipeline workers
+(dedup, enrich, normalize, graph-load) can consume. The topic string
+is defined in :mod:`src.messaging.topics` as ``PIPELINE_RAW_LANDED``.
 
 Message schema (JSON, UTF-8, one message per file)
 ---------------------------------------------------
@@ -26,10 +27,10 @@ allowed to re-emit and is intentionally not deduplicated here
 
 Configuration (env)
 -------------------
-``KAFKA_BOOTSTRAP_SERVERS``   — comma-separated host:port list
-                                (e.g. ``kafka:9092`` locally,
-                                 ``broker-1:9092,broker-2:9092`` in prod)
-``KAFKA_RAW_NEW_TOPIC``       — topic name (default ``pipeline.raw.new``)
+``KAFKA_BOOTSTRAP_SERVERS``    — comma-separated host:port list
+                                 (e.g. ``kafka:9092`` locally,
+                                  ``broker-1:9092,broker-2:9092`` in prod)
+``KAFKA_RAW_LANDED_TOPIC``     — topic name (default ``pipeline.raw.landed``)
 
 If ``KAFKA_BOOTSTRAP_SERVERS`` is unset/empty the producer is a no-op —
 messages are logged at debug level and dropped. This keeps the acquire
@@ -69,6 +70,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from src.messaging.topics import PIPELINE_RAW_LANDED
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -82,7 +84,7 @@ __all__ = [
     "sha256_of_file",
 ]
 
-DEFAULT_TOPIC = "pipeline.raw.new"
+DEFAULT_TOPIC = PIPELINE_RAW_LANDED
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -98,7 +100,7 @@ RAW_NEW_MESSAGE_SCHEMA: dict[str, str] = {
 
 @dataclass(frozen=True, slots=True)
 class RawNewMessage:
-    """Typed payload for the ``pipeline.raw.new`` topic."""
+    """Typed payload for the ``pipeline.raw.landed`` topic."""
 
     source: str
     b2_key: str
@@ -136,7 +138,7 @@ def _bootstrap_servers() -> str:
 
 
 def _topic() -> str:
-    return os.environ.get("KAFKA_RAW_NEW_TOPIC", DEFAULT_TOPIC).strip() or DEFAULT_TOPIC
+    return os.environ.get("KAFKA_RAW_LANDED_TOPIC", DEFAULT_TOPIC).strip() or DEFAULT_TOPIC
 
 
 def _build_producer() -> Any:  # noqa: ANN401 — KafkaProducer has no public stub
@@ -172,7 +174,7 @@ def emit_raw_new(
     acquired_at: str | None = None,
     producer: Any | None = None,  # noqa: ANN401
 ) -> bool:
-    """Emit a single ``pipeline.raw.new`` message.
+    """Emit a single ``pipeline.raw.landed`` message.
 
     Emit is fire-and-forget — ``send()`` returns without blocking on the
     broker ACK. Callers that inject their own ``producer`` are responsible
@@ -256,7 +258,7 @@ def emit_raw_new_for_manifest(
     b2_prefix: str | None = None,
     acquired_at: str | None = None,
 ) -> int:
-    """Emit one ``pipeline.raw.new`` message per file.
+    """Emit one ``pipeline.raw.landed`` message per file.
 
     Computes the ``b2_key`` as ``<b2_prefix>/<relative-path>`` where
     ``b2_prefix`` defaults to ``raw/<source>/<YYYY-MM-DD>/``. ``size_bytes``
