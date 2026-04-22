@@ -37,10 +37,25 @@ stage runnable in dev/test environments without a running Kafka broker.
 
 Retry semantics
 ---------------
-``kafka-python`` applies its own bounded in-process retry (producer
-``retries=3``, linger_ms=100). Once exhausted, we log at ``error`` level
-and return — the acquire continues. Rationale: B2 is the source of
-truth; a missed Kafka emit can be reconciled by replaying keys from B2.
+``kafka-python`` applies its own bounded in-process retry. We configure
+``retries=3`` and ``retry_backoff_ms=500``. The wrapper does NOT add
+client-side jitter — if multiple connectors recover simultaneously they
+may briefly stampede the broker. This is acceptable at current scale
+(8 connectors, bounded throughput); revisit if connector count grows.
+
+Delivery semantics
+------------------
+Emit is fire-and-forget: ``send()`` returns without blocking on the
+broker ACK. Durability is guaranteed only by calling ``producer.flush()``
+before process exit. :func:`emit_raw_new_for_manifest` flushes the
+owned producer on its way out; callers that inject their own producer
+(or invoke :func:`emit_raw_new` one-off) must flush themselves to
+guarantee delivery.
+
+Rationale: a per-emit ``future.get()`` would serialize sends and defeat
+``linger_ms`` batching — 1k files would become 1k serial round-trips.
+B2 is the source of truth; a missed Kafka emit can be reconciled by
+replaying keys from B2.
 """
 
 from __future__ import annotations
@@ -48,6 +63,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -67,6 +83,8 @@ __all__ = [
 ]
 
 DEFAULT_TOPIC = "pipeline.raw.new"
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 RAW_NEW_MESSAGE_SCHEMA: dict[str, str] = {
     "source": "connector name (e.g. sunnah_api)",
@@ -88,6 +106,24 @@ class RawNewMessage:
     size_bytes: int
     acquired_at: str
     checksum_sha256: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source, str) or not self.source:
+            raise ValueError("source must be a non-empty string")
+        if not isinstance(self.b2_key, str) or not self.b2_key:
+            raise ValueError("b2_key must be a non-empty string")
+        if not isinstance(self.size_bytes, int) or isinstance(self.size_bytes, bool):
+            raise ValueError("size_bytes must be an int")
+        if self.size_bytes < 0:
+            raise ValueError("size_bytes must be >= 0")
+        if not isinstance(self.checksum_sha256, str) or not _SHA256_RE.match(self.checksum_sha256):
+            raise ValueError("checksum_sha256 must be a 64-char lowercase hex SHA-256 digest")
+        if not isinstance(self.acquired_at, str):
+            raise ValueError("acquired_at must be an ISO-8601 string")
+        try:
+            datetime.fromisoformat(self.acquired_at)
+        except ValueError as exc:
+            raise ValueError(f"acquired_at must be ISO-8601 parseable: {exc}") from exc
 
     def to_json(self) -> bytes:
         """Serialize to canonical JSON bytes (sorted keys, UTF-8)."""
@@ -119,6 +155,7 @@ def _build_producer() -> Any:  # noqa: ANN401 — KafkaProducer has no public st
         value_serializer=lambda v: v,  # we pass bytes already
         acks="all",
         retries=3,
+        retry_backoff_ms=500,
         linger_ms=100,
         request_timeout_ms=10_000,
         max_block_ms=5_000,
@@ -137,9 +174,15 @@ def emit_raw_new(
 ) -> bool:
     """Emit a single ``pipeline.raw.new`` message.
 
-    Returns ``True`` on successful emit (including producer no-op when
-    ``KAFKA_BOOTSTRAP_SERVERS`` is unset), ``False`` when emit was
-    attempted but failed. Never raises — failure is logged and swallowed
+    Emit is fire-and-forget — ``send()`` returns without blocking on the
+    broker ACK. Callers that inject their own ``producer`` are responsible
+    for calling ``producer.flush()`` to guarantee delivery. When this
+    function owns the producer (no injection, broker configured), it
+    flushes before returning so durability holds for the one-off path.
+
+    Returns ``True`` on successful enqueue (or producer no-op when
+    ``KAFKA_BOOTSTRAP_SERVERS`` is unset), ``False`` when the send call
+    itself raised. Never raises — failures are logged and swallowed
     (see module docstring § Retry semantics).
 
     Parameters
@@ -149,9 +192,9 @@ def emit_raw_new(
     acquired_at
         ISO-8601 timestamp. Defaults to now (UTC).
     producer
-        Injected producer — used only by tests. Production callers omit
-        this; a fresh producer is built per emit batch via
-        :func:`emit_raw_new_for_manifest`.
+        Injected producer — used by tests and by
+        :func:`emit_raw_new_for_manifest` to share a producer across
+        many per-file emits. Production one-off callers omit this.
     """
     msg = RawNewMessage(
         source=source,
@@ -177,10 +220,9 @@ def emit_raw_new(
             return True
 
     try:
-        future = producer.send(topic, value=msg.to_json(), key=b2_key.encode("utf-8"))
-        future.get(timeout=10)
+        producer.send(topic, value=msg.to_json(), key=b2_key.encode("utf-8"))
         logger.info(
-            "kafka_emit_ok",
+            "kafka_emit_enqueued",
             topic=topic,
             source=source,
             b2_key=b2_key,
@@ -200,7 +242,7 @@ def emit_raw_new(
     finally:
         if owns_producer:
             try:
-                producer.flush(timeout=5)
+                producer.flush(timeout=10)
                 producer.close(timeout=5)
             except Exception:  # noqa: BLE001
                 pass
@@ -229,11 +271,14 @@ def emit_raw_new_for_manifest(
     if not files:
         return 0
 
-    date_utc = (
-        datetime.now(UTC).strftime("%Y-%m-%d")
-        if acquired_at is None
-        else acquired_at[:10]  # ISO-8601 date prefix
-    )
+    if acquired_at is None:
+        date_utc = datetime.now(UTC).strftime("%Y-%m-%d")
+    else:
+        # Parse via fromisoformat (handles `Z` suffix on 3.11+) to extract
+        # a guaranteed YYYY-MM-DD date — slicing `acquired_at[:10]` would
+        # silently mis-slice non-ISO inputs.
+        iso = acquired_at.replace("Z", "+00:00") if acquired_at.endswith("Z") else acquired_at
+        date_utc = datetime.fromisoformat(iso).date().isoformat()
     prefix = (b2_prefix or f"raw/{source}/{date_utc}").rstrip("/")
 
     producer = _build_producer()

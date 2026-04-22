@@ -18,18 +18,20 @@ from src.messaging.kafka_producer import (
     sha256_of_file,
 )
 
+_VALID_SHA = "a" * 64
+
 
 class _FakeFuture:
-    def __init__(self, exc: Exception | None = None) -> None:
-        self._exc = exc
-
-    def get(self, timeout: int) -> None:
-        if self._exc is not None:
-            raise self._exc
+    """Sentinel returned by ``_FakeProducer.send``; never awaited on the hot path."""
 
 
 class _FakeProducer:
-    """Mimics the kafka.KafkaProducer API the wrapper uses."""
+    """Mimics the kafka.KafkaProducer API the wrapper uses.
+
+    The wrapper no longer calls ``future.get`` on emit (fire-and-forget);
+    failures surface via ``send()`` raising, which mirrors kafka-python's
+    behavior when the producer is closed or the buffer is full.
+    """
 
     def __init__(self, *, fail_on_send: bool = False) -> None:
         self.sent: list[tuple[str, bytes, bytes]] = []
@@ -39,7 +41,7 @@ class _FakeProducer:
 
     def send(self, topic: str, *, value: bytes, key: bytes) -> _FakeFuture:
         if self.fail_on_send:
-            return _FakeFuture(exc=RuntimeError("simulated kafka failure"))
+            raise RuntimeError("simulated kafka failure")
         self.sent.append((topic, value, key))
         return _FakeFuture()
 
@@ -58,7 +60,7 @@ class TestRawNewMessage:
             content_type="application/json",
             size_bytes=42,
             acquired_at="2026-04-21T00:00:00+00:00",
-            checksum_sha256="deadbeef",
+            checksum_sha256=_VALID_SHA,
         )
         raw = msg.to_json()
         assert isinstance(raw, bytes)
@@ -69,10 +71,54 @@ class TestRawNewMessage:
             "content_type": "application/json",
             "size_bytes": 42,
             "acquired_at": "2026-04-21T00:00:00+00:00",
-            "checksum_sha256": "deadbeef",
+            "checksum_sha256": _VALID_SHA,
         }
         # keys sorted
         assert list(decoded.keys()) == sorted(decoded.keys())
+
+
+class TestRawNewMessageValidation:
+    def _base_kwargs(self, **overrides: Any) -> dict[str, Any]:
+        kwargs = {
+            "source": "sunnah_api",
+            "b2_key": "raw/sunnah_api/2026-04-21/c.json",
+            "content_type": "application/json",
+            "size_bytes": 1,
+            "acquired_at": "2026-04-21T00:00:00+00:00",
+            "checksum_sha256": _VALID_SHA,
+        }
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_valid_payload_constructs(self) -> None:
+        RawNewMessage(**self._base_kwargs())
+
+    def test_negative_size_bytes_raises(self) -> None:
+        with pytest.raises(ValueError, match="size_bytes must be >= 0"):
+            RawNewMessage(**self._base_kwargs(size_bytes=-1))
+
+    def test_size_bytes_zero_is_allowed(self) -> None:
+        RawNewMessage(**self._base_kwargs(size_bytes=0))
+
+    def test_non_iso_acquired_at_raises(self) -> None:
+        with pytest.raises(ValueError, match="acquired_at must be ISO-8601"):
+            RawNewMessage(**self._base_kwargs(acquired_at="yesterday"))
+
+    def test_wrong_length_checksum_raises(self) -> None:
+        with pytest.raises(ValueError, match="checksum_sha256"):
+            RawNewMessage(**self._base_kwargs(checksum_sha256="deadbeef"))
+
+    def test_uppercase_checksum_raises(self) -> None:
+        with pytest.raises(ValueError, match="checksum_sha256"):
+            RawNewMessage(**self._base_kwargs(checksum_sha256=("A" * 64)))
+
+    def test_empty_source_raises(self) -> None:
+        with pytest.raises(ValueError, match="source must be a non-empty string"):
+            RawNewMessage(**self._base_kwargs(source=""))
+
+    def test_empty_b2_key_raises(self) -> None:
+        with pytest.raises(ValueError, match="b2_key must be a non-empty string"):
+            RawNewMessage(**self._base_kwargs(b2_key=""))
 
 
 class TestEmitRawNew:
@@ -86,7 +132,7 @@ class TestEmitRawNew:
             b2_key="raw/sunnah_api/2026-04-21/c.json",
             content_type="application/json",
             size_bytes=1,
-            checksum_sha256="abc",
+            checksum_sha256=_VALID_SHA,
         )
         assert ok is True
 
@@ -97,7 +143,7 @@ class TestEmitRawNew:
             b2_key="raw/sunnah_api/2026-04-21/c.json",
             content_type="application/json",
             size_bytes=10,
-            checksum_sha256="cafe",
+            checksum_sha256=_VALID_SHA,
             acquired_at="2026-04-21T12:00:00+00:00",
             producer=fake,
         )
@@ -109,7 +155,7 @@ class TestEmitRawNew:
         payload = json.loads(value)
         assert payload["source"] == "sunnah_api"
         assert payload["size_bytes"] == 10
-        assert payload["checksum_sha256"] == "cafe"
+        assert payload["checksum_sha256"] == _VALID_SHA
         assert payload["acquired_at"] == "2026-04-21T12:00:00+00:00"
 
     def test_custom_topic_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -120,7 +166,7 @@ class TestEmitRawNew:
             b2_key="raw/lk_corpus/2026-04-21/x.csv",
             content_type="text/csv",
             size_bytes=1,
-            checksum_sha256="f",
+            checksum_sha256=_VALID_SHA,
             producer=fake,
         )
         assert fake.sent[0][0] == "alt.raw.new"
@@ -132,10 +178,24 @@ class TestEmitRawNew:
             b2_key="raw/sunnah_api/2026-04-21/c.json",
             content_type="application/json",
             size_bytes=1,
-            checksum_sha256="abc",
+            checksum_sha256=_VALID_SHA,
             producer=fake,
         )
         assert ok is False  # failure is surfaced, not raised
+
+    def test_injected_producer_is_not_flushed_by_emit(self) -> None:
+        """Caller owns flush/close for injected producers — fire-and-forget semantics."""
+        fake = _FakeProducer()
+        emit_raw_new(
+            source="sunnah_api",
+            b2_key="raw/sunnah_api/2026-04-21/c.json",
+            content_type="application/json",
+            size_bytes=1,
+            checksum_sha256=_VALID_SHA,
+            producer=fake,
+        )
+        assert fake.flushed is False
+        assert fake.closed is False
 
     def test_builds_own_producer_and_closes_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
@@ -146,7 +206,7 @@ class TestEmitRawNew:
                 b2_key="raw/sunnah_api/2026-04-21/c.json",
                 content_type="application/json",
                 size_bytes=1,
-                checksum_sha256="abc",
+                checksum_sha256=_VALID_SHA,
             )
         assert ok is True
         assert build.call_count == 1
@@ -218,13 +278,63 @@ class TestEmitRawNewForManifest:
             def send(self, topic: str, *, value: bytes, key: bytes) -> _FakeFuture:
                 call_count["n"] += 1
                 if call_count["n"] == 2:
-                    return _FakeFuture(exc=RuntimeError("transient"))
+                    raise RuntimeError("transient")
                 return super().send(topic, value=value, key=key)
 
         flaky = _FlakyProducer()
         with patch("src.messaging.kafka_producer._build_producer", return_value=flaky):
             n = emit_raw_new_for_manifest(source="open_hadith", local_dir=tmp_path, files=files)
         assert n == 2  # a and c succeeded, b failed
+
+    def test_flush_happens_once_at_manifest_end_not_per_emit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The producer is flushed by the manifest helper on its way out —
+        not by each per-file emit — so ``linger_ms`` batching is preserved."""
+        monkeypatch.setenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+        files = self._make_files(tmp_path, ["a.json", "b.json", "c.json"])
+
+        flush_count = {"n": 0}
+
+        class _CountingProducer(_FakeProducer):
+            def flush(self, timeout: int) -> None:
+                flush_count["n"] += 1
+                super().flush(timeout)
+
+        counting = _CountingProducer()
+        with patch("src.messaging.kafka_producer._build_producer", return_value=counting):
+            n = emit_raw_new_for_manifest(source="sunnah_api", local_dir=tmp_path, files=files)
+        assert n == 3
+        # Exactly one flush at manifest end, NOT one per emit.
+        assert flush_count["n"] == 1
+        assert counting.closed is True
+
+    @pytest.mark.parametrize(
+        "iso_input",
+        [
+            "2026-04-22T03:27:33+00:00",
+            "2026-04-22T03:27:33Z",
+            "2026-04-22T03:27:33.123456+00:00",
+            "2026-04-22T03:27:33-05:00",  # non-UTC offset, date in UTC-neutral local form
+        ],
+    )
+    def test_b2_key_date_extracted_from_iso(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, iso_input: str
+    ) -> None:
+        """acquired_at parsing must yield YYYY-MM-DD via fromisoformat, not slicing."""
+        monkeypatch.setenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+        files = self._make_files(tmp_path, ["a.json"])
+        fake = _FakeProducer()
+        with patch("src.messaging.kafka_producer._build_producer", return_value=fake):
+            n = emit_raw_new_for_manifest(
+                source="sunnah_api",
+                local_dir=tmp_path,
+                files=files,
+                acquired_at=iso_input,
+            )
+        assert n == 1
+        key = fake.sent[0][2].decode()
+        assert key.startswith("raw/sunnah_api/2026-04-22/")
 
 
 class TestSha256AndContentType:
