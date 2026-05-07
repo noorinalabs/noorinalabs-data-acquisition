@@ -74,22 +74,45 @@ torch, camel-tools). If the box only needs to run acquire, drop the group:
 ### Acquire
 
 ```bash
-make acquire                            # all sources
-uv run isnad-ingest acquire --source=sunnah_api   # single source (if supported)
+make acquire                  # all sources via uv run isnad-ingest acquire
 ```
 
-Connector list (see `src/acquire/`):
+The `acquire` subcommand currently has **no per-source filter** — `_cmd_acquire`
+calls `run_all(raw_dir)` which iterates the full registry in
+`src/acquire/__init__.py::SOURCES`. To run a single source from the shell,
+invoke its module directly (e.g.
+`uv run python -c 'from pathlib import Path; from src.acquire import sunnah_api; sunnah_api.run(Path("./data/raw"))'`)
+or extend the CLI with a `--source` flag (the argparse subparser does not
+define one today).
 
-| Connector | Source | Auth | Output |
-|-----------|--------|------|--------|
-| `sunnah_api` | sunnah.com REST API | `SUNNAH_API_KEY` | `data/raw/sunnah_api/<date>/` |
-| `sunnah_scraper` | sunnah.com HTML fallback | none | `data/raw/sunnah_scraper/<date>/` |
-| `lk_corpus` | LK Hadith corpus (Git) | none | `data/raw/lk_corpus/<date>/` |
-| `fawaz` | Fawaz hadith dataset (Git) | none | `data/raw/fawaz/<date>/` |
-| `open_hadith` | OpenHadith repos | none | `data/raw/open_hadith/<date>/` |
-| `sanadset` | Sanadset Kaggle dataset | `KAGGLE_USERNAME`, `KAGGLE_KEY` | `data/raw/sanadset/<date>/` |
-| `muhaddithat` | Muhaddithat dataset | none | `data/raw/muhaddithat/<date>/` |
-| `thaqalayn` | Thaqalayn Shia hadith | none | `data/raw/thaqalayn/<date>/` |
+Connector list (see `src/acquire/__init__.py::SOURCES`). Note the local-disk
+subdir key (the registry-tuple key under which each connector calls
+`ensure_dir(raw_dir / "<key>")`) is **not** always the same string as the
+B2 source key emitted on the `pipeline.raw.landed` Kafka topic — both are
+listed below to avoid on-call confusion when correlating local files with
+B2 listings:
+
+| Connector module | Source | Auth | Local disk path | B2 source key (Kafka `source` field) |
+|------------------|--------|------|-----------------|--------------------------------------|
+| `sunnah_api` | sunnah.com REST API | `SUNNAH_API_KEY` | `data/raw/sunnah/` | `sunnah_api` |
+| `sunnah_scraper` | sunnah.com HTML fallback | none | `data/raw/sunnah_scraped/` | `sunnah_scraper` |
+| `lk_corpus` | LK Hadith corpus (Git) | none | `data/raw/lk/` | `lk_corpus` |
+| `fawaz` | Fawaz hadith dataset (Git) | none | `data/raw/fawaz/` | `fawaz` |
+| `open_hadith` | OpenHadith repos | none | `data/raw/open_hadith/` | `open_hadith` |
+| `sanadset` | Sanadset Kaggle dataset | `KAGGLE_USERNAME`, `KAGGLE_KEY` | `data/raw/sanadset/` | `sanadset` |
+| `muhaddithat` | Muhaddithat dataset | none | `data/raw/muhaddithat/` | `muhaddithat` |
+| `thaqalayn` | Thaqalayn Shia hadith | none | `data/raw/thaqalayn/` | `thaqalayn` |
+
+**Path-shape rule:** local disk uses a flat per-connector subdir
+(`data/raw/<registry-tuple-key>/...`) — there is **no** `<date>/` partition
+on local disk. The `<date>/` partition is constructed B2-side only, in
+`src/messaging/kafka_producer.py::emit_raw_new_for_manifest`, which sets
+`b2_prefix = f"raw/{source}/{YYYY-MM-DD}"` (UTC date of acquisition) and
+emits `b2_key = "{b2_prefix}/{relative-path-under-local-dir}"`. Worked
+example: a sunnah_api file lands at `data/raw/sunnah/collections.json` on
+disk, and the corresponding Kafka message references
+`b2_key=raw/sunnah_api/2026-04-21/collections.json` (B2 source key
+`sunnah_api`, B2 partition `2026-04-21`).
 
 Acquire is **idempotent**: if `dest.exists() and dest.stat().st_size > 0` the
 connector skips download (`src/acquire/base.py::download_file`). Pass
@@ -110,23 +133,32 @@ on the failing stage. For the Kafka-driven canonical path, only run
 
 ## Configuration
 
-`.env` is loaded by Pydantic Settings (`src/config.py`). All variables are
-documented in `.env.example`; the table below covers what on-call typically
-needs to touch.
+Configuration is loaded from two surfaces:
 
-| Variable | Required for | Default | Notes |
-|----------|--------------|---------|-------|
-| `NEO4J_URI` | `load`, `enrich` | `bolt://localhost:7687` | |
-| `NEO4J_USER` / `NEO4J_PASSWORD` | `load`, `enrich` | `neo4j` / `isnad_graph_dev` | |
-| `PG_DSN` | `load`, `enrich` | `postgresql://isnad:isnad_dev@localhost:5432/isnad_graph` | |
-| `SUNNAH_API_KEY` | `acquire/sunnah_api` | `""` | Empty → connector errors on first call |
-| `KAGGLE_USERNAME` / `KAGGLE_KEY` | `acquire/sanadset` | `""` | |
-| `DATA_RAW_DIR` | acquire | `./data/raw` | |
-| `DATA_STAGING_DIR` | parse | `./data/staging` | |
-| `DATA_CURATED_DIR` | resolve | `./data/curated` | |
-| `LOG_LEVEL` / `LOG_FORMAT` | always | `INFO` / `console` | structlog; set `json` in prod |
-| `KAFKA_BOOTSTRAP_SERVERS` | acquire emit | unset | **Unset → producer is a no-op**, messages are debug-logged and dropped (`src/messaging/kafka_producer.py`) |
-| `KAFKA_RAW_LANDED_TOPIC` | acquire emit | `pipeline.raw.landed` | Must match consumer topic in ingest-platform |
+- **`.env` via Pydantic Settings** (`src/config.py`) — Neo4j, Postgres,
+  Sunnah, Kaggle, data-dir, and logging vars. These are documented in
+  `.env.example`.
+- **`os.environ` directly** — Kafka producer settings
+  (`KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_RAW_LANDED_TOPIC`) are read by
+  `src/messaging/kafka_producer.py::_bootstrap_servers` /
+  `_topic` and are **not currently mirrored in `.env.example` or in the
+  Pydantic `Settings` model**. On-call setting these in prod must rely on
+  the deployment-side env-injection (see `noorinalabs-deploy`), not on
+  `.env`. Adding them to `.env.example` is tracked as a follow-up nit.
+
+| Variable | Required for | Default | Source | Notes |
+|----------|--------------|---------|--------|-------|
+| `NEO4J_URI` | `load`, `enrich` | `bolt://localhost:7687` | `.env` | |
+| `NEO4J_USER` / `NEO4J_PASSWORD` | `load`, `enrich` | `neo4j` / `isnad_graph_dev` | `.env` | |
+| `PG_DSN` | `load`, `enrich` | `postgresql://isnad:isnad_dev@localhost:5432/isnad_graph` | `.env` | |
+| `SUNNAH_API_KEY` | `acquire/sunnah_api` | `""` | `.env` | Empty → connector errors on first call |
+| `KAGGLE_USERNAME` / `KAGGLE_KEY` | `acquire/sanadset` | `""` | `.env` | |
+| `DATA_RAW_DIR` | acquire | `./data/raw` | `.env` | |
+| `DATA_STAGING_DIR` | parse | `./data/staging` | `.env` | |
+| `DATA_CURATED_DIR` | resolve | `./data/curated` | `.env` | |
+| `LOG_LEVEL` / `LOG_FORMAT` | always | `INFO` / `console` | `.env` | structlog; set `json` in prod |
+| `KAFKA_BOOTSTRAP_SERVERS` | acquire emit | unset | `os.environ` (not in `.env.example`) | **Unset → producer is a no-op**, messages are debug-logged and dropped (`src/messaging/kafka_producer.py`) |
+| `KAFKA_RAW_LANDED_TOPIC` | acquire emit | `pipeline.raw.landed` | `os.environ` (not in `.env.example`) | Must match consumer topic in ingest-platform |
 
 > **B2 / MinIO:** the canonical acquire emits `pipeline.raw.landed` whose
 > `b2_key` references `raw/<source>/<date>/<filename>`. The actual upload
@@ -149,13 +181,20 @@ landed under deploy#24) for the compose-up procedure and credential setup.
 
 After an acquire run:
 
-1. **Disk**: `data/raw/<source>/<date>/` is non-empty and the connector log
-   shows `download_skipped` only for re-runs of the same date.
+1. **Disk**: each connector's local subdir
+   `data/raw/<registry-tuple-key>/` (see the Acquire-section table for the
+   per-connector key — e.g. `data/raw/sunnah/`, `data/raw/lk/`,
+   `data/raw/sunnah_scraped/`) is non-empty, and the connector log shows
+   `download_skipped` only on re-runs of the same content. There is no
+   `<date>/` partition on local disk; date partitioning happens only on the
+   B2 side.
 2. **Manifest**: `find data/raw -name '.manifest.json'` is up to date for
    each source (manifest helpers live in `src/pipeline/manifest.py`).
 3. **B2 / MinIO** (when configured): list the bucket prefix
-   `noorinalabs-pipeline/raw/<source>/<YYYY-MM-DD>/` and check object count
-   matches local file count.
+   `noorinalabs-pipeline/raw/<b2-source-key>/<YYYY-MM-DD>/` (the
+   B2-source-key column from the Acquire table — e.g. `sunnah_api`,
+   `lk_corpus`, `sunnah_scraper` — **not** the local-disk subdir name) and
+   check object count matches local file count for that connector.
 4. **Kafka** (when configured): `pipeline.raw.landed` lag drops to 0 after
    downstream consumers process the batch. The producer is fire-and-forget
    and flushes on process exit; if the acquire process was `kill -9`'d
