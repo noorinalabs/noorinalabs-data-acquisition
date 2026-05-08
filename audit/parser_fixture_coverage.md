@@ -4,104 +4,111 @@
 **Auditor:** Sofia Cardoso (P3W7 Tier-1 audit)  
 **Wave:** P3W7  
 **Meta-issue:** noorinalabs/noorinalabs-main#300  
-**Charter ref:** `.claude/team/charter/hooks.md` § 5 Parser-Fixture Coverage Requirements
+**Charter ref:** `.claude/team/charter/hooks.md` § 5 Parser-Fixture Coverage Requirements  
+**Head SHA verified:** `49d52802` (via `gh api repos/.../git/trees/49d52802?recursive=1`)
+
+---
+
+## State Classification
+
+**data-acquisition is dispatcher-style (already-migrated / tier-2).**
+
+`.claude/hooks/` directory is absent at head SHA `49d52802`. No local hook files exist in the committed tree. All PreToolUse hooks are delegated via `settings.json` to absolute paths pointing at the parent repo (`noorinalabs-main/.claude/hooks/`). This is the already-migrated pattern — equivalent to Kofi's design-system and Mateo's user-service findings this wave.
+
+Tree evidence (full `.claude/` subtree at head SHA):
+```
+.claude/settings.json
+.claude/skills/...   (11 skill files)
+.claude/team/...     (charter, feedback_log, roster)
+# No .claude/hooks/ directory or files
+```
 
 ---
 
 ## Hook Inventory
 
-Hook discovery path: `.claude/hooks/`  
-Total hooks found: **2**
+Hook discovery path: `.claude/hooks/` (committed tree at head SHA)  
+**Local hook files found: 0**
 
-| # | File | Role |
-|---|------|------|
-| 1 | `validate_commit_identity.py` | PreToolUse — validates git commit `-c user.name`/`-c user.email` flags against roster |
-| 2 | `annunaki_log.py` | Shared utility — JSONL log writer called by blocking hooks; not a hook itself |
+All hooks active in this repo's sessions are sourced from the parent:
+
+| Hook (parent path) | Role | Parser-class |
+|--------------------|------|-------------|
+| `noorinalabs-main/.claude/hooks/validate_commit_identity.py` | PreToolUse — validates git commit `-c user.name`/`-c user.email` flags | YES |
+| `noorinalabs-main/.claude/hooks/block_no_verify.py` | PreToolUse — blocks `--no-verify` | Minimal (command presence check) |
+| `noorinalabs-main/.claude/hooks/block_git_config.py` | PreToolUse — blocks `git config` user changes | Minimal |
+| `noorinalabs-main/.claude/hooks/auto_set_env_test.py` | PreToolUse — sets test env vars | Non-parser |
+| `noorinalabs-main/.claude/hooks/validate_labels.py` | PreToolUse — validates issue/PR labels | YES |
+| `noorinalabs-main/.claude/hooks/validate_pr_ci_status.py` | PreToolUse — validates PR CI state | YES |
+
+(Source: `.claude/settings.json` `hooks.PreToolUse[*].command` fields at head SHA.)
 
 ---
 
 ## Classification
 
-### Hook 1: `validate_commit_identity.py`
+### Parser-class hooks active in this child's sessions
 
-**Parser-class: YES**
+**`validate_commit_identity.py` (parent)** — Parser-class YES. Full shlex-tokenized parser as of P3W6 fix. Covered by parent fixtures at `noorinalabs-main/.claude/hooks/tests/test_validate_commit_identity.py`. Those fixtures cover the parent code path — which IS the code path running in this child's sessions.
 
-This hook contains substantial input parsing:
+**`validate_labels.py` (parent)** — Parser-class YES (parses `gh issue create`/`gh pr create` argument lists to extract `--label` values). Coverage: deferred to parent-repo audit scope.
 
-- **Command detection** — `_is_git_commit_command()` uses regex to find `git ... commit` at command position; strips heredocs and quoted strings first.
-- **Flag extraction** — regex-based extraction of `-c user.name=` and `-c user.email=` values, including handling quoted vs unquoted values.
-- **Cross-repo detection** — `_detect_target_roster()` parses `cd <path>` out of the command string.
-- **Roster loading** — JSON parsing of `roster.json` files; merge logic for parent+child repos.
+**`validate_pr_ci_status.py` (parent)** — Parser-class YES (parses `gh pr merge` command and PR CI state). Coverage: deferred to parent-repo audit scope.
 
-**Known parser issues fixed in parent repo (not yet backported to child):**
+### Data-acquisition-specific input shapes not covered by parent fixtures
 
-The child-repo copy differs from the parent repo's current `validate_commit_identity.py`:
+The parent fixtures are written against generic roster and command inputs. This child repo has domain-specific input patterns that no parent fixture currently exercises:
 
-| Aspect | Child-repo version | Parent-repo current version |
-|--------|--------------------|------------------------------|
-| Tokenization | Regex-only (`re.search` on raw string) | `shlex`-based tokenization via `_shell_parse` module |
-| Flag extraction | `re.search(r'-c\s+user\.name=...')` on full command | `extract_dash_c_pairs()` from tokenized segment |
-| Parse-failure handling | Not present — regex always returns a result | Fail-closed: shlex failure on commit-shaped command blocks |
-| Input Language docblock | Absent | Present |
-| Repeated `-c user.name` | Undefined behavior (first match wins) | Last-value-wins (matches git semantics) |
-
-**Bug class**: The child copy exhibits the pre-P3W6 regex parser bugs that the parent fixed: unquoted `-c user.email=val` could slurp to EOL; nested heredoc-in-command-sub could mangle the parser. The parent version addresses these via `#226`, `#188`, and `#287`.
-
-### Hook 2: `annunaki_log.py`
-
-**Parser-class: NO** (utility/writer, not a hook)
-
-`annunaki_log.py` is a shared logging utility — it writes structured JSONL records. It does not parse input from the harness; it receives structured Python arguments from calling hooks. No input parsing requiring fixtures.
-
-The child copy also diverges from the parent:
-- Uses `datetime.now(timezone.utc)` instead of `datetime.now(UTC)` (cosmetic)
-- Lacks `append_jsonl_record()` helper (added in parent for writer hardening)
-- Raw `open()` write instead of the hardened append helper
-
-These are sync gaps (not parser bugs), tracked as a backport concern.
+| Input shape | Relevant hook | Fixture gap |
+|-------------|--------------|------------|
+| `cd /path/to/noorinalabs-data-acquisition && git commit ...` cross-repo commit | `validate_commit_identity` | Parent fixtures use `tempfile` synthetic repos; no fixture uses the real data-acquisition path shape with its merged roster (Dilara, Alejandra, etc.) |
+| `gh issue create --repo noorinalabs/noorinalabs-data-acquisition --label "tech-debt,p3-wave-7"` | `validate_labels` | No data-acquisition-specific label combination fixture |
+| `gh pr merge` against `deployments/phase-3/wave-7` head | `validate_pr_ci_status` | No wave-branch-specific input shape fixture |
 
 ---
 
 ## Coverage Table
 
-| Hook | Parser-class | Has local fixture tests | Parent fixtures exist | Gap severity |
-|------|-------------|------------------------|----------------------|-------------|
-| `validate_commit_identity.py` | YES | NO | YES (`.claude/hooks/tests/test_validate_commit_identity.py` in parent) | **HIGH** — child copy is a stale regex variant not covered by parent fixtures (different code path) |
-| `annunaki_log.py` | NO | N/A | N/A | None (utility, not parser-class) |
+| Hook (parent path) | Parser-class | Parent fixture coverage | Data-acq-specific fixture | Gap |
+|--------------------|-------------|------------------------|--------------------------|-----|
+| `validate_commit_identity.py` | YES | YES (comprehensive) | NO — no fixture exercises real data-acq roster or path | Low-medium: synthetic fixtures cover the code paths; real-roster shape is a documentation gap |
+| `validate_labels.py` | YES | Partial | NO | Medium: label set distinct from parent |
+| `validate_pr_ci_status.py` | YES | Partial | NO | Low: wave-branch shape not exercised |
+| `block_no_verify.py` | Minimal | YES | N/A | None |
+| `block_git_config.py` | Minimal | YES | N/A | None |
+| `auto_set_env_test.py` | Non-parser | N/A | N/A | None |
 
 ---
 
 ## Summary
 
-**1 parser-class hook, 0 fixture files in child repo.**
+**0 local hooks, 0 local fixture files. data-acquisition is already dispatcher-style.**
 
-The child repo's `validate_commit_identity.py` is a stale copy of the parent's hook — predating the `shlex` tokenization refactor that fixed multiple parser bugs (#226, #188, #287). The parent repo has a comprehensive fixture test suite at `.claude/hooks/tests/test_validate_commit_identity.py`, but:
+The repo delegates entirely to parent hooks — the correct pattern for a child repo that does not need specialized hook behavior. The parent's `validate_commit_identity.py` is the current shlex-tokenized version; its fixture suite covers the parser code paths that run in this child's sessions.
 
-1. Those tests import the parent's hook (with `_shell_parse` module), not the child's regex-only copy.
-2. The child's `.claude/hooks/` has no test directory or fixture files.
-3. The child's hook is the one actually invoked by `settings.json` references? — **No**: `settings.json` delegates to the parent's `validate_commit_identity.py` directly. The child's local copy is **dead code** — it is not registered anywhere and not invoked by the harness.
+Residual gap: no fixture exercises data-acquisition-specific input shapes (real roster names, data-acq label combinations, wave-7 branch head patterns). This is a parent-test augmentation gap, not a local-file gap.
 
 ---
 
 ## Pattern G Observations
 
-### G1: Dead code risk
+### G1: Already dispatcher (correctly migrated)
 
-The child-repo copies of `validate_commit_identity.py` and `annunaki_log.py` are not referenced in `settings.json` (which calls `python3 /home/parameterization/code/noorinalabs-main/.claude/hooks/validate_commit_identity.py` — the parent path). These files create a false impression of local coverage while being silently inert. They diverge from the parent and will continue to drift.
+data-acquisition has no `.claude/hooks/` directory — it is pure dispatcher-style. `settings.json` delegates to parent absolute paths. This is the correct architecture for child repos without specialized hook requirements. No action needed on local hook files (there are none).
 
-**Recommendation:** Either delete the child copies (settings.json already delegates to parent) or add a sync-check test that fails if child and parent diverge.
+**Note on initial audit error:** An earlier draft of this audit incorrectly described local hook files (`validate_commit_identity.py`, `annunaki_log.py`) as "stale pre-shlex dead code." Those files are present in the parent repo's main working tree and were visible during local filesystem enumeration, but they are NOT committed to the child repo's git tree. This audit now reflects the verified committed state at head SHA.
 
-### G2: No `tests/` under `.claude/hooks/`
+### G2: No child-specific fixture augmentation in parent
 
-Even for documentation/clarity, zero fixture files exist under `.claude/hooks/tests/`. The charter (§ 5) requires fixture coverage for parser-class hooks. If the child ever registers its own hooks (e.g., a data-source-manifest validator for B2 paths or Kafka topic names), there will be no test infrastructure ready.
+The parent fixture suite at `noorinalabs-main/.claude/hooks/tests/` does not include data-acquisition-specific shapes. If a child-specific parser bug surfaces (e.g., a commit from "Dilara Erdogan" with a path containing data-acquisition-specific characters, or a label combination unique to this repo), no fixture pins that shape.
+
+**Recommendation:** Parent-test augmentation — add data-acquisition-specific roster + label fixtures to the parent's test suite as a backport item.
 
 ---
 
-## Gap Issues Filed
+## Gap Issues
 
-See backport issues below for tracking.
-
-| Issue | Title | Labels |
-|-------|-------|--------|
-| [#43](https://github.com/noorinalabs/noorinalabs-data-acquisition/issues/43) | tech-debt(hooks): sync validate_commit_identity.py + annunaki_log.py with parent shlex-tokenized versions + add fixture tests | `tech-debt`, `p3-wave-7` |
-| [#44](https://github.com/noorinalabs/noorinalabs-data-acquisition/issues/44) | cleanup(hooks): remove or align dead-code child hook copies (not registered in settings.json) | `tech-debt`, `p3-wave-7` |
+| Issue | Title | Disposition |
+|-------|-------|------------|
+| [#43](https://github.com/noorinalabs/noorinalabs-data-acquisition/issues/43) | Re-scoped: augment parent fixture suite with data-acquisition-specific input shapes | Active — re-scoped body |
+| [#44](https://github.com/noorinalabs/noorinalabs-data-acquisition/issues/44) | Re-scoped: architectural decision record — does data-acq ever need local hooks? | Active — re-scoped body (no files to remove; decision record for future) |
