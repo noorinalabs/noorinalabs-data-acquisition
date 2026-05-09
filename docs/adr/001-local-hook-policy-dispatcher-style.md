@@ -9,11 +9,12 @@ confirmed that `noorinalabs-data-acquisition` has **no committed `.claude/hooks/
 Claude Code automation hooks are delegated to the parent canonical at
 `noorinalabs-main/.claude/hooks/` via absolute paths in this repo's `.claude/settings.json`.
 
-This is the *dispatcher-style* topology defined in the org-level
-`noorinalabs-main/.claude/team/charter/hooks.md § 5 Parser-Fixture Coverage Requirements`
-sub-clause being introduced under parent#311 (P3W8). Six of the seven child repos in the
-org are confirmed dispatcher-style; data-acquisition is one of them and has been since
-inception (it never had local hook files to remove).
+The org-level charter recognizes a *dispatcher-style* exemption category for children in
+this topology — see `charter/hooks.md § Parser-Fixture Coverage Requirements —
+dispatcher-children sub-clause` (pending noorinalabs/noorinalabs-main#311). The W7 audit
+(parent#300) and Aino's W8 charter edit (parent#311) name data-acquisition as one of the
+canonical dispatcher-style exemplars. This ADR ratifies the local effect of that
+charter rule for `noorinalabs-data-acquisition`; it does not redefine the rule.
 
 Issue #44 was filed in P3W7 originally framed as "remove dead-code child hook copies",
 then re-scoped during the W7 audit when committed-tree inspection confirmed there was
@@ -21,14 +22,15 @@ nothing to remove. The re-scoped framing asks the architectural question instead
 `noorinalabs-data-acquisition` ever introduce local hooks, and if so, what is the
 onboarding pattern?
 
-### Evidence at HEAD
+### Verification at HEAD
 
-At commit SHA `f43b84d19d1e38f4b964c6ed313ce5cc58584914` (the wave-8 base for this ADR):
+Applying the charter's dispatcher-style classification check (defined in parent#311) to
+this repo at the wave-8 base SHA `f43b84d19d1e38f4b964c6ed313ce5cc58584914`:
 
 ```bash
 gh api repos/noorinalabs/noorinalabs-data-acquisition/git/trees/f43b84d19d1e38f4b964c6ed313ce5cc58584914?recursive=1 \
   --jq '.tree[] | select(.path|startswith(".claude/hooks/")) | .path'
-# (no output — 0 entries under .claude/hooks/)
+# (no output — 0 entries under .claude/hooks/ → dispatcher-style per charter)
 ```
 
 `.claude/settings.json` references the parent canonical via absolute paths, e.g.:
@@ -47,8 +49,9 @@ requirement to apply to.
 **`noorinalabs-data-acquisition` remains dispatcher-style.** All Claude Code hook
 execution is delegated to the parent canonical at `noorinalabs-main/.claude/hooks/`. No
 local hook files are committed to this repository. Coverage obligations under
-`charter/hooks.md § 5 Parser-Fixture Coverage Requirements` are fulfilled by the parent's
-test suite per the dispatcher-children sub-clause (parent#311).
+`charter/hooks.md § Parser-Fixture Coverage Requirements` are fulfilled by the parent's
+test suite per the dispatcher-children sub-clause (pending parent#311 — citation will
+resolve to merged charter language).
 
 The door is explicitly left open to revisit this decision if a concrete domain-specific
 hook need emerges that the parent does not naturally cover.
@@ -86,7 +89,7 @@ hook need emerges that the parent does not naturally cover.
   If data-acquisition develops a domain-specific gate need, the team must either:
   1. **Revisit this ADR** (file a superseding ADR), add a `.claude/hooks/` directory with
      local files, and meet the per-child fixture requirement in
-     `charter/hooks.md § 5`; or
+     `charter/hooks.md § Parser-Fixture Coverage Requirements`; or
   2. **Propose a parent-side change** — extend the canonical hook in
      `noorinalabs-main/.claude/hooks/` with logic that conditionally activates for
      data-acquisition (e.g., via cwd-keyed dispatch).
@@ -112,7 +115,8 @@ This ADR should be revisited if any of the following surface:
 
 In any of those cases: file a superseding ADR (e.g., `ADR-00X: Local hooks for
 <purpose>`), update this file's status to `Superseded by ADR-00X`, and follow the
-parser-fixture coverage requirements in `charter/hooks.md § 5` for the new local hooks.
+per-child fixture obligations in `charter/hooks.md § Parser-Fixture Coverage Requirements`
+for the new local hooks.
 
 ## References
 
@@ -122,6 +126,6 @@ parser-fixture coverage requirements in `charter/hooks.md § 5` for the new loca
 - Parent charter sub-clause introducing dispatcher-style exemption:
   noorinalabs/noorinalabs-main#311
 - Parent charter file (canonical hook policy):
-  `noorinalabs-main/.claude/team/charter/hooks.md § 5 Parser-Fixture Coverage Requirements`
+  `noorinalabs-main/.claude/team/charter/hooks.md § Parser-Fixture Coverage Requirements`
 - Org-level conventions (hook table):
   `noorinalabs-main/ontology/conventions.md § Automation hooks (org-level)`
