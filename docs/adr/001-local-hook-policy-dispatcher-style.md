@@ -11,14 +11,17 @@ Claude Code automation hooks are delegated to the parent canonical at
 
 The org-level charter recognizes a *dispatcher-style* exemption category for children in
 this topology — see `charter/hooks.md § Hook Authorship Requirements § 5 Parser-Fixture
-Coverage Requirements — dispatcher-children sub-clause` (pending
-noorinalabs/noorinalabs-main#311, charter PR #334). The classification command used in
-"Verification at HEAD" below is the one being added to `charter/hooks.md § Hook Audit
-Protocol` (pending noorinalabs/noorinalabs-main#313, also bundled in PR #334). The W7
-audit (parent#300) and Aino's W8 charter edits (parent#311 + #313) name
-data-acquisition as one of the canonical dispatcher-style exemplars. This ADR ratifies
-the local effect of those charter rules for `noorinalabs-data-acquisition`; it does not
-redefine them.
+Coverage Requirements`, dispatcher-children sub-clause: "Children that delegate all hook
+execution to the parent canonical via `settings.json` are exempt from per-child fixture
+requirements. Coverage obligations are fulfilled by the parent's test suite." The
+classification command used in "Verification at HEAD" below is codified in
+`charter/hooks.md § Hook Audit Protocol`. Both edits landed in
+noorinalabs/noorinalabs-main PR #334 (merge_sha `c7fd964c24a197317a700c90cdb5a0140a6050be`,
+2026-05-09), which bundled #311 (dispatcher-children sub-clause) and #313 (Hook Audit
+Protocol). The W7 audit (parent#300) and Aino's W8 charter edits (parent#311 + #313)
+name data-acquisition as one of the canonical dispatcher-style exemplars. This ADR
+ratifies the local effect of those charter rules for `noorinalabs-data-acquisition`; it
+does not redefine them.
 
 Issue #44 was filed in P3W7 originally framed as "remove dead-code child hook copies",
 then re-scoped during the W7 audit when committed-tree inspection confirmed there was
@@ -28,9 +31,9 @@ onboarding pattern?
 
 ### Verification at HEAD
 
-Applying the charter's dispatcher-style classification check (defined under `§ Hook Audit
-Protocol`, pending parent#313) to this repo at the wave-8 base SHA
-`f43b84d19d1e38f4b964c6ed313ce5cc58584914`:
+Applying the charter's dispatcher-style classification check (defined under
+`charter/hooks.md § Hook Audit Protocol`, merged via parent#334) to this repo at the
+wave-8 base SHA `f43b84d19d1e38f4b964c6ed313ce5cc58584914`:
 
 ```bash
 gh api repos/noorinalabs/noorinalabs-data-acquisition/git/trees/f43b84d19d1e38f4b964c6ed313ce5cc58584914?recursive=1 \
@@ -56,8 +59,7 @@ execution is delegated to the parent canonical at `noorinalabs-main/.claude/hook
 local hook files are committed to this repository. Coverage obligations under
 `charter/hooks.md § Hook Authorship Requirements § 5 Parser-Fixture Coverage
 Requirements` are fulfilled by the parent's test suite per the dispatcher-children
-sub-clause (pending parent#311 — citation will resolve to merged charter language once
-PR #334 lands).
+sub-clause (merged via parent#334 on 2026-05-09).
 
 The door is explicitly left open to revisit this decision if a concrete domain-specific
 hook need emerges that the parent does not naturally cover.
