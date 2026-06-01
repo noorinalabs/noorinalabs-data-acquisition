@@ -114,3 +114,22 @@ jobs:
         run: uv run pytest tests/integration/ -v -m integration
         env:
           ENVIRONMENT: test
+
+  precommit-sync:
+    name: Pre-commit ⇄ CI sync-drift gate
+    runs-on: ubuntu-latest
+    # Fails the build if a check this CI enforces (ruff/mypy/pytest/…) is NOT
+    # mirrored in .pre-commit-config.yaml — the machine-enforcement that keeps
+    # the local-hooks mirror from rotting (Phase-3 end-state #6 / main#327).
+    # The gate is scoped to THIS workflow (the code-CI surface); docs.yml gates
+    # a separate artifact class and is intentionally not mirrored by pre-commit
+    # beyond the actionlint hook.
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Check pre-commit ⇄ ci.yml drift
+        run: python3 .claude/lib/pre_commit_ci_sync.py . --ci .github/workflows/ci.yml
