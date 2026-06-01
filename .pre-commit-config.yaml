@@ -1,22 +1,45 @@
-# Pre-commit hooks for noorinalabs-isnad-graph-ingestion
-# Install: pre-commit install
-# Docs: https://pre-commit.com/
+# Pre-commit hooks for noorinalabs-data-acquisition
+# Install:  uvx pre-commit install && uvx pre-commit install --hook-type pre-push
+# Docs:     https://pre-commit.com/
 #
-# Hook execution order (fail-fast, cheapest first):
-#   1. Ruff format check
-#   2. Ruff lint
-#   3. gitleaks (secret detection)
-#   4. mypy type checking
-#   5. Unit tests
+# This MIRRORS .github/workflows/ci.yml so a local commit/push fails fast
+# instead of surfacing a lint/format/type/test error only after a PR is opened
+# (Phase-3 end-state criterion #6 / noorinalabs-main#327). The pre-commit <-> CI
+# sync-drift gate (.claude/lib/pre_commit_ci_sync.py, wired as a CI job) verifies
+# this mirror stays in lockstep.
 #
-# Prerequisites:
-#   - Python 3.14+ with uv
+# Stage split:
+#   pre-commit (fast, every commit) — ruff-format, ruff-lint over the repo, plus
+#     gitleaks secret-scan and pinned actionlint on workflows.
+#   pre-push   (heavier, every push) — mypy strict + the pytest suite. These run
+#     the whole src/ + tests surface, so they're push-time not commit-time to
+#     keep the commit loop snappy while still catching everything before the
+#     code leaves the machine.
+#
+# CI parity notes (data-acquisition specifics):
+#   * CI runs `uv run ruff/mypy/pytest`; the heavier local hooks use `uv run`
+#     too so the exact pinned tool versions from uv.lock run locally, never a
+#     stray global ruff/mypy. ruff itself runs via the ruff-pre-commit mirror,
+#     pinned to v0.15.11 to match the org-canonical ruff version (parent
+#     noorinalabs-main + isnad-graph pin the same) — bump in lockstep.
+#   * pytest MUST run with ENVIRONMENT=test (the repo's test env-guard /
+#     conftest require it); the entry sets it inline. Integration tests require
+#     external services and run in CI only (the `-m "not integration"` filter
+#     here mirrors ci.yml's unit `test` job).
+#   * actionlint runs via the rhysd/actionlint pre-commit mirror pinned to
+#     v1.7.12 so the same workflow-lint runs locally that docs.yml runs in CI.
+#
+# The kind-level mirror (ruff-lint, ruff-format, mypy, pytest present on both
+# sides) is enforced in CI by `.claude/lib/pre_commit_ci_sync.py` — if a future
+# edit drops one side, that gate fails the build. The gate is scoped to ci.yml
+# (the code-CI workflow); docs.yml gates a separate artifact class (markdown/
+# config/actionlint) that pre-commit covers via the actionlint mirror.
 
 repos:
-  # --- Ruff formatter & linter ---
+  # --- Ruff formatter & linter (mirror of ci.yml Lint job) ---
   # ruff-format runs first so format fixes don't trigger re-lint.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.11.6
+    rev: v0.15.11
     hooks:
       - id: ruff-format
         name: ruff-format
@@ -31,22 +54,29 @@ repos:
       - id: gitleaks
         name: gitleaks
 
-  # --- Local hooks (mypy, tests) ---
+  # --- Workflow lint (pinned actionlint mirror; same lint docs.yml runs in CI) ---
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+        name: actionlint
+
+  # --- Heavier checks run at pre-push (mirror CI's Type Check + Test jobs).
+  #     Run as `local`/`system` hooks via `uv run` so the pinned tools from
+  #     uv.lock are used and never drift from CI. ---
   - repo: local
     hooks:
       - id: mypy
-        name: mypy
+        name: mypy-strict (pre-push)
         entry: uv run mypy src/
         language: system
         pass_filenames: false
-        types: [python]
-        stages: [pre-commit]
-
-      - id: pytest-unit
-        name: pytest-unit
+        always_run: true
+        stages: [pre-push]
+      - id: pytest
+        name: pytest (pre-push)
         entry: bash -c 'ENVIRONMENT=test uv run pytest tests/ -x --tb=short -q -m "not integration"'
         language: system
         pass_filenames: false
-        stages: [pre-commit]
-
-      # Integration tests require external services — run in CI only.
+        always_run: true
+        stages: [pre-push]
