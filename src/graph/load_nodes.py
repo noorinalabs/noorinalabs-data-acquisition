@@ -142,6 +142,12 @@ def _load_narrators(
 # Hadith loader
 # ---------------------------------------------------------------------------
 
+# NOTE (#35, ratified P3W13): book_number / chapter_number / hadith_number are
+# positional facts of a hadith's place *within a collection*, so they live on the
+# APPEARS_IN edge (see load_edges.py ``_APPEARS_IN_QUERY``), NOT on the Hadith node.
+# The Kafka ingest-platform normalize path already complies; this legacy loader is
+# reconciled here. The staging schema still carries these columns — they feed the
+# edge loader — they are simply no longer copied onto the node.
 _HADITH_MERGE = """\
 UNWIND $batch AS row
 MERGE (n:Hadith {id: row.id})
@@ -152,10 +158,7 @@ SET n.matn_ar      = row.matn_ar,
     n.grade        = row.grade,
     n.source_corpus = row.source_corpus,
     n.sect         = row.sect,
-    n.collection_name = row.collection_name,
-    n.book_number  = row.book_number,
-    n.chapter_number = row.chapter_number,
-    n.hadith_number = row.hadith_number
+    n.collection_name = row.collection_name
 """
 
 
@@ -201,9 +204,8 @@ def _load_hadiths(
                     "source_corpus": _val(row, "source_corpus", ""),
                     "sect": _val(row, "sect", ""),
                     "collection_name": _val(row, "collection_name", ""),
-                    "book_number": _val(row, "book_number"),
-                    "chapter_number": _val(row, "chapter_number"),
-                    "hadith_number": _val(row, "hadith_number"),
+                    # book/chapter/hadith_number intentionally omitted — they belong
+                    # on the APPEARS_IN edge, not the Hadith node (#35). See _HADITH_MERGE.
                 }
             )
         if batch:

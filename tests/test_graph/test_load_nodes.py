@@ -114,6 +114,29 @@ class TestLoadHadiths:
         assert len(hadith_batches) >= 1
         assert hadith_batches[0][0]["id"] == "hdt:bukhari-1"
 
+    def test_node_omits_collection_position_props(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """book/chapter/hadith_number live on the APPEARS_IN edge, not the node (#35)."""
+        write_hadiths(
+            staging_dir,
+            [{"source_id": "bukhari-1", "book_number": 1, "chapter_number": 1, "hadith_number": 1}],
+        )
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        hadith_batches = [
+            batch
+            for _query, batch in mock_client.calls
+            if isinstance(batch, list)
+            and batch
+            and "id" in batch[0]
+            and batch[0]["id"].startswith("hdt:")
+        ]
+        assert len(hadith_batches) >= 1
+        row = hadith_batches[0][0]
+        assert "book_number" not in row
+        assert "chapter_number" not in row
+        assert "hadith_number" not in row
+
     def test_invalid_source_id_skipped(
         self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
     ) -> None:
