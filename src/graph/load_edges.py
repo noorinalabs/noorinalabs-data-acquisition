@@ -279,7 +279,7 @@ MATCH (c:Collection {id: row.collection_id})
 MERGE (h)-[:APPEARS_IN {
     book_number: row.book_number,
     chapter_number: row.chapter_number,
-    hadith_number: row.hadith_number
+    hadith_number_in_book: row.hadith_number
 }]->(c)
 """
 

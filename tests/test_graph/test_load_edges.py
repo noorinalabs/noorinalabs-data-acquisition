@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from src.graph.load_edges import EdgeLoadResult, _build_chain_pairs, load_all_edges
+from src.graph.load_edges import (
+    _APPEARS_IN_QUERY,
+    EdgeLoadResult,
+    _build_chain_pairs,
+    load_all_edges,
+)
 from tests.test_graph.conftest import (
     MockNeo4jClient,
     write_hadiths,
@@ -197,6 +202,13 @@ class TestLoadAppearsIn:
         ai_result = results[2]
         assert ai_result.edge_type == "APPEARS_IN"
         assert ai_result.created == 1
+
+    def test_appears_in_edge_uses_canonical_property_key(self) -> None:
+        # The APPEARS_IN edge property MUST be the ig#935-canonical
+        # ``hadith_number_in_book`` (matches AppearsIn model + isnad-graph
+        # src/models/edges.py), NOT the legacy bare ``hadith_number`` (da#65).
+        assert "hadith_number_in_book: row.hadith_number" in _APPEARS_IN_QUERY
+        assert "hadith_number:" not in _APPEARS_IN_QUERY
 
     def test_missing_collection_name_skipped(
         self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
