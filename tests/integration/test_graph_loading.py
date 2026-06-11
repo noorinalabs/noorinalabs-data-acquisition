@@ -158,9 +158,18 @@ SAMPLE_HADITHS = [
     },
 ]
 
+# NOTE: ``collection_id`` here MUST be the corpus-qualified ``{corpus}:{name}``
+# form, because that is the key the APPEARS_IN edge loader reconstructs from each
+# hadith's ``source_corpus`` + ``collection_name`` (see load_edges.py
+# ``_load_appears_in``: ``col:{corpus}:{name}``) and matches against the
+# Collection node id (load_nodes.py: ``col:{collection_id}``). Plain ids like
+# "bukhari" produce node ``col:bukhari`` while the edge loader looks for
+# ``col:sunnah:bukhari`` — the endpoints never match, so ZERO APPEARS_IN edges
+# are created and the prior ``count(r) >= 0`` assertion silently passed on an
+# empty graph (#69).
 SAMPLE_COLLECTIONS = [
     {
-        "collection_id": "bukhari",
+        "collection_id": "sunnah:bukhari",
         "name_ar": "صحيح البخاري",
         "name_en": "Sahih al-Bukhari",
         "compiler_name": "Muhammad ibn Ismail al-Bukhari",
@@ -170,7 +179,7 @@ SAMPLE_COLLECTIONS = [
         "source_corpus": "sunnah",
     },
     {
-        "collection_id": "muslim",
+        "collection_id": "sunnah:muslim",
         "name_ar": "صحيح مسلم",
         "name_en": "Sahih Muslim",
         "compiler_name": "Muslim ibn al-Hajjaj",
@@ -180,7 +189,7 @@ SAMPLE_COLLECTIONS = [
         "source_corpus": "sunnah",
     },
     {
-        "collection_id": "tirmidhi",
+        "collection_id": "sunnah:tirmidhi",
         "name_ar": "سنن الترمذي",
         "name_en": "Jami at-Tirmidhi",
         "compiler_name": "Abu Isa al-Tirmidhi",
@@ -409,27 +418,34 @@ class TestEdgeLoading:
         load_all_nodes(neo4j_client, staging, curated, strict=False)
         edge_results = load_all_edges(neo4j_client, staging, curated, strict=False)
 
-        # APPEARS_IN should be created for hadiths with matching collections
+        # The loader returns exactly one APPEARS_IN *result object* (one per edge
+        # type), and it must report edges actually created — not a no-op. The
+        # 3 sample hadiths (2 bukhari + 1 muslim) all match a loaded collection,
+        # so 3 edges are expected.
         appears_in = [r for r in edge_results if r.edge_type == "APPEARS_IN"]
         assert len(appears_in) == 1
+        assert appears_in[0].created == 3
 
-        # Read the edge back from the real graph and assert on the property key
+        # Read the edges back from the real graph and assert on the property key
         # itself, not just on edge existence. A bare ``count(r) >= 0`` is always
-        # true and passes regardless of how the property is named, so it gives no
-        # regression protection against a key rename (#69 — PR #68 renamed the key
-        # to the ig#935-canonical ``hadith_number_in_book``, guarded only by a unit
-        # string-match on the Cypher).
+        # true: it passes regardless of how the property is named AND even when
+        # ZERO edges were persisted, so it gives no regression protection against
+        # a key rename (#69 — PR #68 renamed the key to the ig#935-canonical
+        # ``hadith_number_in_book``, guarded only by a unit string-match on the
+        # Cypher) and previously masked an empty-graph bug.
         rows = neo4j_client.execute_read(
             "MATCH ()-[r:APPEARS_IN]->() "
             "RETURN keys(r) AS keys, r.hadith_number_in_book AS hadith_number_in_book"
         )
-        assert len(rows) == 1
-        # The canonical key MUST be present on the actual edge ...
-        assert "hadith_number_in_book" in rows[0]["keys"]
-        # ... carry a populated value (not merely a declared-but-null key) ...
-        assert rows[0]["hadith_number_in_book"] is not None
-        # ... and the pre-#68 ``hadith_number`` key MUST NOT linger.
-        assert "hadith_number" not in rows[0]["keys"]
+        # Edges must actually exist in the graph (count agrees with the loader) ...
+        assert len(rows) == 3
+        for row in rows:
+            # ... the canonical key MUST be present on every edge ...
+            assert "hadith_number_in_book" in row["keys"]
+            # ... carry a populated value (not a declared-but-null key) ...
+            assert row["hadith_number_in_book"] is not None
+            # ... and the pre-#68 ``hadith_number`` key MUST NOT linger.
+            assert "hadith_number" not in row["keys"]
 
     def test_graded_by_edges(self, neo4j_client: Neo4jClient, tmp_path: Path) -> None:
         staging, curated = _write_staging_data(tmp_path)
