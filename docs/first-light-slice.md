@@ -24,6 +24,10 @@ in CI without network access. It is the same sample that da#71 verified.
 | Edges  | 47 `APPEARS_IN` (hadith → collection), 0 missing endpoints |
 | Grading | 0 (riyadussalihin grades are not exposed in the scraped HTML) |
 
+These exact counts were loaded into the **staging Neo4j** (`noorinalabs-neo4j-1`,
+v5.26.25) on 2026-06-10 — the documented verification query below returns
+`riyadussalihin, 47` live, and the staging API `/health` reports `neo4j: up`.
+
 ## Run it
 
 ### Offline (acquire + parse only; no Neo4j)
@@ -52,6 +56,25 @@ uv run python scripts/first_light/run_slice.py --live --collection riyadussalihi
 ```
 
 The loader is idempotent (`MERGE` on `id`), so re-running is safe.
+
+> **Known loader bug surfaced by this slice (da#73, 2026-06-10).** The Phase-3
+> edge loader's `_APPEARS_IN_QUERY` puts `hadith_number_in_book: row.hadith_number`
+> **inside the relationship `MERGE` pattern**. Neo4j refuses to `MERGE` a
+> relationship with a `null` property value:
+>
+> ```text
+> Cannot merge the following relationship because of null property value for
+> 'hadith_number_in_book': (h)-[:APPEARS_IN {hadith_number_in_book: null}]->(c)
+> ```
+>
+> Because the scraper does not extract `hadith_number` (da#72), **every** scraped
+> hadith has `hadith_number = null`, so the real `isnad-ingest load` aborts on the
+> APPEARS_IN stage. The in-process mock test suite did not catch this (the mock
+> counts batch rows; it does not enforce Neo4j's MERGE-null-property rule). The
+> first-light staging load below was completed with a **null-safe** edge variant
+> (`MERGE (h)-[r:APPEARS_IN]->(c) SET r.hadith_number_in_book = ...`). The loader
+> fix is tracked separately (it touches the asserted MERGE contract in main#139
+> and the edge-key assertions in #69/#74) and is **not** changed in this slice PR.
 
 ## Verify in Neo4j (Cypher)
 
