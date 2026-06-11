@@ -207,9 +207,12 @@ class TestLoadAppearsIn:
         # The APPEARS_IN edge property MUST be the ig#935-canonical
         # ``hadith_number_in_book`` mapped from ``row.hadith_number`` (matches
         # AppearsIn model + isnad-graph src/models/edges.py), NOT the legacy bare
-        # ``hadith_number`` (da#65). Post-da#77 it is SET after the MERGE, not a
-        # MERGE-key property, so assert the SET form.
-        assert "r.hadith_number_in_book = row.hadith_number" in _APPEARS_IN_QUERY
+        # ``hadith_number`` (da#65). Post-da#77 it is SET after the MERGE with the
+        # streaming path's coalesce-preserve contract, so assert that SET form.
+        assert (
+            "r.hadith_number_in_book = coalesce(row.hadith_number, r.hadith_number_in_book)"
+            in _APPEARS_IN_QUERY
+        )
         # The legacy bare ``hadith_number`` edge key must never appear.
         assert "hadith_number:" not in _APPEARS_IN_QUERY
 

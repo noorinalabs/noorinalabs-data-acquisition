@@ -278,16 +278,22 @@ def _load_narrated(
 # not part of its key. They are therefore SET after the MERGE, never inside the
 # MERGE pattern (da#77): Neo4j refuses to MERGE a relationship with a null
 # property value, and the scraper leaves ``hadith_number`` null until da#72, so a
-# keyed-on-properties MERGE aborts the whole load on real scraped data. SET is
-# null-safe and keeps dedup correct (one APPEARS_IN per hadith->collection).
+# keyed-on-properties MERGE aborts the whole load on real scraped data.
+#
+# The SET uses the streaming ingest path's coalesce-preserve contract
+# (ingest-platform ``workers/ingest/processor.py _build_edge_cypher``:
+# ``r.<f> = coalesce(row.<f>, r.<f>)``) so the two ingest paths converge byte-for-
+# byte on idempotency: a row with an explicit-null positional value preserves any
+# value already on the edge rather than clearing it. This keeps dedup correct
+# (one APPEARS_IN per hadith->collection) and is null-safe.
 _APPEARS_IN_QUERY = """\
 UNWIND $batch AS row
 MATCH (h:Hadith {id: row.hadith_id})
 MATCH (c:Collection {id: row.collection_id})
 MERGE (h)-[r:APPEARS_IN]->(c)
-SET r.book_number = row.book_number,
-    r.chapter_number = row.chapter_number,
-    r.hadith_number_in_book = row.hadith_number
+SET r.book_number = coalesce(row.book_number, r.book_number),
+    r.chapter_number = coalesce(row.chapter_number, r.chapter_number),
+    r.hadith_number_in_book = coalesce(row.hadith_number, r.hadith_number_in_book)
 """
 
 _APPEARS_IN_CHECK = """\
