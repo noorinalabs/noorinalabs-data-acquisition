@@ -11,6 +11,7 @@ Output directory: ``data/raw/sunnah_scraped/``
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,28 @@ USER_AGENT = "isnad-graph/1.0 (hadith-research)"
 
 # CSS selectors with fallbacks, ordered by preference.
 # If sunnah.com redesigns, add new selectors at the front of each list.
+#
+# Hadith number: sunnah.com's current layout no longer exposes a bare
+# ``.hadith_num`` span.  Both numbers we care about live in the
+# ``table.hadith_reference`` block at the bottom of each container, e.g.
+#     Reference         : Riyad as-Salihin 680   (collection-wide)
+#     In-book reference : Book 1, Hadith 1        (book + in-book ordinal)
+# We want the IN-BOOK ordinal (1) for ``hadith_number`` because the downstream
+# APPEARS_IN edge maps it into ``hadith_number_in_book`` (documented as "Hadith
+# number within the book" — da#77).  The in-book ordinal is unique within a
+# book, so ``source_id = sunnah:<coll>:<book>:<chapter>:<ordinal>`` stays
+# collision-free.  If the "In-book reference" row is absent we fall back to the
+# collection-wide reference (sticky label / link href) so source_id keying still
+# gets a non-null, per-collection-unique value, then to the legacy span.
+HADITH_REFERENCE_SELECTORS = ["table.hadith_reference"]
+HADITH_NUMBER_STICKY_SELECTORS = [".hadith_reference_sticky"]
+HADITH_NUMBER_LINK_SELECTORS = ["table.hadith_reference tr td a[href]"]
 HADITH_NUMBER_SELECTORS = [".hadith_reference .hadith_num", ".hadithNar498"]
+
+# In-book reference row: "In-book reference : Book 1, Hadith 1".
+_IN_BOOK_REF_RE = re.compile(
+    r"In-book reference\s*:?\s*Book\s+(\d+)\s*,\s*Hadith\s+(\d+)", re.IGNORECASE
+)
 ARABIC_TEXT_SELECTORS = [".arabic_hadith_full", ".text_details .arabic_text_details"]
 ENGLISH_TEXT_SELECTORS = [".english_hadith_full", ".text_details .english_hadith_full"]
 GRADE_SELECTORS = [".hadith_grade", ".hadith-grade"]
@@ -85,17 +107,69 @@ def _fetch_page(client: httpx.Client, url: str) -> BeautifulSoup | None:
         return None
 
 
-def _extract_hadith_from_row(row: Tag) -> dict[str, Any] | None:
-    """Extract a single hadith record from a hadith container element."""
-    # Hadith number
+def _extract_in_book_ref(row: Tag) -> tuple[int | None, int | None]:
+    """Extract ``(book_number, in_book_ordinal)`` from the reference table.
+
+    Reads the "In-book reference : Book N, Hadith M" row of
+    ``table.hadith_reference``.  Returns ``(None, None)`` when that row is
+    absent (e.g. a collection whose pages omit it).
+    """
+    ref_tag = select_first(row, HADITH_REFERENCE_SELECTORS)
+    if ref_tag is None:
+        return None, None
+    match = _IN_BOOK_REF_RE.search(ref_tag.get_text(" ", strip=True))
+    if not match:
+        return None, None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _extract_collection_ref_number(row: Tag) -> int | None:
+    """Extract the collection-wide reference number (e.g. 680).
+
+    Fallback for ``hadith_number`` when the in-book ordinal is unavailable: it
+    is unique per collection, so source_id keying still gets a non-null value.
+
+    1. ``.hadith_reference_sticky`` label — trailing number ("... 680").
+    2. ``table.hadith_reference`` reference link — ``href="/<coll>:680"``.
+    3. Legacy ``.hadith_num`` / ``.hadithNar498`` span (pre-redesign markup).
+    """
+    # 1. Sticky reference label: "<Collection Name> <number>".
+    sticky_tag = select_first(row, HADITH_NUMBER_STICKY_SELECTORS)
+    if sticky_tag:
+        match = re.search(r"(\d+)\s*$", sticky_tag.get_text(strip=True))
+        if match:
+            return int(match.group(1))
+
+    # 2. Reference link href: "/<collection>:<number>" (or "...#<number>").
+    link_tag = select_first(row, HADITH_NUMBER_LINK_SELECTORS)
+    if link_tag:
+        href = link_tag.get("href", "")
+        if isinstance(href, str):
+            match = re.search(r"[:#](\d+)\s*$", href)
+            if match:
+                return int(match.group(1))
+
+    # 3. Legacy bare-number span.
     num_tag = select_first(row, HADITH_NUMBER_SELECTORS)
-    hadith_number: int | None = None
     if num_tag:
         text = num_tag.get_text(strip=True).replace(":", "").strip()
         try:
-            hadith_number = int(text)
+            return int(text)
         except ValueError:
             pass
+
+    return None
+
+
+def _extract_hadith_from_row(row: Tag) -> dict[str, Any] | None:
+    """Extract a single hadith record from a hadith container element."""
+    # Hadith number: prefer the IN-BOOK ordinal (what hadith_number_in_book
+    # promises downstream); fall back to the collection-wide reference so
+    # source_id keying still gets a non-null, per-collection-unique value.
+    book_number, in_book_ordinal = _extract_in_book_ref(row)
+    hadith_number = (
+        in_book_ordinal if in_book_ordinal is not None else _extract_collection_ref_number(row)
+    )
 
     # Arabic text
     ar_tag = select_first(row, ARABIC_TEXT_SELECTORS)
@@ -114,6 +188,9 @@ def _extract_hadith_from_row(row: Tag) -> dict[str, Any] | None:
 
     return {
         "hadith_number": hadith_number,
+        # Book number parsed from the in-book reference ("Book N, ..."); the
+        # caller falls back to the page URL's book number when this is None.
+        "book_number": book_number,
         "text_ar": text_ar,
         "text_en": text_en,
         "grade": grade,
@@ -173,7 +250,10 @@ def _scrape_book_page(
 
         record = _extract_hadith_from_row(row)
         if record is not None:
-            record["book_number"] = book_number
+            # Prefer the book number parsed from the in-book reference; fall
+            # back to the page URL's book number when the row was absent.
+            if record.get("book_number") is None:
+                record["book_number"] = book_number
             record["chapter_number"] = current_chapter_number
             record["chapter_name_ar"] = chapter_name_ar
             record["chapter_name_en"] = chapter_name_en
