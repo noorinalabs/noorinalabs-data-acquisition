@@ -12,6 +12,7 @@ isnad
 isnads
 hadith
 hadiths
+matn
 narrator
 narrators
 chronospatial
@@ -112,3 +113,4 @@ fawaz
 sanadset
 muhaddithat
 thaqalayn
+riyadussalihin
