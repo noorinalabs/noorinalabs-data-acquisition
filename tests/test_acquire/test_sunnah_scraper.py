@@ -10,8 +10,9 @@ import httpx
 
 from src.acquire.sunnah_scraper import (
     SCRAPE_COLLECTIONS,
+    _extract_collection_ref_number,
     _extract_hadith_from_row,
-    _extract_hadith_number,
+    _extract_in_book_ref,
     _get_book_numbers,
     _scrape_book_page,
     run,
@@ -190,25 +191,59 @@ class TestRun:
 
 
 # Container markup matching sunnah.com's CURRENT layout (no bare `.hadith_num`
-# span). Regression guard for da#72: the reference number now lives in the
-# `.hadith_reference_sticky` label and the `table.hadith_reference` link href.
+# span). The reference table carries BOTH numbers: the collection-wide ref in
+# the first row / sticky label, and the in-book ordinal in the "In-book
+# reference" row. da#72 extracts the IN-BOOK ordinal into `hadith_number` so the
+# downstream APPEARS_IN `hadith_number_in_book` edge prop is semantically honest
+# (da#77); the collection-wide ref is a non-null fallback for source_id keying.
 CURRENT_MARKUP_HADITH_HTML = """
 <div class="actualHadithContainer">
   <div class="hadith_reference_sticky">Riyad as-Salihin 680</div>
   <div class="english_hadith_full">English text</div>
   <div class="arabic_hadith_full arabic">عربي</div>
   <div class="bottomItems">
-    <table class="hadith_reference"><tr>
-      <td><b>Reference</b></td>
-      <td>: <a href="/riyadussalihin:680">Riyad as-Salihin 680</a></td>
-    </tr></table>
+    <table class="hadith_reference">
+      <tr><td><b>Reference</b></td>
+        <td>: <a href="/riyadussalihin:680">Riyad as-Salihin 680</a></td></tr>
+      <tr><td>In-book reference</td><td>: Book 1, Hadith 5</td></tr>
+    </table>
   </div>
 </div>
 """
 
 
-class TestExtractHadithNumber:
-    """Regression coverage for da#72 — number extraction on current markup."""
+class TestExtractInBookRef:
+    """Regression coverage for da#72/da#77 — in-book ordinal on current markup."""
+
+    def test_extracts_book_and_in_book_ordinal(self) -> None:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(CURRENT_MARKUP_HADITH_HTML, "html.parser")
+        row = soup.select_one(".actualHadithContainer")
+        assert row is not None
+        # "In-book reference : Book 1, Hadith 5" -> (book=1, ordinal=5).
+        assert _extract_in_book_ref(row) == (1, 5)
+
+    def test_returns_none_pair_when_in_book_row_absent(self) -> None:
+        from bs4 import BeautifulSoup
+
+        html = """
+        <div class="actualHadithContainer">
+          <div class="english_hadith_full">English text</div>
+          <table class="hadith_reference"><tr>
+            <td><b>Reference</b></td>
+            <td>: <a href="/riyadussalihin:681">Riyad as-Salihin 681</a></td>
+          </tr></table>
+        </div>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        row = soup.select_one(".actualHadithContainer")
+        assert row is not None
+        assert _extract_in_book_ref(row) == (None, None)
+
+
+class TestExtractCollectionRefNumber:
+    """The collection-wide ref is the source_id-keying fallback when no ordinal."""
 
     def test_extracts_from_sticky_reference_label(self) -> None:
         from bs4 import BeautifulSoup
@@ -216,8 +251,7 @@ class TestExtractHadithNumber:
         soup = BeautifulSoup(CURRENT_MARKUP_HADITH_HTML, "html.parser")
         row = soup.select_one(".actualHadithContainer")
         assert row is not None
-        # Primary path: the sticky "Riyad as-Salihin 680" label.
-        assert _extract_hadith_number(row) == 680
+        assert _extract_collection_ref_number(row) == 680
 
     def test_extracts_from_reference_link_href(self) -> None:
         from bs4 import BeautifulSoup
@@ -235,7 +269,7 @@ class TestExtractHadithNumber:
         soup = BeautifulSoup(html, "html.parser")
         row = soup.select_one(".actualHadithContainer")
         assert row is not None
-        assert _extract_hadith_number(row) == 681
+        assert _extract_collection_ref_number(row) == 681
 
     def test_legacy_span_still_supported(self) -> None:
         from bs4 import BeautifulSoup
@@ -250,9 +284,13 @@ class TestExtractHadithNumber:
         soup = BeautifulSoup(html, "html.parser")
         row = soup.select_one(".actualHadithContainer")
         assert row is not None
-        assert _extract_hadith_number(row) == 42
+        assert _extract_collection_ref_number(row) == 42
 
-    def test_full_record_has_non_null_number_on_current_markup(self) -> None:
+
+class TestExtractHadithFromRowCurrentMarkup:
+    """`hadith_number` carries the in-book ordinal; book parsed from the ref."""
+
+    def test_record_uses_in_book_ordinal(self) -> None:
         from bs4 import BeautifulSoup
 
         soup = BeautifulSoup(CURRENT_MARKUP_HADITH_HTML, "html.parser")
@@ -260,14 +298,35 @@ class TestExtractHadithNumber:
         assert row is not None
         record = _extract_hadith_from_row(row)
         assert record is not None
-        # The pre-fix bug: this was None for every row on the live site.
-        assert record["hadith_number"] == 680
+        # The pre-fix bug: hadith_number was None for every row on the live site.
+        # Now it is the IN-BOOK ordinal (5), not the collection-wide ref (680).
+        assert record["hadith_number"] == 5
+        assert record["book_number"] == 1
+
+    def test_falls_back_to_collection_ref_when_no_in_book_row(self) -> None:
+        from bs4 import BeautifulSoup
+
+        # No "In-book reference" row: hadith_number must still be non-null,
+        # using the collection-wide ref so source_id keying never collapses.
+        html = """
+        <div class="actualHadithContainer">
+          <div class="hadith_reference_sticky">Riyad as-Salihin 681</div>
+          <div class="english_hadith_full">English text</div>
+        </div>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        row = soup.select_one(".actualHadithContainer")
+        assert row is not None
+        record = _extract_hadith_from_row(row)
+        assert record is not None
+        assert record["hadith_number"] == 681
+        assert record["book_number"] is None
 
 
 class TestRiyadussalihinFixture:
     """End-to-end selector guard over a saved current-markup fixture page."""
 
-    def test_numbers_parsed_and_source_ids_unique(self) -> None:
+    def test_in_book_ordinals_parsed_and_source_ids_unique(self) -> None:
         from bs4 import BeautifulSoup
 
         from src.parse.base import generate_source_id
@@ -280,16 +339,20 @@ class TestRiyadussalihinFixture:
         records = [rec for r in rows if (rec := _extract_hadith_from_row(r)) is not None]
         assert records, "fixture must yield parseable hadith records"
 
-        # Acceptance: a non-null number for every sampled hadith.
+        # Acceptance: a non-null number for every sampled hadith ...
         assert all(r["hadith_number"] is not None for r in records)
+        # ... and it is the in-book ordinal (1, 2, 3, ...), not the
+        # collection-wide ref (680, 681, ...).
+        assert [r["hadith_number"] for r in records] == list(range(1, len(records) + 1))
 
-        # Acceptance: source_id uniqueness holds. The collection-wide reference
-        # number alone keeps every record distinct, so dedup never merges them.
+        # Acceptance: source_id uniqueness holds. The in-book ordinal is unique
+        # within a book, so book+chapter+ordinal keeps every record distinct and
+        # dedup never merges them — even with chapter held constant here.
         source_ids = {
             generate_source_id(
                 "sunnah",
                 "riyadussalihin",
-                1,
+                r["book_number"] or 0,
                 1,
                 r["hadith_number"] or 0,
             )
