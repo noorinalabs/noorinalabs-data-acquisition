@@ -1,7 +1,16 @@
-"""Integration test fixtures using testcontainers."""
+"""Integration test fixtures using testcontainers.
+
+These tests REQUIRE a working Docker daemon: testcontainers spins up real
+Neo4j / Postgres containers. When Docker is unreachable — e.g. a dev box with
+no daemon, or a CI runner that cannot pull the testcontainers reaper image from
+Docker Hub — the ``neo4j_container`` fixture ``pytest.skip``s the leg rather
+than erroring, so a missing-infra environment yields a clean SKIP instead of a
+red ERROR that masks real signal (#69).
+"""
 
 from __future__ import annotations
 
+import docker.errors
 import pytest
 from testcontainers.neo4j import Neo4jContainer
 from testcontainers.postgres import PostgresContainer
@@ -13,10 +22,23 @@ NEO4J_TEST_PASSWORD = "testpassword123"
 
 @pytest.fixture(scope="session")
 def neo4j_container():
-    """Start a real Neo4j container for integration tests."""
+    """Start a real Neo4j container for integration tests.
+
+    Requires Docker. Skips (does not error) when Docker is unavailable so the
+    suite degrades gracefully off-CI / on a runner that cannot reach Docker Hub.
+    """
     container = Neo4jContainer("neo4j:5-community", password=NEO4J_TEST_PASSWORD)
-    with container as neo4j:
+    try:
+        # ``start`` is where Docker is actually contacted (daemon connect, image
+        # pull, container create); guard only this so a real test-body failure
+        # later is never mistaken for an infra skip.
+        neo4j = container.start()
+    except docker.errors.DockerException as exc:
+        pytest.skip(f"Docker/Neo4j unavailable — skipping integration tests: {exc}")
+    try:
         yield neo4j
+    finally:
+        container.stop()
 
 
 @pytest.fixture

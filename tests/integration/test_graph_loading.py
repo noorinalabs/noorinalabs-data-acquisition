@@ -101,6 +101,14 @@ SAMPLE_NARRATORS = [
     },
 ]
 
+# NOTE (da#77): every hadith here carries a NON-null hadith_number on purpose.
+# The APPEARS_IN loader SETs hadith_number_in_book = coalesce(row.hadith_number,
+# …), and Neo4j drops a property SET to null — so an edge built from a null
+# hadith_number has NO hadith_number_in_book key (absent, not present-null). If a
+# null-hadith_number row is ever added here, any per-edge
+# ``"hadith_number_in_book" in keys(r)`` assertion (e.g. #74's read-back) will
+# fail for that row. The null path is covered separately by
+# ``test_appears_in_edges_load_with_null_hadith_number``.
 SAMPLE_HADITHS = [
     {
         "source_id": "bukhari:1",
@@ -158,9 +166,18 @@ SAMPLE_HADITHS = [
     },
 ]
 
+# NOTE: ``collection_id`` here MUST be the corpus-qualified ``{corpus}:{name}``
+# form, because that is the key the APPEARS_IN edge loader reconstructs from each
+# hadith's ``source_corpus`` + ``collection_name`` (see load_edges.py
+# ``_load_appears_in``: ``col:{corpus}:{name}``) and matches against the
+# Collection node id (load_nodes.py: ``col:{collection_id}``). Plain ids like
+# "bukhari" produce node ``col:bukhari`` while the edge loader looks for
+# ``col:sunnah:bukhari`` — the endpoints never match, so ZERO APPEARS_IN edges
+# are created and the prior ``count(r) >= 0`` assertion silently passed on an
+# empty graph (#69).
 SAMPLE_COLLECTIONS = [
     {
-        "collection_id": "bukhari",
+        "collection_id": "sunnah:bukhari",
         "name_ar": "صحيح البخاري",
         "name_en": "Sahih al-Bukhari",
         "compiler_name": "Muhammad ibn Ismail al-Bukhari",
@@ -170,7 +187,7 @@ SAMPLE_COLLECTIONS = [
         "source_corpus": "sunnah",
     },
     {
-        "collection_id": "muslim",
+        "collection_id": "sunnah:muslim",
         "name_ar": "صحيح مسلم",
         "name_en": "Sahih Muslim",
         "compiler_name": "Muslim ibn al-Hajjaj",
@@ -180,7 +197,7 @@ SAMPLE_COLLECTIONS = [
         "source_corpus": "sunnah",
     },
     {
-        "collection_id": "tirmidhi",
+        "collection_id": "sunnah:tirmidhi",
         "name_ar": "سنن الترمذي",
         "name_en": "Jami at-Tirmidhi",
         "compiler_name": "Abu Isa al-Tirmidhi",
@@ -409,12 +426,91 @@ class TestEdgeLoading:
         load_all_nodes(neo4j_client, staging, curated, strict=False)
         edge_results = load_all_edges(neo4j_client, staging, curated, strict=False)
 
-        # APPEARS_IN should be created for hadiths with matching collections
+        # The loader returns exactly one APPEARS_IN *result object* (one per edge
+        # type), and it must report edges actually created — not a no-op. The
+        # 3 sample hadiths (2 bukhari + 1 muslim) all match a loaded collection,
+        # so 3 edges are expected.
         appears_in = [r for r in edge_results if r.edge_type == "APPEARS_IN"]
         assert len(appears_in) == 1
+        assert appears_in[0].created == 3
 
-        rows = neo4j_client.execute_read("MATCH ()-[r:APPEARS_IN]->() RETURN count(r) AS cnt")
-        assert rows[0]["cnt"] >= 0  # at least the edges were attempted
+        # Read the edges back from the real graph and assert on the property key
+        # itself, not just on edge existence. A bare ``count(r) >= 0`` is always
+        # true: it passes regardless of how the property is named AND even when
+        # ZERO edges were persisted, so it gives no regression protection against
+        # a key rename (#69 — PR #68 renamed the key to the ig#935-canonical
+        # ``hadith_number_in_book``, guarded only by a unit string-match on the
+        # Cypher) and previously masked an empty-graph bug.
+        rows = neo4j_client.execute_read(
+            "MATCH ()-[r:APPEARS_IN]->() "
+            "RETURN keys(r) AS keys, r.hadith_number_in_book AS hadith_number_in_book"
+        )
+        # Edges must actually exist in the graph (count agrees with the loader) ...
+        assert len(rows) == 3
+        # NOTE: this per-edge ``hadith_number_in_book in keys(r)`` assertion holds
+        # only because every hadith in this fixture has a NON-null hadith_number.
+        # Post-da#77 the loader SETs that property via ``coalesce(row.hadith_number,
+        # ...)`` after the MERGE, and Neo4j drops a property SET to null — so a
+        # null-hadith_number row would yield an edge WITHOUT this key. If you add a
+        # null-hadith_number hadith to SAMPLE_HADITHS, relax this loop accordingly.
+        for row in rows:
+            # ... the canonical key MUST be present on every edge ...
+            assert "hadith_number_in_book" in row["keys"]
+            # ... carry a populated value (not a declared-but-null key) ...
+            assert row["hadith_number_in_book"] is not None
+            # ... and the pre-#68 ``hadith_number`` key MUST NOT linger.
+            assert "hadith_number" not in row["keys"]
+
+    def test_appears_in_edges_load_with_null_hadith_number(
+        self, neo4j_client: Neo4jClient, tmp_path: Path
+    ) -> None:
+        """da#77 regression: a null ``hadith_number`` must NOT abort the load.
+
+        Scraped hadiths carry null ``hadith_number`` until da#72. The previous
+        ``MERGE (h)-[:APPEARS_IN {hadith_number_in_book: row.hadith_number}]->(c)``
+        aborted the whole edge stage with a Neo4j null-property error. The fix
+        SETs the positional props after the MERGE, so the edge is created with a
+        null ``hadith_number_in_book`` instead of erroring. Runs against a real
+        Neo4j — the mock load suite cannot enforce the MERGE-null rule.
+        """
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        curated = tmp_path / "curated"
+        curated.mkdir()
+
+        null_hadith = dict(SAMPLE_HADITHS[0])
+        null_hadith["source_id"] = "bukhari:nullnum"
+        null_hadith["hadith_number"] = None  # the da#77 trigger
+        _write_hadiths_parquet(staging, [null_hadith])
+        # Self-contained collection: the edge loader derives the target id as
+        # ``col:{source_corpus}:{collection_name}`` = ``col:sunnah:bukhari``, so
+        # the Collection node id must be the corpus-qualified ``sunnah:bukhari``
+        # for the endpoints to match (independent of the shared fixture).
+        null_collection = {
+            "collection_id": "sunnah:bukhari",
+            "name_en": "Sahih al-Bukhari",
+            "sect": "sunni",
+            "source_corpus": "sunnah",
+        }
+        _write_collections_parquet(staging, [null_collection])
+
+        load_all_nodes(neo4j_client, staging, curated, strict=False)
+        edge_results = load_all_edges(neo4j_client, staging, curated, strict=False)
+
+        appears_in = next(r for r in edge_results if r.edge_type == "APPEARS_IN")
+        # The edge is created (no abort) ...
+        assert appears_in.created == 1
+        rows = neo4j_client.execute_read(
+            "MATCH ()-[r:APPEARS_IN]->() RETURN r.hadith_number_in_book AS num, keys(r) AS keys"
+        )
+        assert len(rows) == 1
+        # ... and reads back with a null hadith_number_in_book instead of failing
+        # the MERGE. Neo4j does not persist a property SET to null, so the key is
+        # simply absent from keys(r) — the point is the load SUCCEEDED.
+        assert rows[0]["num"] is None
+        assert "hadith_number_in_book" not in rows[0]["keys"]
+        # The non-null positional props are still stored.
+        assert "book_number" in rows[0]["keys"]
 
     def test_graded_by_edges(self, neo4j_client: Neo4jClient, tmp_path: Path) -> None:
         staging, curated = _write_staging_data(tmp_path)
