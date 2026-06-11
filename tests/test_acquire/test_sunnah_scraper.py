@@ -11,10 +11,13 @@ import httpx
 from src.acquire.sunnah_scraper import (
     SCRAPE_COLLECTIONS,
     _extract_hadith_from_row,
+    _extract_hadith_number,
     _get_book_numbers,
     _scrape_book_page,
     run,
 )
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 SAMPLE_COLLECTION_HTML = """
 <html><body>
@@ -184,3 +187,112 @@ class TestRun:
         assert len(SCRAPE_COLLECTIONS) == 8
         assert "musnad-ahmad" in SCRAPE_COLLECTIONS
         assert "riyadussalihin" in SCRAPE_COLLECTIONS
+
+
+# Container markup matching sunnah.com's CURRENT layout (no bare `.hadith_num`
+# span). Regression guard for da#72: the reference number now lives in the
+# `.hadith_reference_sticky` label and the `table.hadith_reference` link href.
+CURRENT_MARKUP_HADITH_HTML = """
+<div class="actualHadithContainer">
+  <div class="hadith_reference_sticky">Riyad as-Salihin 680</div>
+  <div class="english_hadith_full">English text</div>
+  <div class="arabic_hadith_full arabic">عربي</div>
+  <div class="bottomItems">
+    <table class="hadith_reference"><tr>
+      <td><b>Reference</b></td>
+      <td>: <a href="/riyadussalihin:680">Riyad as-Salihin 680</a></td>
+    </tr></table>
+  </div>
+</div>
+"""
+
+
+class TestExtractHadithNumber:
+    """Regression coverage for da#72 — number extraction on current markup."""
+
+    def test_extracts_from_sticky_reference_label(self) -> None:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(CURRENT_MARKUP_HADITH_HTML, "html.parser")
+        row = soup.select_one(".actualHadithContainer")
+        assert row is not None
+        # Primary path: the sticky "Riyad as-Salihin 680" label.
+        assert _extract_hadith_number(row) == 680
+
+    def test_extracts_from_reference_link_href(self) -> None:
+        from bs4 import BeautifulSoup
+
+        # No sticky label — must fall back to the reference-link href.
+        html = """
+        <div class="actualHadithContainer">
+          <div class="english_hadith_full">English text</div>
+          <table class="hadith_reference"><tr>
+            <td><b>Reference</b></td>
+            <td>: <a href="/riyadussalihin:681">Riyad as-Salihin 681</a></td>
+          </tr></table>
+        </div>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        row = soup.select_one(".actualHadithContainer")
+        assert row is not None
+        assert _extract_hadith_number(row) == 681
+
+    def test_legacy_span_still_supported(self) -> None:
+        from bs4 import BeautifulSoup
+
+        # Pre-redesign markup must keep working for collections still on it.
+        html = """
+        <div class="actualHadithContainer">
+          <div class="hadith_reference"><span class="hadith_num">42</span></div>
+          <div class="english_hadith_full">English text</div>
+        </div>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        row = soup.select_one(".actualHadithContainer")
+        assert row is not None
+        assert _extract_hadith_number(row) == 42
+
+    def test_full_record_has_non_null_number_on_current_markup(self) -> None:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(CURRENT_MARKUP_HADITH_HTML, "html.parser")
+        row = soup.select_one(".actualHadithContainer")
+        assert row is not None
+        record = _extract_hadith_from_row(row)
+        assert record is not None
+        # The pre-fix bug: this was None for every row on the live site.
+        assert record["hadith_number"] == 680
+
+
+class TestRiyadussalihinFixture:
+    """End-to-end selector guard over a saved current-markup fixture page."""
+
+    def test_numbers_parsed_and_source_ids_unique(self) -> None:
+        from bs4 import BeautifulSoup
+
+        from src.parse.base import generate_source_id
+
+        html = (FIXTURES_DIR / "riyadussalihin_book1_sample.html").read_text(encoding="utf-8")
+        soup = BeautifulSoup(html, "html.parser")
+        rows = soup.select(".actualHadithContainer")
+        assert rows, "fixture must contain hadith containers"
+
+        records = [rec for r in rows if (rec := _extract_hadith_from_row(r)) is not None]
+        assert records, "fixture must yield parseable hadith records"
+
+        # Acceptance: a non-null number for every sampled hadith.
+        assert all(r["hadith_number"] is not None for r in records)
+
+        # Acceptance: source_id uniqueness holds. The collection-wide reference
+        # number alone keeps every record distinct, so dedup never merges them.
+        source_ids = {
+            generate_source_id(
+                "sunnah",
+                "riyadussalihin",
+                1,
+                1,
+                r["hadith_number"] or 0,
+            )
+            for r in records
+        }
+        assert len(source_ids) == len(records)
