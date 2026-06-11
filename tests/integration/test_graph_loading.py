@@ -101,6 +101,14 @@ SAMPLE_NARRATORS = [
     },
 ]
 
+# NOTE (da#77): every hadith here carries a NON-null hadith_number on purpose.
+# The APPEARS_IN loader SETs hadith_number_in_book = coalesce(row.hadith_number,
+# …), and Neo4j drops a property SET to null — so an edge built from a null
+# hadith_number has NO hadith_number_in_book key (absent, not present-null). If a
+# null-hadith_number row is ever added here, any per-edge
+# ``"hadith_number_in_book" in keys(r)`` assertion (e.g. #74's read-back) will
+# fail for that row. The null path is covered separately by
+# ``test_appears_in_edges_load_with_null_hadith_number``.
 SAMPLE_HADITHS = [
     {
         "source_id": "bukhari:1",
