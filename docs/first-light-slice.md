@@ -55,26 +55,9 @@ uv run python scripts/first_light/run_slice.py            # replay committed sam
 uv run python scripts/first_light/run_slice.py --live --collection riyadussalihin --book 1
 ```
 
-The loader is idempotent (`MERGE` on `id`), so re-running is safe.
-
-> **Known loader bug surfaced by this slice (da#73, 2026-06-10).** The Phase-3
-> edge loader's `_APPEARS_IN_QUERY` puts `hadith_number_in_book: row.hadith_number`
-> **inside the relationship `MERGE` pattern**. Neo4j refuses to `MERGE` a
-> relationship with a `null` property value:
->
-> ```text
-> Cannot merge the following relationship because of null property value for
-> 'hadith_number_in_book': (h)-[:APPEARS_IN {hadith_number_in_book: null}]->(c)
-> ```
->
-> Because the scraper does not extract `hadith_number` (da#72), **every** scraped
-> hadith has `hadith_number = null`, so the real `isnad-ingest load` aborts on the
-> APPEARS_IN stage. The in-process mock test suite did not catch this (the mock
-> counts batch rows; it does not enforce Neo4j's MERGE-null-property rule). The
-> first-light staging load below was completed with a **null-safe** edge variant
-> (`MERGE (h)-[r:APPEARS_IN]->(c) SET r.hadith_number_in_book = ...`). The loader
-> fix is tracked separately (it touches the asserted MERGE contract in main#139
-> and the edge-key assertions in #69/#74) and is **not** changed in this slice PR.
+The loader is idempotent (`MERGE` on `id`), so re-running is safe. The
+APPEARS_IN edge loader's null-safety (a real bug this slice surfaced on
+2026-06-10) is tracked as **da#77** — see the loader note under "History" below.
 
 ## Verify in Neo4j (Cypher)
 
@@ -97,15 +80,16 @@ matn snippets in `sample_matn_en`.
 `scripts/first_light/evidence/firstlight_graph.png` is the loaded graph rendered
 directly from a **live Neo4j 5**: the `riyadussalihin` Collection node (red) with
 its 47 `Hadith` nodes (green) connected by `APPEARS_IN`, each Hadith labelled
-with its real `hadith_number` (680..726). Regenerate it with:
+with its in-book `hadith_number` (1..47). Regenerate it with:
 
 ```bash
 uv run --with matplotlib --with networkx python scripts/first_light/render_graph.py
 ```
 
 This run was through the **real loader** (`run_slice.py` → `load_all`), end to
-end, with the da#72 scraper fix applied so `hadith_number` is populated — see the
-loader-bug note below for why the real loader needs da#72 first.
+end. With the da#72 scraper fix merged (da#75), `hadith_number` is the genuine
+**in-book ordinal** (1, 2, 3 … within the book), so the `APPEARS_IN`
+`hadith_number_in_book` edge property carries the semantically-correct value.
 
 ## Verify in the frontend (graph explorer)
 
@@ -118,17 +102,26 @@ loader-bug note below for why the real loader needs da#72 first.
    (The product graph-explorer view requires an authenticated session; the PNG
    above is the equivalent direct-from-Neo4j render.)
 
-## Known caveat — da#72 (`hadith_number` not extracted)
+## History — `hadith_number` keying (da#72 / da#75, resolved)
 
-`sunnah_scraper` does not currently extract `hadith_number`, so the
-`source_id` (`sunnah:<collection>:<book>:<chapter>:<hadith_no|0>`) carries
-`0` for the hadith-number segment. On **this** sample there are **no
-collisions**, because each hadith in riyadussalihin book 1 sits in its own
-synthetic chapter (101..147), keeping `source_id` distinct.
+Earlier revisions of this slice ran before the scraper extracted `hadith_number`:
+`source_id` carried `0` for the hadith-number segment
+(`sunnah:<collection>:<book>:<chapter>:0`), kept collision-free on this sample
+only because each riyadussalihin book-1 hadith sat in its own synthetic chapter.
 
-In collections where multiple hadiths share a chapter, the `0` hadith-number
-would cause `source_id` collisions, and the loader's `MERGE` on `id` would
-silently coalesce those hadiths into a single node. **da#72** (owned by
-Alejandra Reyes-Fuentes) fixes the extraction; scaling this slice to
-chapter-grouped collections should wait on it. The slice script prints a loud
-`WARNING` if it ever sees a collision count > 0.
+**da#72 (merged as da#75)** fixed this: the scraper now extracts the genuine
+**in-book ordinal** (the "Book N, Hadith M" reference) into `hadith_number`, so
+`source_id` is `sunnah:<collection>:<book>:<chapter>:<in-book-ordinal>` —
+collision-free on its own keying (47/47 distinct), and the
+`hadith_number_in_book` edge property now matches its name. The collection-wide
+reference number (e.g. "Riyad as-Salihin 680") is intentionally kept only as a
+human label, not in `source_id`. The slice script still prints a loud `WARNING`
+if it ever sees a `source_id` collision.
+
+> **Loader note (da#77).** The Phase-3 edge loader's `_APPEARS_IN_QUERY`
+> historically put `hadith_number_in_book` **inside** the relationship `MERGE`
+> pattern, which Neo4j rejects on a null value — so any null `hadith_number`
+> aborted the load. da#77 makes the loader null-safe (`MERGE` on the
+> `(hadith, collection)` pair, then `SET … = coalesce(…)`). With da#75 merged the
+> scraped value is non-null, but the null-safe loader remains the correct
+> contract for any source that leaves the field unset.
