@@ -205,10 +205,25 @@ class TestLoadAppearsIn:
 
     def test_appears_in_edge_uses_canonical_property_key(self) -> None:
         # The APPEARS_IN edge property MUST be the ig#935-canonical
-        # ``hadith_number_in_book`` (matches AppearsIn model + isnad-graph
-        # src/models/edges.py), NOT the legacy bare ``hadith_number`` (da#65).
-        assert "hadith_number_in_book: row.hadith_number" in _APPEARS_IN_QUERY
+        # ``hadith_number_in_book`` mapped from ``row.hadith_number`` (matches
+        # AppearsIn model + isnad-graph src/models/edges.py), NOT the legacy bare
+        # ``hadith_number`` (da#65). Post-da#77 it is SET after the MERGE with the
+        # streaming path's coalesce-preserve contract, so assert that SET form.
+        assert (
+            "r.hadith_number_in_book = coalesce(row.hadith_number, r.hadith_number_in_book)"
+            in _APPEARS_IN_QUERY
+        )
+        # The legacy bare ``hadith_number`` edge key must never appear.
         assert "hadith_number:" not in _APPEARS_IN_QUERY
+
+    def test_appears_in_merge_has_no_property_key_null_unsafe(self) -> None:
+        # da#77: positional props MUST be SET after the MERGE, never inside the
+        # MERGE relationship pattern — Neo4j aborts a MERGE on a null property,
+        # and scraped hadiths carry null ``hadith_number`` until da#72. Guard the
+        # MERGE line so the null-unsafe keyed form can't be reintroduced.
+        merge_line = next(line for line in _APPEARS_IN_QUERY.splitlines() if "MERGE (" in line)
+        assert merge_line.strip() == "MERGE (h)-[r:APPEARS_IN]->(c)"
+        assert "{" not in merge_line  # no inline property map on the MERGE pattern
 
     def test_missing_collection_name_skipped(
         self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
