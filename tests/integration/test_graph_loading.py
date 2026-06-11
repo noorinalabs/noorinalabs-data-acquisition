@@ -439,6 +439,12 @@ class TestEdgeLoading:
         )
         # Edges must actually exist in the graph (count agrees with the loader) ...
         assert len(rows) == 3
+        # NOTE: this per-edge ``hadith_number_in_book in keys(r)`` assertion holds
+        # only because every hadith in this fixture has a NON-null hadith_number.
+        # Post-da#77 the loader SETs that property via ``coalesce(row.hadith_number,
+        # ...)`` after the MERGE, and Neo4j drops a property SET to null — so a
+        # null-hadith_number row would yield an edge WITHOUT this key. If you add a
+        # null-hadith_number hadith to SAMPLE_HADITHS, relax this loop accordingly.
         for row in rows:
             # ... the canonical key MUST be present on every edge ...
             assert "hadith_number_in_book" in row["keys"]
