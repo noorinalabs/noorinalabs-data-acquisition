@@ -413,8 +413,23 @@ class TestEdgeLoading:
         appears_in = [r for r in edge_results if r.edge_type == "APPEARS_IN"]
         assert len(appears_in) == 1
 
-        rows = neo4j_client.execute_read("MATCH ()-[r:APPEARS_IN]->() RETURN count(r) AS cnt")
-        assert rows[0]["cnt"] >= 0  # at least the edges were attempted
+        # Read the edge back from the real graph and assert on the property key
+        # itself, not just on edge existence. A bare ``count(r) >= 0`` is always
+        # true and passes regardless of how the property is named, so it gives no
+        # regression protection against a key rename (#69 — PR #68 renamed the key
+        # to the ig#935-canonical ``hadith_number_in_book``, guarded only by a unit
+        # string-match on the Cypher).
+        rows = neo4j_client.execute_read(
+            "MATCH ()-[r:APPEARS_IN]->() "
+            "RETURN keys(r) AS keys, r.hadith_number_in_book AS hadith_number_in_book"
+        )
+        assert len(rows) == 1
+        # The canonical key MUST be present on the actual edge ...
+        assert "hadith_number_in_book" in rows[0]["keys"]
+        # ... carry a populated value (not merely a declared-but-null key) ...
+        assert rows[0]["hadith_number_in_book"] is not None
+        # ... and the pre-#68 ``hadith_number`` key MUST NOT linger.
+        assert "hadith_number" not in rows[0]["keys"]
 
     def test_graded_by_edges(self, neo4j_client: Neo4jClient, tmp_path: Path) -> None:
         staging, curated = _write_staging_data(tmp_path)
