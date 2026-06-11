@@ -453,6 +453,57 @@ class TestEdgeLoading:
             # ... and the pre-#68 ``hadith_number`` key MUST NOT linger.
             assert "hadith_number" not in row["keys"]
 
+    def test_appears_in_edges_load_with_null_hadith_number(
+        self, neo4j_client: Neo4jClient, tmp_path: Path
+    ) -> None:
+        """da#77 regression: a null ``hadith_number`` must NOT abort the load.
+
+        Scraped hadiths carry null ``hadith_number`` until da#72. The previous
+        ``MERGE (h)-[:APPEARS_IN {hadith_number_in_book: row.hadith_number}]->(c)``
+        aborted the whole edge stage with a Neo4j null-property error. The fix
+        SETs the positional props after the MERGE, so the edge is created with a
+        null ``hadith_number_in_book`` instead of erroring. Runs against a real
+        Neo4j — the mock load suite cannot enforce the MERGE-null rule.
+        """
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        curated = tmp_path / "curated"
+        curated.mkdir()
+
+        null_hadith = dict(SAMPLE_HADITHS[0])
+        null_hadith["source_id"] = "bukhari:nullnum"
+        null_hadith["hadith_number"] = None  # the da#77 trigger
+        _write_hadiths_parquet(staging, [null_hadith])
+        # Self-contained collection: the edge loader derives the target id as
+        # ``col:{source_corpus}:{collection_name}`` = ``col:sunnah:bukhari``, so
+        # the Collection node id must be the corpus-qualified ``sunnah:bukhari``
+        # for the endpoints to match (independent of the shared fixture).
+        null_collection = {
+            "collection_id": "sunnah:bukhari",
+            "name_en": "Sahih al-Bukhari",
+            "sect": "sunni",
+            "source_corpus": "sunnah",
+        }
+        _write_collections_parquet(staging, [null_collection])
+
+        load_all_nodes(neo4j_client, staging, curated, strict=False)
+        edge_results = load_all_edges(neo4j_client, staging, curated, strict=False)
+
+        appears_in = next(r for r in edge_results if r.edge_type == "APPEARS_IN")
+        # The edge is created (no abort) ...
+        assert appears_in.created == 1
+        rows = neo4j_client.execute_read(
+            "MATCH ()-[r:APPEARS_IN]->() RETURN r.hadith_number_in_book AS num, keys(r) AS keys"
+        )
+        assert len(rows) == 1
+        # ... and reads back with a null hadith_number_in_book instead of failing
+        # the MERGE. Neo4j does not persist a property SET to null, so the key is
+        # simply absent from keys(r) — the point is the load SUCCEEDED.
+        assert rows[0]["num"] is None
+        assert "hadith_number_in_book" not in rows[0]["keys"]
+        # The non-null positional props are still stored.
+        assert "book_number" in rows[0]["keys"]
+
     def test_graded_by_edges(self, neo4j_client: Neo4jClient, tmp_path: Path) -> None:
         staging, curated = _write_staging_data(tmp_path)
         load_all_nodes(neo4j_client, staging, curated, strict=False)
