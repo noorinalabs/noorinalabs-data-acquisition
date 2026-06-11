@@ -92,6 +92,21 @@ RETURN c.name_en AS collection,
 Expected: `collection = riyadussalihin`, `hadith_count = 47`, with real English
 matn snippets in `sample_matn_en`.
 
+## Visual evidence — live run confirmed
+
+`scripts/first_light/evidence/firstlight_graph.png` is the loaded graph rendered
+directly from a **live Neo4j 5**: the `riyadussalihin` Collection node (red) with
+its 47 `Hadith` nodes (green) connected by `APPEARS_IN`, each Hadith labelled
+with its real `hadith_number` (680..726). Regenerate it with:
+
+```bash
+uv run --with matplotlib --with networkx python scripts/first_light/render_graph.py
+```
+
+This run was through the **real loader** (`run_slice.py` → `load_all`), end to
+end, with the da#72 scraper fix applied so `hadith_number` is populated — see the
+loader-bug note below for why the real loader needs da#72 first.
+
 ## Verify in the frontend (graph explorer)
 
 1. Open the staging frontend: <https://isnad-graph.noorinalabs.com> (graph
@@ -100,6 +115,8 @@ matn snippets in `sample_matn_en`.
    above in the explorer's query panel.
 3. Confirm the `Collection` node with 47 `Hadith` nodes connected by
    `APPEARS_IN` renders. Capture a screenshot for the PR/issue evidence.
+   (The product graph-explorer view requires an authenticated session; the PNG
+   above is the equivalent direct-from-Neo4j render.)
 
 ## Known caveat — da#72 (`hadith_number` not extracted)
 
