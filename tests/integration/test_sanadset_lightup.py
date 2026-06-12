@@ -97,8 +97,10 @@ class TestSanadsetLightupLive:
         canonical = resolve_out / "narrators_canonical.parquet"
         assert canonical.exists(), "disambiguation must produce canonical narrators"
         assert pq.read_table(canonical).num_rows >= 1, "expected >=1 resolved narrator"
-        # The loader reads narrators_canonical.parquet from the staging dir.
-        shutil.copy(canonical, staging / "narrators_canonical.parquet")
+        # The loader reads narrators_canonical.parquet from the curated
+        # (resolve-output) dir — da#112 artifact-location contract. Stage the
+        # resolve output into curated for the load step.
+        shutil.copy(canonical, curated / "narrators_canonical.parquet")
 
         # A sanadset Collection so APPEARS_IN (hadith->collection) can materialize.
         write_collections(

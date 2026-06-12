@@ -209,8 +209,12 @@ SAMPLE_COLLECTIONS = [
 ]
 
 
-def _write_narrators_parquet(staging: Path, rows: list[dict[str, Any]]) -> Path:
-    """Write narrators_canonical.parquet."""
+def _write_narrators_parquet(curated: Path, rows: list[dict[str, Any]]) -> Path:
+    """Write narrators_canonical.parquet into the curated (resolve-output) dir.
+
+    The loader reads the canonical narrator master from the curated dir
+    (da#112 artifact-location contract).
+    """
     arrays = {
         "canonical_id": pa.array([r["canonical_id"] for r in rows], type=pa.string()),
         "name_ar": pa.array([r.get("name_ar") for r in rows], type=pa.string()),
@@ -229,7 +233,7 @@ def _write_narrators_parquet(staging: Path, rows: list[dict[str, Any]]) -> Path:
         "mention_count": pa.array([r.get("mention_count") for r in rows], type=pa.int32()),
     }
     table = pa.table(arrays, schema=NARRATORS_CANONICAL_SCHEMA)
-    path = staging / "narrators_canonical.parquet"
+    path = curated / "narrators_canonical.parquet"
     pq.write_table(table, path)
     return path
 
@@ -293,7 +297,7 @@ def _write_staging_data(tmp_path: Path) -> tuple[Path, Path]:
     curated = tmp_path / "curated"
     curated.mkdir()
 
-    _write_narrators_parquet(staging, SAMPLE_NARRATORS)
+    _write_narrators_parquet(curated, SAMPLE_NARRATORS)
     _write_hadiths_parquet(staging, SAMPLE_HADITHS)
     _write_collections_parquet(staging, SAMPLE_COLLECTIONS)
 
