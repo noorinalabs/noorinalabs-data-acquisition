@@ -15,6 +15,12 @@ from typing import Any
 import pyarrow.parquet as pq
 import yaml
 
+from src.parse.identity import (
+    chain_node_id,
+    collection_node_id,
+    grading_node_id,
+    hadith_node_id,
+)
 from src.utils.logging import get_logger
 from src.utils.neo4j_client import Neo4jClient
 
@@ -74,6 +80,7 @@ SET n.name_ar           = row.name_ar,
     n.trustworthiness   = row.trustworthiness,
     n.aliases           = row.aliases,
     n.external_id       = row.external_id,
+    n.source_ids        = row.source_ids,
     n.mention_count     = row.mention_count
 """
 
@@ -122,6 +129,10 @@ def _load_narrators(
                 "trustworthiness": _val(row, "trustworthiness"),
                 "aliases": _val(row, "aliases", []),
                 "external_id": _val(row, "external_id"),
+                # Per-source provenance (``<corpus>:<bare-id>`` list) so a corpus is
+                # auditable/removable on the graph itself, e.g.
+                # ``MATCH (n:Narrator) WHERE any(s IN n.source_ids WHERE s STARTS WITH 'itqan:')``.
+                "source_ids": _val(row, "source_ids", []),
                 "mention_count": _val(row, "mention_count"),
             }
         )
@@ -192,7 +203,7 @@ def _load_hadiths(
                 all_errors.append(f"{fp.name} row {i}: invalid source_id={sid!r}")
                 total_skipped += 1
                 continue
-            hid = f"hdt:{sid}" if not sid.startswith("hdt:") else sid
+            hid = hadith_node_id(sid)
             batch.append(
                 {
                     "id": hid,
@@ -272,7 +283,7 @@ def _load_collections(
                 all_errors.append(f"{fp.name} row {i}: invalid collection_id={cid!r}")
                 total_skipped += 1
                 continue
-            full_id = f"col:{cid}" if not cid.startswith("col:") else cid
+            full_id = collection_node_id(cid)
             batch.append(
                 {
                     "id": full_id,
@@ -357,7 +368,7 @@ def _load_chains(
     skipped = 0
 
     for hid, mentions in seen_hadiths.items():
-        chn_id = f"chn:{hid}-0" if not hid.startswith("chn:") else hid
+        chn_id = chain_node_id(hid, 0)
         narrator_ids = []
         for m in sorted(mentions, key=lambda r: r.get("position_in_chain", 0)):
             nid = m.get("canonical_narrator_id")
@@ -366,7 +377,7 @@ def _load_chains(
         batch.append(
             {
                 "id": chn_id,
-                "hadith_id": f"hdt:{hid}" if not hid.startswith("hdt:") else hid,
+                "hadith_id": hadith_node_id(hid),
                 "chain_index": 0,
                 "full_chain_text_ar": None,
                 "full_chain_text_en": None,
@@ -435,11 +446,11 @@ def _load_gradings(
                 errors.append(f"{fp.name} row {i}: grade present but no source_id")
                 skipped += 1
                 continue
-            gid = f"grd:{sid}"
+            gid = grading_node_id(sid)
             batch.append(
                 {
                     "id": gid,
-                    "hadith_id": f"hdt:{sid}" if not sid.startswith("hdt:") else sid,
+                    "hadith_id": hadith_node_id(sid),
                     "scholar_name": _val(row, "collection_name", "unknown"),
                     "grade": grade,
                     "methodology_school": None,

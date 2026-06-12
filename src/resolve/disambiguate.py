@@ -12,7 +12,6 @@ mentions in batches to keep memory under 4GB.
 from __future__ import annotations
 
 import csv
-import uuid
 from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -24,6 +23,7 @@ from rapidfuzz import fuzz
 from rapidfuzz.distance import Levenshtein
 
 from src.parse.base import safe_str, write_parquet
+from src.parse.identity import make_canonical_id
 from src.resolve.schemas import AMBIGUOUS_NARRATORS_SCHEMA, NARRATORS_CANONICAL_SCHEMA
 from src.utils.arabic import normalize_arabic
 from src.utils.logging import get_logger
@@ -31,11 +31,6 @@ from src.utils.logging import get_logger
 logger = get_logger(__name__)
 
 __all__ = ["run"]
-
-# ---------------------------------------------------------------------------
-# Fixed namespace for deterministic canonical IDs
-# ---------------------------------------------------------------------------
-_CANONICAL_NAMESPACE = uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
 
 # ---------------------------------------------------------------------------
 # Thresholds
@@ -437,12 +432,13 @@ def _load_mentions(
 # Canonical ID generation
 # ---------------------------------------------------------------------------
 def _make_canonical_id(name_normalized: str) -> str:
-    """Deterministic canonical ID via uuid5 with fixed namespace.
+    """Deterministic canonical ID — delegates to the identity contract.
 
-    Returns ``nar:<uuid5>`` to match the ``nar:`` prefix the graph
-    loader (``load_nodes._load_narrators``) validates on import.
+    Thin wrapper over :func:`src.parse.identity.make_canonical_id` so the
+    mention-driven path and the bio-direct promoter share one ``nar:<uuid5>``
+    scheme and namespace (no drift). Kept as a local name for call-site brevity.
     """
-    return f"nar:{uuid.uuid5(_CANONICAL_NAMESPACE, name_normalized)}"
+    return make_canonical_id(name_normalized)
 
 
 # ---------------------------------------------------------------------------
@@ -639,6 +635,75 @@ _MERGE_LOG_SCHEMA = pa.schema(
 )
 
 
+def _upsert_canonical(
+    canonical_map: dict[str, dict[str, str | int | list[str] | None]],
+    canonical_id: str,
+    *,
+    norm_name: str,
+    name_ar: str | None,
+    name_en: str | None,
+    alias: str | None,
+    candidate: Candidate | None,
+) -> None:
+    """Create or merge the canonical narrator record for *canonical_id*.
+
+    ``canonical_id`` is a pure function of ``norm_name`` (:func:`_make_canonical_id`),
+    so a bio-matched mention and a bio-less mention of the *same* normalized name
+    — from any number of sources — converge on **one** record. This is the
+    cross-source collapse for da#99.
+
+    A biographical *candidate*, when supplied, enriches the record by filling any
+    still-empty biographical field, so resolution order never loses bio metadata
+    (a bio-less mention seen first leaves a minimal record that a later
+    bio-matched mention of the same name upgrades in place).
+    """
+    rec = canonical_map.get(canonical_id)
+    if rec is None:
+        rec = {
+            "canonical_id": canonical_id,
+            "name_ar": name_ar,
+            "name_en": name_en,
+            "name_ar_normalized": norm_name,
+            "aliases": [],
+            "birth_year_ah": None,
+            "death_year_ah": None,
+            "generation": None,
+            "gender": None,
+            "trustworthiness": None,
+            "source_ids": [],
+            "external_id": None,
+            "mention_count": 0,
+        }
+        canonical_map[canonical_id] = rec
+
+    raw_count = rec.get("mention_count")
+    rec["mention_count"] = (int(raw_count) if isinstance(raw_count, int | str) else 0) + 1
+
+    if candidate is not None:
+        if not rec.get("name_ar") and candidate.name_ar:
+            rec["name_ar"] = candidate.name_ar
+        if not rec.get("name_en") and candidate.name_en:
+            rec["name_en"] = candidate.name_en
+        for field_name, value in (
+            ("birth_year_ah", candidate.birth_year_ah),
+            ("death_year_ah", candidate.death_year_ah),
+            ("generation", candidate.generation),
+            ("gender", candidate.gender),
+            ("trustworthiness", candidate.trustworthiness),
+            ("external_id", candidate.external_id),
+        ):
+            if rec.get(field_name) is None and value is not None:
+                rec[field_name] = value
+        src_ids = rec.get("source_ids")
+        if isinstance(src_ids, list) and candidate.bio_id and candidate.bio_id not in src_ids:
+            src_ids.append(candidate.bio_id)
+
+    if alias and alias != norm_name:
+        aliases = rec.get("aliases")
+        if isinstance(aliases, list) and alias not in aliases:
+            aliases.append(alias)
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -684,6 +749,11 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
     merge_log_rows: list[dict[str, str | float | None]] = []
     ambiguous_rows: list[dict[str, str | float | None]] = []
 
+    # Cross-source collapse measurement (da#99): the naive baseline keeps one
+    # node per (source, canonical) pair; the collapsed count is distinct
+    # canonicals. naive > collapsed exactly when a narrator spans >1 source.
+    naive_identity_pairs: set[tuple[str, str]] = set()
+
     # Per-source counters.
     source_resolved: dict[str, int] = {}
     source_total: dict[str, int] = {}
@@ -701,7 +771,7 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
             mention_text = str(mention.get("name_normalized") or mention.get("name_raw") or "")
 
             if best and best.score >= _CONFIDENCE_THRESHOLD:
-                # Resolved.
+                # Resolved to a biographical candidate.
                 source_resolved[corpus] = source_resolved.get(corpus, 0) + 1
                 c = best.candidate
                 norm_name = c.name_ar_normalized or normalize_arabic(c.name_ar or "")
@@ -712,37 +782,16 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
                 position = int(mention.get("position_in_chain") or 0)
                 death_year_index[f"{hadith_id}:{position}"] = c.death_year_ah
 
-                # Upsert canonical record.
-                if canonical_id not in canonical_map:
-                    canonical_map[canonical_id] = {
-                        "canonical_id": canonical_id,
-                        "name_ar": c.name_ar,
-                        "name_en": c.name_en,
-                        "name_ar_normalized": norm_name,
-                        "aliases": [],
-                        "birth_year_ah": c.birth_year_ah,
-                        "death_year_ah": c.death_year_ah,
-                        "generation": c.generation,
-                        "gender": c.gender,
-                        "trustworthiness": c.trustworthiness,
-                        "source_ids": [c.bio_id],
-                        "external_id": c.external_id,
-                        "mention_count": 1,
-                    }
-                else:
-                    rec = canonical_map[canonical_id]
-                    raw_count = rec.get("mention_count")
-                    prev = int(raw_count) if isinstance(raw_count, int | str) else 0
-                    rec["mention_count"] = prev + 1
-                    # Merge source IDs.
-                    src_ids = rec.get("source_ids")
-                    if isinstance(src_ids, list) and c.bio_id not in src_ids:
-                        src_ids.append(c.bio_id)
-                    # Add alias if different from primary.
-                    if mention_text and mention_text != norm_name:
-                        aliases = rec.get("aliases")
-                        if isinstance(aliases, list) and mention_text not in aliases:
-                            aliases.append(mention_text)
+                _upsert_canonical(
+                    canonical_map,
+                    canonical_id,
+                    norm_name=norm_name,
+                    name_ar=c.name_ar,
+                    name_en=c.name_en,
+                    alias=mention_text,
+                    candidate=c,
+                )
+                naive_identity_pairs.add((corpus, canonical_id))
 
                 # Merge log entry.
                 merge_log_rows.append(
@@ -755,7 +804,31 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
                     }
                 )
             else:
-                # Ambiguous — collect top-3 candidates.
+                # No confident biographical match. Cross-source identity
+                # resolution (da#99) still canonicalizes the mention by its OWN
+                # normalized name, so the same narrator appearing across sources
+                # collapses to a single Narrator node even without a rijal bio —
+                # the canonical id is a pure function of the normalized name.
+                # Exact-name only (high precision); fuzzy mention-to-mention
+                # clustering of spelling variants is deferred (see #109 / future).
+                fallback_name = str(mention.get("name_normalized") or "") or normalize_arabic(
+                    str(mention.get("name_raw") or "")
+                )
+                if fallback_name:
+                    fallback_id = _make_canonical_id(fallback_name)
+                    _upsert_canonical(
+                        canonical_map,
+                        fallback_id,
+                        norm_name=fallback_name,
+                        name_ar=(str(mention.get("name_raw") or "") or None),
+                        name_en=None,
+                        alias=None,
+                        candidate=None,
+                    )
+                    naive_identity_pairs.add((corpus, fallback_id))
+
+                # Record the top-3 bio candidates for the ambiguous-audit report
+                # (a fallback canonical node was still created above when named).
                 top3 = sorted(all_matches, key=lambda m: m.score, reverse=True)[:3]
                 row: dict[str, str | float | None] = {
                     "mention_id": mention_id,
@@ -814,6 +887,11 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
     matched_bios = {r["canonical_id"] for r in merge_log_rows if r.get("canonical_id")}
     bio_coverage = round(len(matched_bios) / max(len(candidates), 1) * 100, 1)
 
+    # Cross-source collapse (da#99): how many per-source identities merged into a
+    # shared canonical narrator. naive = one node per (source, canonical) pair.
+    naive_identity_count = len(naive_identity_pairs)
+    cross_source_merged = naive_identity_count - total_canonical
+
     logger.info(
         "disambiguate_summary",
         total_mentions=total_mentions,
@@ -822,6 +900,8 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
         total_ambiguous=total_ambiguous,
         resolution_rate_pct=round(total_resolved / max(total_mentions, 1) * 100, 1),
         bio_coverage_pct=bio_coverage,
+        naive_identity_count=naive_identity_count,
+        cross_source_merged=cross_source_merged,
     )
 
     # ---------------------------------------------------------------------------

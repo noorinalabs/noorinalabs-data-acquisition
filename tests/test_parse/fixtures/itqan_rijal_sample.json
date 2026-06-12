@@ -1,0 +1,4581 @@
+{
+ "320": {
+  "id": 320,
+  "full_name": "سعيد بن سماك بن حرب",
+  "kunya": "أبي خزامة",
+  "grade_en": "abandoned",
+  "grade_ar": "متروك الحديث",
+  "color": "#c0392b",
+  "death": "-",
+  "tabaqat": "-",
+  "city": "-",
+  "laqab": "-",
+  "nasab": "-",
+  "dhahabi": "-",
+  "namings": [
+   "ابن السماك بن حرب",
+   "ابن سماك بن حرب",
+   "سعيد بن سماك بن حرب",
+   "سعيد بن سماك بن حرب بن أوس بن خالد بن نزار بن معاوية بن حارثة بن ربيعة بن عامر بن ذهل بن ثعلبة",
+   "سعيد بن سماك الذهلي"
+  ],
+  "classical_sources": {
+   "mizan": {
+    "entry_id": 3208,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك الحديث"
+   },
+   "lisan_mizan": {
+    "entry_id": 3433,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك الحديث"
+   },
+   "jarh": {
+    "entry_id": 133,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك"
+   },
+   "thiqat": {
+    "entry_id": 8134,
+    "grade_en": "reliable",
+    "grade_ar": "ذكره ابن حبان في الثقات"
+   },
+   "mughni_ducafa": {
+    "entry_id": 2408,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك"
+   },
+   "diwan_ducafa": {
+    "entry_id": 1615,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك"
+   }
+  },
+  "teachers": [
+   2325,
+   7019
+  ],
+  "students": [
+   319,
+   1142,
+   2790
+  ],
+  "id_score": 70,
+  "grade_score": 45,
+  "confidence": "B",
+  "id_flags": [
+   "good_nasab",
+   "has_kunya",
+   "unique_name",
+   "multi_source"
+  ],
+  "grade_flags": [
+   "source_graded"
+  ],
+  "provenance": {
+   "origin": "classical",
+   "sources": [
+    {
+     "type": "mizan",
+     "entry_id": 3208,
+     "grade": "abandoned"
+    },
+    {
+     "type": "lisan_mizan",
+     "entry_id": 3433,
+     "grade": "abandoned"
+    },
+    {
+     "type": "jarh",
+     "entry_id": 133,
+     "grade": "abandoned"
+    },
+    {
+     "type": "thiqat",
+     "entry_id": 8134,
+     "grade": "reliable"
+    },
+    {
+     "type": "mughni_ducafa",
+     "entry_id": 2408,
+     "grade": "abandoned"
+    },
+    {
+     "type": "diwan_ducafa",
+     "entry_id": 1615,
+     "grade": "abandoned"
+    }
+   ],
+   "arsanad_id": 320,
+   "source_count": 6,
+   "introduced_via": {
+    "teacher_count": 1,
+    "student_count": 3
+   }
+  },
+  "unique_key": "سعيد بن سماك بن حرب",
+  "uniqueness": "name_unique",
+  "gk_id": 17988,
+  "gk_match_method": "prefix3_unique"
+ },
+ "354": {
+  "id": 354,
+  "full_name": "عمر بن حفص",
+  "kunya": "أبو حفص",
+  "grade_en": "abandoned",
+  "grade_ar": "متروك",
+  "color": "#c0392b",
+  "death": "-",
+  "tabaqat": "-",
+  "city": "-",
+  "laqab": "-",
+  "nasab": "المعيطي",
+  "dhahabi": "-",
+  "namings": [
+   "عمر أبو حفص المعيطي",
+   "عمر بن حفص أبو حفص المعيطي"
+  ],
+  "classical_sources": {
+   "mizan": {
+    "entry_id": 6081,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك"
+   },
+   "lisan_mizan": {
+    "entry_id": 5599,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك"
+   },
+   "jarh": {
+    "entry_id": 537,
+    "grade_en": "weak",
+    "grade_ar": "منكر الحديث"
+   },
+   "thiqat": {
+    "entry_id": 9527,
+    "grade_en": "reliable",
+    "grade_ar": "ذكره ابن حبان في الثقات"
+   },
+   "kamil": {
+    "entry_id": 1220,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك الحديث"
+   },
+   "tarikh": {
+    "entry_id": 5901,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك الحديث"
+   }
+  },
+  "teachers": [
+   173
+  ],
+  "students": [
+   353
+  ],
+  "global_id": 29655,
+  "id_score": 15,
+  "grade_score": 45,
+  "confidence": "C",
+  "id_flags": [
+   "short_nasab",
+   "has_kunya",
+   "collision_large",
+   "multi_source"
+  ],
+  "grade_flags": [
+   "source_graded"
+  ],
+  "provenance": {
+   "kaggle_id": 29655,
+   "origin": "merged",
+   "sources": [
+    {
+     "type": "mizan",
+     "entry_id": 6081,
+     "grade": "abandoned"
+    },
+    {
+     "type": "lisan_mizan",
+     "entry_id": 5599,
+     "grade": "abandoned"
+    },
+    {
+     "type": "jarh",
+     "entry_id": 537,
+     "grade": "weak"
+    },
+    {
+     "type": "thiqat",
+     "entry_id": 9527,
+     "grade": "reliable"
+    },
+    {
+     "type": "kamil",
+     "entry_id": 1220,
+     "grade": "abandoned"
+    },
+    {
+     "type": "tarikh",
+     "entry_id": 5901,
+     "grade": "abandoned"
+    }
+   ],
+   "arsanad_id": 354,
+   "source_count": 6,
+   "kaggle_name": "'Umar bin Hafs عمر بن حفص",
+   "kaggle_grade": "Succ. (Taba' Tabi')",
+   "introduced_via": {
+    "teacher_count": 1,
+    "student_count": 1
+   }
+  },
+  "unique_key": "عمر بن حفص|k:ابو حفص|t:هشام بن عروة بن الزب|s:احمد بن محمد بن حنبل",
+  "uniqueness": "composite_unique"
+ },
+ "635": {
+  "id": 635,
+  "full_name": "هشام بن زياد بن أبي يزيد ، وهو هشام بن أبي هشام ، ويقال : هشام بن أبي الوليد",
+  "kunya": "أبو المقدام",
+  "grade_en": "abandoned",
+  "grade_ar": "متروك",
+  "color": "#c0392b",
+  "death": "-",
+  "tabaqat": "السادسة",
+  "city": "البصرة",
+  "laqab": "-",
+  "nasab": "القرشي ، المدني ، البصري ، العثماني الأموي مولاهم",
+  "dhahabi": "ضعفوه",
+  "namings": [
+   "أبو المقدام",
+   "أبو المقدام مولى لقريش",
+   "أبو المقدام هشام بن زياد",
+   "أبو المقدام هشام بن زياد مولى لعثمان",
+   "أبو المقدم",
+   "كثير بن هشام أبو المقدام",
+   "هشام أبو المقدام",
+   "هشام أبي المقدام",
+   "هشام بن أبي الوليد",
+   "هشام بن أبي هشام",
+   "هشام بن زياد",
+   "هشام بن زياد أبو المقدام",
+   "هشام بن زياد القرشي",
+   "هشام بن زياد هو أبو المقدام",
+   "هشام بن أبي هشام الحنفي"
+  ],
+  "classical_sources": {
+   "taqrib": {
+    "entry_id": 7292,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك"
+   },
+   "mizan": {
+    "entry_id": 9231,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك"
+   },
+   "jarh": {
+    "entry_id": 882,
+    "grade_en": "mostly_reliable",
+    "grade_ar": "يكتب حديثه"
+   },
+   "thiqat": {
+    "entry_id": 5941,
+    "grade_en": "reliable",
+    "grade_ar": "ذكره ابن حبان في الثقات"
+   },
+   "kashif": {
+    "entry_id": 5962,
+    "grade_en": "weak",
+    "grade_ar": "ضعفوه"
+   },
+   "tahdhib_tahdhib": {
+    "entry_id": 78,
+    "grade_en": "fabricator",
+    "grade_ar": "يضع"
+   },
+   "tabaqat": {
+    "entry_id": 4103,
+    "grade_en": "weak",
+    "grade_ar": "ضعيف"
+   },
+   "tahdhib_kamal": {
+    "entry_id": 6575,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   },
+   "kamil": {
+    "entry_id": 2023,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك الحديث"
+   }
+  },
+  "teachers": [
+   42,
+   117,
+   173,
+   209,
+   1020,
+   1167,
+   1280,
+   1393,
+   2028,
+   2433,
+   2676,
+   3396,
+   9517,
+   9528,
+   11256,
+   11664,
+   13738,
+   15550,
+   16948
+  ],
+  "students": [
+   147,
+   171,
+   446,
+   634,
+   669,
+   670,
+   679,
+   1023,
+   1032,
+   1808,
+   2205,
+   2220,
+   2675,
+   2938,
+   3227,
+   3566,
+   4294,
+   4619,
+   7069,
+   7557,
+   7832,
+   8192,
+   8955,
+   16472
+  ],
+  "global_id": 12556,
+  "id_score": 70,
+  "grade_score": 75,
+  "confidence": "A",
+  "id_flags": [
+   "good_nasab",
+   "has_kunya",
+   "unique_name",
+   "multi_source"
+  ],
+  "grade_flags": [
+   "taqrib_grade",
+   "source_graded"
+  ],
+  "provenance": {
+   "kaggle_id": 12556,
+   "origin": "merged",
+   "sources": [
+    {
+     "type": "taqrib",
+     "entry_id": 7292,
+     "grade": "abandoned"
+    },
+    {
+     "type": "mizan",
+     "entry_id": 9231,
+     "grade": "abandoned"
+    },
+    {
+     "type": "jarh",
+     "entry_id": 882,
+     "grade": "mostly_reliable"
+    },
+    {
+     "type": "thiqat",
+     "entry_id": 5941,
+     "grade": "reliable"
+    },
+    {
+     "type": "kashif",
+     "entry_id": 5962,
+     "grade": "weak"
+    },
+    {
+     "type": "tahdhib_tahdhib",
+     "entry_id": 78,
+     "grade": "fabricator"
+    },
+    {
+     "type": "tabaqat",
+     "entry_id": 4103,
+     "grade": "weak"
+    },
+    {
+     "type": "tahdhib_kamal",
+     "entry_id": 6575,
+     "grade": "unknown"
+    },
+    {
+     "type": "kamil",
+     "entry_id": 2023,
+     "grade": "abandoned"
+    }
+   ],
+   "arsanad_id": 635,
+   "source_count": 9,
+   "kaggle_name": "Hisham bin Ziyad (Abi Hisham) هشام بن زياد/ بن أبي هشام",
+   "kaggle_grade": "Follower(Tabi') [6th generation]",
+   "introduced_via": {
+    "teacher_count": 19,
+    "student_count": 24
+   }
+  },
+  "unique_key": "هشام بن زياد بن ابي يزيد",
+  "uniqueness": "name_unique",
+  "gk_id": 33161,
+  "gk_match_method": "naming_variant"
+ },
+ "639": {
+  "id": 639,
+  "full_name": "محمد بن عبد العزيز بن عمر بن عبد الرحمن بن عوف",
+  "kunya": "-",
+  "grade_en": "abandoned",
+  "grade_ar": "متروك الحديث",
+  "color": "#c0392b",
+  "death": "بين 161 هـ إلى 170 هـ",
+  "tabaqat": "-",
+  "city": "المدينة",
+  "laqab": "-",
+  "nasab": "الزهري ، القاضي ، القرشي ، المديني ، العوفى",
+  "dhahabi": "-",
+  "namings": [
+   "أبي",
+   "أبيه",
+   "محمد بن عبد العزيز",
+   "محمد بن عبد العزيز بن عبد الرحمن",
+   "محمد بن عبد العزيز بن عبد الرحمن بن عوف",
+   "محمد بن عبد العزيز بن عبد الملك",
+   "محمد بن عبد العزيز بن عمر بن عبد الرحمن بن عوف",
+   "محمد بن عبد العزيز من ولد عبد الرحمن بن عوف",
+   "محمد بن عبد العزيز الزهري"
+  ],
+  "classical_sources": {
+   "jarh": {
+    "entry_id": 24,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   },
+   "kamil": {
+    "entry_id": 1717,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك الحديث"
+   }
+  },
+  "teachers": [
+   569,
+   822,
+   2433,
+   2434,
+   6371,
+   11289,
+   13168,
+   13486,
+   14169
+  ],
+  "students": [
+   1026,
+   1427,
+   2793,
+   3568,
+   3921,
+   4307,
+   5831,
+   9979,
+   10860
+  ],
+  "id_score": 90,
+  "grade_score": 45,
+  "confidence": "A",
+  "id_flags": [
+   "deep_nasab",
+   "has_death",
+   "has_kunya",
+   "unique_name",
+   "has_source"
+  ],
+  "grade_flags": [
+   "source_graded"
+  ],
+  "provenance": {
+   "origin": "classical",
+   "sources": [
+    {
+     "type": "jarh",
+     "entry_id": 24,
+     "grade": "unknown"
+    },
+    {
+     "type": "kamil",
+     "entry_id": 1717,
+     "grade": "abandoned"
+    }
+   ],
+   "arsanad_id": 639,
+   "source_count": 2,
+   "introduced_via": {
+    "teacher_count": 9,
+    "student_count": 9
+   }
+  },
+  "unique_key": "محمد بن عبد العزيز بن عمر بن عبد الرحمن بن عوف",
+  "uniqueness": "name_unique",
+  "gk_id": 29601,
+  "gk_match_method": "exact_name"
+ },
+ "758": {
+  "id": 758,
+  "full_name": "يوسف بن أبي ذرة",
+  "kunya": "-",
+  "grade_en": "abandoned",
+  "grade_ar": "لا شيء",
+  "color": "#c0392b",
+  "death": "-",
+  "tabaqat": "-",
+  "city": "-",
+  "laqab": "-",
+  "nasab": "الأنصاري",
+  "dhahabi": "-",
+  "namings": [
+   "يوسف بن أبي ذرة",
+   "يوسف بن أبي ذرة الأنصاري"
+  ],
+  "classical_sources": {
+   "mizan": {
+    "entry_id": 9873,
+    "grade_en": "abandoned",
+    "grade_ar": "لا شيء"
+   },
+   "lisan_mizan": {
+    "entry_id": 8685,
+    "grade_en": "abandoned",
+    "grade_ar": "لا شيء"
+   },
+   "mughni_ducafa": {
+    "entry_id": 7234,
+    "grade_en": "abandoned",
+    "grade_ar": "لا شيء"
+   }
+  },
+  "teachers": [
+   759
+  ],
+  "students": [
+   757
+  ],
+  "id_score": 60,
+  "grade_score": 45,
+  "confidence": "B",
+  "id_flags": [
+   "short_nasab",
+   "has_kunya",
+   "unique_name",
+   "multi_source"
+  ],
+  "grade_flags": [
+   "source_graded"
+  ],
+  "provenance": {
+   "origin": "classical",
+   "sources": [
+    {
+     "type": "mizan",
+     "entry_id": 9873,
+     "grade": "abandoned"
+    },
+    {
+     "type": "lisan_mizan",
+     "entry_id": 8685,
+     "grade": "abandoned"
+    },
+    {
+     "type": "mughni_ducafa",
+     "entry_id": 7234,
+     "grade": "abandoned"
+    }
+   ],
+   "arsanad_id": 758,
+   "source_count": 3,
+   "introduced_via": {
+    "teacher_count": 1,
+    "student_count": 1
+   }
+  },
+  "unique_key": "يوسف بن ابي ذرة",
+  "uniqueness": "name_unique",
+  "gk_id": 34318,
+  "gk_match_method": "exact_name"
+ },
+ "1235": {
+  "id": 1235,
+  "full_name": "علي بن الحزور ، ويقال : علي بن أبي فاطمة",
+  "kunya": "أبو الحسن",
+  "grade_en": "abandoned",
+  "grade_ar": "متروك",
+  "color": "#c0392b",
+  "death": "بعد 130 هـ",
+  "tabaqat": "السادسة",
+  "city": "-",
+  "laqab": "-",
+  "nasab": "الكوفي ، الغنوي",
+  "dhahabi": "قال البخاري : فيه نظر",
+  "namings": [
+   "علي بن أبي فاطمة",
+   "علي بن الحزور",
+   "علي بن أبي فاطمة الغنوي"
+  ],
+  "classical_sources": {
+   "taqrib": {
+    "entry_id": 4703,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك"
+   },
+   "mughni_ducafa": {
+    "entry_id": 4315,
+    "grade_en": "weak",
+    "grade_ar": "واه"
+   },
+   "tahdhib_tahdhib": {
+    "entry_id": 508,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك الحديث"
+   },
+   "mizan": {
+    "entry_id": 5809,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك"
+   },
+   "tahdhib_kamal": {
+    "entry_id": 4039,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   }
+  },
+  "teachers": [
+   1124,
+   1236,
+   2092,
+   2511,
+   3557,
+   4096,
+   4401,
+   5720,
+   14012,
+   15394,
+   16951,
+   18221,
+   73510,
+   94035
+  ],
+  "students": [
+   280,
+   626,
+   1169,
+   1234,
+   2509,
+   4453,
+   5058,
+   6187
+  ],
+  "global_id": 15383,
+  "id_score": 80,
+  "grade_score": 75,
+  "confidence": "A",
+  "id_flags": [
+   "short_nasab",
+   "has_death",
+   "has_kunya",
+   "unique_name",
+   "multi_source"
+  ],
+  "grade_flags": [
+   "taqrib_grade",
+   "source_graded"
+  ],
+  "provenance": {
+   "kaggle_id": 15383,
+   "origin": "merged",
+   "sources": [
+    {
+     "type": "taqrib",
+     "entry_id": 4703,
+     "grade": "abandoned"
+    },
+    {
+     "type": "mughni_ducafa",
+     "entry_id": 4315,
+     "grade": "weak"
+    },
+    {
+     "type": "tahdhib_tahdhib",
+     "entry_id": 508,
+     "grade": "abandoned"
+    },
+    {
+     "type": "mizan",
+     "entry_id": 5809,
+     "grade": "abandoned"
+    },
+    {
+     "type": "tahdhib_kamal",
+     "entry_id": 4039,
+     "grade": "unknown"
+    }
+   ],
+   "arsanad_id": 1235,
+   "source_count": 5,
+   "kaggle_name": "'Ali bin al-Hazur/ 'Ali bin Abi Fatima علي بن الحزور/علي بن ",
+   "kaggle_grade": "Follower(Tabi') [6th generation]",
+   "introduced_via": {
+    "teacher_count": 4,
+    "student_count": 8
+   }
+  },
+  "unique_key": "علي بن الحزور",
+  "uniqueness": "name_unique",
+  "gk_id": 5731,
+  "gk_match_method": "exact_name"
+ },
+ "1308": {
+  "id": 1308,
+  "full_name": "المفضل بن محمد ، وسمى الخطيب جده يعلى",
+  "kunya": "-",
+  "grade_en": "abandoned",
+  "grade_ar": "متروك",
+  "color": "#c0392b",
+  "death": "168 هـ",
+  "tabaqat": "-",
+  "city": "-",
+  "laqab": "-",
+  "nasab": "الضبي ، الكوفي ، المقرئ",
+  "dhahabi": "-",
+  "namings": [
+   "المفضل بن محمد",
+   "المفضل بن محمد الضبي",
+   "المفضل بن محمد الكوفي",
+   "المفضل بن محمد النحوي",
+   "مفضل بن محمد الضبي"
+  ],
+  "classical_sources": {
+   "mizan": {
+    "entry_id": 8741,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك"
+   },
+   "mughni_ducafa": {
+    "entry_id": 6399,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك الحديث"
+   },
+   "tarikh_islam": {
+    "entry_id": 3966,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   },
+   "macrifa_qurra": {
+    "entry_id": 48,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك"
+   }
+  },
+  "teachers": [
+   467,
+   739,
+   1037,
+   2325,
+   4360
+  ],
+  "students": [
+   15,
+   3134
+  ],
+  "id_score": 80,
+  "grade_score": 45,
+  "confidence": "B",
+  "id_flags": [
+   "short_nasab",
+   "has_death",
+   "has_kunya",
+   "unique_name",
+   "multi_source"
+  ],
+  "grade_flags": [
+   "source_graded"
+  ],
+  "provenance": {
+   "origin": "classical",
+   "sources": [
+    {
+     "type": "mizan",
+     "entry_id": 8741,
+     "grade": "abandoned"
+    },
+    {
+     "type": "mughni_ducafa",
+     "entry_id": 6399,
+     "grade": "abandoned"
+    },
+    {
+     "type": "tarikh_islam",
+     "entry_id": 3966,
+     "grade": "unknown"
+    },
+    {
+     "type": "macrifa_qurra",
+     "entry_id": 48,
+     "grade": "abandoned"
+    }
+   ],
+   "arsanad_id": 1308,
+   "source_count": 4,
+   "introduced_via": {
+    "teacher_count": 5,
+    "student_count": 2
+   }
+  },
+  "unique_key": "المفضل بن محمد",
+  "uniqueness": "name_unique",
+  "gk_id": 32029,
+  "gk_match_method": "naming_variant"
+ },
+ "1320": {
+  "id": 1320,
+  "full_name": "القاسم بن محمد بن عبد الله بن محمد بن عقيل بن ابى طالب",
+  "kunya": "-",
+  "grade_en": "abandoned",
+  "grade_ar": "متروك",
+  "color": "#c0392b",
+  "death": "-",
+  "tabaqat": "-",
+  "city": "-",
+  "laqab": "-",
+  "nasab": "الهاشمي ، الطالبي",
+  "dhahabi": "-",
+  "namings": [
+   "القاسم بن محمد العقيلي",
+   "القاسم بن محمد بن عبد الله بن عقيل",
+   "القاسم بن محمد بن عبد الله بن محمد بن عقيل"
+  ],
+  "classical_sources": {
+   "mughni_ducafa": {
+    "entry_id": 5011,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك"
+   },
+   "diwan_ducafa": {
+    "entry_id": 3425,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك"
+   }
+  },
+  "teachers": [
+   1321,
+   1322
+  ],
+  "students": [
+   880,
+   1319,
+   3452
+  ],
+  "id_score": 70,
+  "grade_score": 45,
+  "confidence": "B",
+  "id_flags": [
+   "deep_nasab",
+   "has_kunya",
+   "unique_name",
+   "has_source"
+  ],
+  "grade_flags": [
+   "source_graded"
+  ],
+  "provenance": {
+   "origin": "classical",
+   "sources": [
+    {
+     "type": "mughni_ducafa",
+     "entry_id": 5011,
+     "grade": "abandoned"
+    },
+    {
+     "type": "diwan_ducafa",
+     "entry_id": 3425,
+     "grade": "abandoned"
+    }
+   ],
+   "arsanad_id": 1320,
+   "source_count": 2,
+   "introduced_via": {
+    "teacher_count": 2,
+    "student_count": 3
+   }
+  },
+  "unique_key": "القاسم بن محمد بن عبد الله بن محمد بن عقيل بن ابى طالب",
+  "uniqueness": "name_unique"
+ },
+ "357": {
+  "id": 357,
+  "full_name": "مطهر بن الهيثم بن الحجاج",
+  "kunya": "-",
+  "grade_en": "fabricator",
+  "grade_ar": "متروك الحديث",
+  "color": "#c0392b",
+  "death": "بين 191 هـ و200 هـ",
+  "tabaqat": "التاسعة",
+  "city": "-",
+  "laqab": "-",
+  "nasab": "الطائي ، البصري ، الغساني ، الدمشقي",
+  "dhahabi": "واه",
+  "namings": [
+   "مطهر بن الهيثم",
+   "مطهر بن الهيثم الطائي"
+  ],
+  "classical_sources": {
+   "jarh": {
+    "entry_id": 1815,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   },
+   "mughni_ducafa": {
+    "entry_id": 6290,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك الحديث"
+   },
+   "diwan_ducafa": {
+    "entry_id": 4152,
+    "grade_en": "abandoned",
+    "grade_ar": "تركوه"
+   },
+   "kashif": {
+    "entry_id": 5486,
+    "grade_en": "weak",
+    "grade_ar": "واه"
+   },
+   "tahdhib_tahdhib": {
+    "entry_id": 337,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك الحديث"
+   },
+   "tahdhib_kamal": {
+    "entry_id": 6009,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   },
+   "mizan": {
+    "entry_id": 8602,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك الحديث"
+   }
+  },
+  "teachers": [
+   231,
+   358,
+   1124,
+   2511,
+   3768,
+   5788,
+   7604,
+   14012,
+   15984,
+   18221,
+   94035
+  ],
+  "students": [
+   356,
+   491,
+   5091
+  ],
+  "id_score": 90,
+  "grade_score": 45,
+  "confidence": "A",
+  "id_flags": [
+   "good_nasab",
+   "has_death",
+   "has_kunya",
+   "unique_name",
+   "multi_source"
+  ],
+  "grade_flags": [
+   "source_graded",
+   "hokm_composite_abandoned"
+  ],
+  "provenance": {
+   "origin": "classical",
+   "sources": [
+    {
+     "type": "jarh",
+     "entry_id": 1815,
+     "grade": "unknown"
+    },
+    {
+     "type": "mughni_ducafa",
+     "entry_id": 6290,
+     "grade": "abandoned"
+    },
+    {
+     "type": "diwan_ducafa",
+     "entry_id": 4152,
+     "grade": "abandoned"
+    },
+    {
+     "type": "kashif",
+     "entry_id": 5486,
+     "grade": "weak"
+    },
+    {
+     "type": "tahdhib_tahdhib",
+     "entry_id": 337,
+     "grade": "abandoned"
+    },
+    {
+     "type": "tahdhib_kamal",
+     "entry_id": 6009,
+     "grade": "unknown"
+    },
+    {
+     "type": "mizan",
+     "entry_id": 8602,
+     "grade": "abandoned"
+    }
+   ],
+   "arsanad_id": 357,
+   "source_count": 7,
+   "introduced_via": {
+    "teacher_count": 3,
+    "student_count": 3
+   }
+  },
+  "unique_key": "مطهر بن الهيثم بن الحجاج",
+  "uniqueness": "name_unique",
+  "gk_id": 7535,
+  "gk_match_method": "exact_name"
+ },
+ "470": {
+  "id": 470,
+  "full_name": "موسى بن زكريا",
+  "kunya": "-",
+  "grade_en": "fabricator",
+  "grade_ar": "متروك",
+  "color": "#c0392b",
+  "death": "-",
+  "tabaqat": "-",
+  "city": "-",
+  "laqab": "-",
+  "nasab": "التستري",
+  "dhahabi": "-",
+  "namings": [
+   "أبو عمران التستري",
+   "موسى بن زكريا",
+   "موسى بن زكريا التستري",
+   "موسى بن زكريا التستري أبو عمران"
+  ],
+  "classical_sources": {
+   "mizan": {
+    "entry_id": 8871,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك"
+   },
+   "lisan_mizan": {
+    "entry_id": 7997,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك"
+   },
+   "mughni_ducafa": {
+    "entry_id": 6491,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك"
+   }
+  },
+  "teachers": [
+   223,
+   241,
+   471,
+   560,
+   726,
+   882,
+   1426,
+   1465,
+   1509,
+   1630,
+   1632,
+   1880,
+   2000,
+   2005,
+   2104,
+   2160,
+   2198,
+   2548,
+   2602,
+   2656,
+   2703,
+   2938,
+   3063,
+   3430,
+   3576,
+   3585,
+   3589,
+   3620,
+   4006,
+   4117,
+   4127,
+   4299,
+   4359,
+   4451,
+   4622,
+   4627,
+   5513,
+   6221,
+   6466,
+   6565,
+   6685,
+   6788,
+   6854,
+   7385,
+   8035,
+   8265,
+   8684,
+   11582,
+   12475,
+   12666
+  ],
+  "students": [
+   202,
+   326,
+   385,
+   469,
+   4504,
+   8659
+  ],
+  "id_score": 60,
+  "grade_score": 45,
+  "confidence": "B",
+  "id_flags": [
+   "short_nasab",
+   "has_kunya",
+   "unique_name",
+   "multi_source"
+  ],
+  "grade_flags": [
+   "source_graded",
+   "hokm_composite_abandoned"
+  ],
+  "provenance": {
+   "origin": "classical",
+   "sources": [
+    {
+     "type": "mizan",
+     "entry_id": 8871,
+     "grade": "abandoned"
+    },
+    {
+     "type": "lisan_mizan",
+     "entry_id": 7997,
+     "grade": "abandoned"
+    },
+    {
+     "type": "mughni_ducafa",
+     "entry_id": 6491,
+     "grade": "abandoned"
+    }
+   ],
+   "arsanad_id": 470,
+   "source_count": 3,
+   "introduced_via": {
+    "teacher_count": 50,
+    "student_count": 6
+   }
+  },
+  "unique_key": "موسى بن زكريا",
+  "uniqueness": "name_unique",
+  "gk_id": 32343,
+  "gk_match_method": "exact_name"
+ },
+ "651": {
+  "id": 651,
+  "full_name": "خالد بن إلياس : ويقال : إياس بن صخر بن أبي الجهم : عبيد بن حذيفة بن غانم بن عامر بن عبد الله بن عبيد بن عويج بن عدي بن كعب بن لؤي بن غالب",
+  "kunya": "أبو الهيثم.",
+  "grade_en": "fabricator",
+  "grade_ar": "متروك الحديث",
+  "color": "#c0392b",
+  "death": "بين 161 هـ و170 هـ",
+  "tabaqat": "السابعة.",
+  "city": "المدينة",
+  "laqab": "-",
+  "nasab": "العدوي ، القرشي ، المدني.",
+  "dhahabi": "ضعفوه",
+  "namings": [
+   "خالد",
+   "خالد بن إلياس",
+   "خالد بن إلياس ويقال ابن إياس",
+   "خالد بن إياس",
+   "خالد بن إياس القرشي"
+  ],
+  "classical_sources": {
+   "taqrib": {
+    "entry_id": 1617,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك الحديث"
+   },
+   "mizan": {
+    "entry_id": 2411,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك"
+   },
+   "jarh": {
+    "entry_id": 1440,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك الحديث"
+   },
+   "kamil": {
+    "entry_id": 571,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك الحديث"
+   },
+   "mughni_ducafa": {
+    "entry_id": 1888,
+    "grade_en": "weak",
+    "grade_ar": ""
+   },
+   "diwan_ducafa": {
+    "entry_id": 1207,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك"
+   },
+   "kashif": {
+    "entry_id": 1306,
+    "grade_en": "weak",
+    "grade_ar": "ضعفوه"
+   },
+   "isaba": {
+    "entry_id": 2147,
+    "grade_en": "companion",
+    "grade_ar": "ذكره ابن حجر في الإصابة"
+   },
+   "tahdhib_tahdhib": {
+    "entry_id": 152,
+    "grade_en": "fabricator",
+    "grade_ar": "يضع"
+   },
+   "tabaqat": {
+    "entry_id": 2172,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   },
+   "tahdhib_kamal": {
+    "entry_id": 1556,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   }
+  },
+  "teachers": [
+   221,
+   288,
+   303,
+   566,
+   572,
+   652,
+   1434,
+   1439,
+   1936,
+   2433,
+   2434,
+   3521,
+   6044,
+   6655,
+   7681,
+   8326,
+   8436,
+   13379,
+   16407
+  ],
+  "students": [
+   26,
+   61,
+   157,
+   225,
+   431,
+   438,
+   1196,
+   1536,
+   1558,
+   1749,
+   2710,
+   3533,
+   4241,
+   6402,
+   6785,
+   8419
+  ],
+  "global_id": 22048,
+  "id_score": 45,
+  "grade_score": 75,
+  "confidence": "B",
+  "id_flags": [
+   "short_nasab",
+   "has_death",
+   "has_kunya",
+   "collision_small",
+   "multi_source"
+  ],
+  "grade_flags": [
+   "taqrib_grade",
+   "source_graded",
+   "hokm_composite_abandoned"
+  ],
+  "provenance": {
+   "kaggle_id": 22048,
+   "origin": "merged",
+   "sources": [
+    {
+     "type": "taqrib",
+     "entry_id": 1617,
+     "grade": "abandoned"
+    },
+    {
+     "type": "mizan",
+     "entry_id": 2411,
+     "grade": "abandoned"
+    },
+    {
+     "type": "jarh",
+     "entry_id": 1440,
+     "grade": "abandoned"
+    },
+    {
+     "type": "kamil",
+     "entry_id": 571,
+     "grade": "abandoned"
+    },
+    {
+     "type": "mughni_ducafa",
+     "entry_id": 1888,
+     "grade": "weak"
+    },
+    {
+     "type": "diwan_ducafa",
+     "entry_id": 1207,
+     "grade": "abandoned"
+    },
+    {
+     "type": "kashif",
+     "entry_id": 1306,
+     "grade": "weak"
+    },
+    {
+     "type": "isaba",
+     "entry_id": 2147,
+     "grade": "companion"
+    },
+    {
+     "type": "tahdhib_tahdhib",
+     "entry_id": 152,
+     "grade": "fabricator"
+    },
+    {
+     "type": "tabaqat",
+     "entry_id": 2172,
+     "grade": "unknown"
+    },
+    {
+     "type": "tahdhib_kamal",
+     "entry_id": 1556,
+     "grade": "unknown"
+    }
+   ],
+   "arsanad_id": 651,
+   "source_count": 11,
+   "kaggle_name": "Khalid bin Ilyas خالد بن إلياس",
+   "kaggle_grade": "Succ. (Taba' Tabi') [7th generation]",
+   "introduced_via": {
+    "teacher_count": 19,
+    "student_count": 16
+   }
+  },
+  "unique_key": "خالد بن الياس|d:161|k:ابو الهيثم.|t:محمد بن المنكدر بن ع|s:محمد بن خازم",
+  "uniqueness": "composite_unique"
+ },
+ "721": {
+  "id": 721,
+  "full_name": "ياسين بن معاذ",
+  "kunya": "أبو خلف",
+  "grade_en": "fabricator",
+  "grade_ar": "متروك",
+  "color": "#c0392b",
+  "death": "قريب من موت الثوري",
+  "tabaqat": "-",
+  "city": "-",
+  "laqab": "-",
+  "nasab": "الزيات ، الكوفي ، اليمامي الأصل",
+  "dhahabi": "-",
+  "namings": [
+   "ياسين",
+   "ياسين أبو خلف",
+   "ياسين الزيات",
+   "ياسين الزيات أبي معاذ",
+   "ياسين بن أبي بسطام",
+   "ياسين بن معاذ",
+   "ياسين بن معاذ الزيات",
+   "ياسين بن معاذ الكوفي"
+  ],
+  "classical_sources": {
+   "mizan": {
+    "entry_id": 9451,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك"
+   },
+   "lisan_mizan": {
+    "entry_id": 8405,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك"
+   },
+   "jarh": {
+    "entry_id": 1350,
+    "grade_en": "weak",
+    "grade_ar": "منكر الحديث"
+   },
+   "kamil": {
+    "entry_id": 2094,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك الحديث"
+   },
+   "mughni_ducafa": {
+    "entry_id": 6916,
+    "grade_en": "weak",
+    "grade_ar": ""
+   },
+   "diwan_ducafa": {
+    "entry_id": 4593,
+    "grade_en": "weak",
+    "grade_ar": ""
+   },
+   "tarikh_islam": {
+    "entry_id": 3993,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك الحديث"
+   }
+  },
+  "teachers": [
+   51,
+   104,
+   381,
+   467,
+   569,
+   602,
+   688,
+   885,
+   1070,
+   1314,
+   1457,
+   2325,
+   3198,
+   3405,
+   3556,
+   8809
+  ],
+  "students": [
+   44,
+   144,
+   147,
+   329,
+   592,
+   720,
+   1013,
+   1502,
+   1555,
+   2074,
+   2215,
+   3095,
+   3727,
+   4556,
+   4728,
+   6272,
+   6402,
+   7125,
+   8716
+  ],
+  "id_score": 60,
+  "grade_score": 45,
+  "confidence": "B",
+  "id_flags": [
+   "short_nasab",
+   "has_kunya",
+   "unique_name",
+   "multi_source"
+  ],
+  "grade_flags": [
+   "source_graded",
+   "hokm_prefix_upgrade_abandoned"
+  ],
+  "provenance": {
+   "origin": "classical",
+   "sources": [
+    {
+     "type": "mizan",
+     "entry_id": 9451,
+     "grade": "abandoned"
+    },
+    {
+     "type": "lisan_mizan",
+     "entry_id": 8405,
+     "grade": "abandoned"
+    },
+    {
+     "type": "jarh",
+     "entry_id": 1350,
+     "grade": "weak"
+    },
+    {
+     "type": "kamil",
+     "entry_id": 2094,
+     "grade": "abandoned"
+    },
+    {
+     "type": "mughni_ducafa",
+     "entry_id": 6916,
+     "grade": "weak"
+    },
+    {
+     "type": "diwan_ducafa",
+     "entry_id": 4593,
+     "grade": "weak"
+    },
+    {
+     "type": "tarikh_islam",
+     "entry_id": 3993,
+     "grade": "abandoned"
+    }
+   ],
+   "arsanad_id": 721,
+   "source_count": 7,
+   "introduced_via": {
+    "teacher_count": 16,
+    "student_count": 19
+   }
+  },
+  "unique_key": "ياسين بن معاذ",
+  "uniqueness": "name_unique",
+  "gk_id": 33563,
+  "gk_match_method": "exact_name"
+ },
+ "1319": {
+  "id": 1319,
+  "full_name": "عبيد بن إسحاق بن الربيع",
+  "kunya": "أبو عبد الرحمن ، وقال علي بن مسلم : أبو إسحاق",
+  "grade_en": "fabricator",
+  "grade_ar": "متروك الحديث",
+  "color": "#c0392b",
+  "death": "214 هـ",
+  "tabaqat": "-",
+  "city": "-",
+  "laqab": "عطار المطلقات",
+  "nasab": "العطار ، الكوفي ، الضبي",
+  "dhahabi": "-",
+  "namings": [
+   "أبي",
+   "عبيد العطار",
+   "عبيد بن إسحاق",
+   "عبيد بن إسحاق العطار",
+   "عبيد بن إسحاق العطار الكوفي"
+  ],
+  "classical_sources": {
+   "mizan": {
+    "entry_id": 5416,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك الحديث"
+   },
+   "lisan_mizan": {
+    "entry_id": 5048,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك الحديث"
+   },
+   "jarh": {
+    "entry_id": 1859,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   },
+   "thiqat": {
+    "entry_id": 14256,
+    "grade_en": "reliable",
+    "grade_ar": "ذكره ابن حبان في الثقات"
+   },
+   "kamil": {
+    "entry_id": 1505,
+    "grade_en": "weak",
+    "grade_ar": "منكر الحديث"
+   },
+   "mughni_ducafa": {
+    "entry_id": 3955,
+    "grade_en": "weak",
+    "grade_ar": "ضعفوه"
+   },
+   "diwan_ducafa": {
+    "entry_id": 2720,
+    "grade_en": "weak",
+    "grade_ar": "ضعفوه"
+   },
+   "tarikh_islam": {
+    "entry_id": 5901,
+    "grade_en": "mostly_reliable",
+    "grade_ar": "شيخ"
+   }
+  },
+  "teachers": [
+   379,
+   442,
+   493,
+   925,
+   1125,
+   1134,
+   1284,
+   1320,
+   1588,
+   1976,
+   3211,
+   3574,
+   4412,
+   10202,
+   13786,
+   14436
+  ],
+  "students": [
+   355,
+   702,
+   1109,
+   1358,
+   1919,
+   2098,
+   2460,
+   3227,
+   5774,
+   6367,
+   6422,
+   6645,
+   6675,
+   7092,
+   13994
+  ],
+  "global_id": 31104,
+  "id_score": 90,
+  "grade_score": 45,
+  "confidence": "A",
+  "id_flags": [
+   "good_nasab",
+   "has_death",
+   "has_kunya",
+   "unique_name",
+   "multi_source"
+  ],
+  "grade_flags": [
+   "source_graded",
+   "hokm_prefix_upgrade_abandoned"
+  ],
+  "provenance": {
+   "kaggle_id": 31104,
+   "origin": "merged",
+   "sources": [
+    {
+     "type": "mizan",
+     "entry_id": 5416,
+     "grade": "abandoned"
+    },
+    {
+     "type": "lisan_mizan",
+     "entry_id": 5048,
+     "grade": "abandoned"
+    },
+    {
+     "type": "jarh",
+     "entry_id": 1859,
+     "grade": "unknown"
+    },
+    {
+     "type": "thiqat",
+     "entry_id": 14256,
+     "grade": "reliable"
+    },
+    {
+     "type": "kamil",
+     "entry_id": 1505,
+     "grade": "weak"
+    },
+    {
+     "type": "mughni_ducafa",
+     "entry_id": 3955,
+     "grade": "weak"
+    },
+    {
+     "type": "diwan_ducafa",
+     "entry_id": 2720,
+     "grade": "weak"
+    },
+    {
+     "type": "tarikh_islam",
+     "entry_id": 5901,
+     "grade": "mostly_reliable"
+    }
+   ],
+   "arsanad_id": 1319,
+   "source_count": 8,
+   "kaggle_name": "Ubaid bin Ishaq al-Tar Abu عبيد بن إسحاق العطار",
+   "kaggle_grade": "3rd Century AH",
+   "introduced_via": {
+    "teacher_count": 16,
+    "student_count": 15
+   }
+  },
+  "unique_key": "عبيد بن اسحاق بن الربيع",
+  "uniqueness": "name_unique",
+  "gk_id": 41023,
+  "gk_match_method": "prefix4_death_±0"
+ },
+ "1365": {
+  "id": 1365,
+  "full_name": "عباد بن صهيب",
+  "kunya": "أبو بكر",
+  "grade_en": "fabricator",
+  "grade_ar": "متروك",
+  "color": "#c0392b",
+  "death": "بعد 200 هـ ، أو : 212 هـ",
+  "tabaqat": "-",
+  "city": "-",
+  "laqab": "-",
+  "nasab": "البصري ، الكليبي",
+  "dhahabi": "-",
+  "namings": [
+   "أبو بكر الكليبي",
+   "أبي",
+   "عباد",
+   "عباد بن صهيب",
+   "عبادة بن صهيب",
+   "عباد بن صهيب الكليبي"
+  ],
+  "classical_sources": {
+   "mizan": {
+    "entry_id": 4127,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك"
+   },
+   "jarh": {
+    "entry_id": 417,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   },
+   "kamil": {
+    "entry_id": 1179,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك الحديث"
+   },
+   "mughni_ducafa": {
+    "entry_id": 3037,
+    "grade_en": "mostly_reliable",
+    "grade_ar": "صدوق"
+   },
+   "tabaqat": {
+    "entry_id": 4172,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   }
+  },
+  "teachers": [
+   45,
+   346,
+   365,
+   380,
+   389,
+   412,
+   547,
+   732,
+   906,
+   1366,
+   1697,
+   2239,
+   3534,
+   3639,
+   3737,
+   4139,
+   4896,
+   6956
+  ],
+  "students": [
+   1364,
+   2183,
+   11456,
+   13209
+  ],
+  "id_score": 80,
+  "grade_score": 45,
+  "confidence": "B",
+  "id_flags": [
+   "short_nasab",
+   "has_death",
+   "has_kunya",
+   "unique_name",
+   "multi_source"
+  ],
+  "grade_flags": [
+   "source_graded",
+   "hokm_prefix_upgrade_abandoned"
+  ],
+  "provenance": {
+   "origin": "classical",
+   "sources": [
+    {
+     "type": "mizan",
+     "entry_id": 4127,
+     "grade": "abandoned"
+    },
+    {
+     "type": "jarh",
+     "entry_id": 417,
+     "grade": "unknown"
+    },
+    {
+     "type": "kamil",
+     "entry_id": 1179,
+     "grade": "abandoned"
+    },
+    {
+     "type": "mughni_ducafa",
+     "entry_id": 3037,
+     "grade": "mostly_reliable"
+    },
+    {
+     "type": "tabaqat",
+     "entry_id": 4172,
+     "grade": "unknown"
+    }
+   ],
+   "arsanad_id": 1365,
+   "source_count": 5,
+   "introduced_via": {
+    "teacher_count": 18,
+    "student_count": 4
+   }
+  },
+  "unique_key": "عباد بن صهيب",
+  "uniqueness": "name_unique",
+  "gk_id": 20167,
+  "gk_match_method": "exact_name"
+ },
+ "1467": {
+  "id": 1467,
+  "full_name": "عبيد الله بن الوليد",
+  "kunya": "أبو إسماعيل",
+  "grade_en": "fabricator",
+  "grade_ar": "متروك الحديث",
+  "color": "#c0392b",
+  "death": "بين 141 هـ إلى 150 هـ",
+  "tabaqat": "السادسة",
+  "city": "-",
+  "laqab": "-",
+  "nasab": "الوصافي ، الكوفي ، العجلي",
+  "dhahabi": "ضعفوه",
+  "namings": [
+   "أبيه",
+   "الوصافي",
+   "عبيد الله الوصافي",
+   "عبيد الله بن الوليد",
+   "عبيد الله بن الوليد العجلي",
+   "عبيد الله بن الوليد الوصافي"
+  ],
+  "classical_sources": {
+   "kamil": {
+    "entry_id": 1156,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك الحديث"
+   },
+   "tahdhib_kamal": {
+    "entry_id": 3694,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   }
+  },
+  "teachers": [
+   42,
+   43,
+   247,
+   405,
+   781,
+   1708,
+   1990,
+   2144,
+   3304,
+   5200,
+   5852,
+   7559,
+   9173,
+   11133,
+   12471,
+   12607,
+   12751,
+   15020,
+   15394,
+   17669,
+   29451,
+   70404
+  ],
+  "students": [
+   26,
+   51,
+   61,
+   147,
+   180,
+   280,
+   434,
+   438,
+   493,
+   797,
+   1134,
+   1207,
+   1466,
+   1836,
+   1863,
+   2271,
+   2496,
+   2889,
+   3095,
+   3368,
+   4639,
+   8203
+  ],
+  "id_score": 70,
+  "grade_score": 45,
+  "confidence": "B",
+  "id_flags": [
+   "short_nasab",
+   "has_death",
+   "has_kunya",
+   "unique_name",
+   "has_source"
+  ],
+  "grade_flags": [
+   "source_graded",
+   "hokm_composite_abandoned"
+  ],
+  "provenance": {
+   "origin": "classical",
+   "sources": [
+    {
+     "type": "kamil",
+     "entry_id": 1156,
+     "grade": "abandoned"
+    },
+    {
+     "type": "tahdhib_kamal",
+     "entry_id": 3694,
+     "grade": "unknown"
+    }
+   ],
+   "arsanad_id": 1467,
+   "source_count": 2,
+   "introduced_via": {
+    "teacher_count": 11,
+    "student_count": 22
+   }
+  },
+  "unique_key": "عبيد الله بن الوليد",
+  "uniqueness": "name_unique",
+  "gk_id": 5378,
+  "gk_match_method": "exact_name",
+  "additional_info": {
+   "muslim_note": "Fabricator/abandoned narrator in Muslim. GK also grades negatively. Possibly in Muslim's muqaddimah (introduction) rather than main text, or used as supporting evidence. Grade remains fabricator."
+  }
+ },
+ "1554": {
+  "id": 1554,
+  "full_name": "إبراهيم بن إسحاق",
+  "kunya": "أبو إسحاق",
+  "grade_en": "fabricator",
+  "grade_ar": "متروك الحديث",
+  "color": "#c0392b",
+  "death": "230 هـ ، أو 232هـ",
+  "tabaqat": "-",
+  "city": "-",
+  "laqab": "-",
+  "nasab": "الصيني ، الجعفي مولاهم ، الكوفي",
+  "dhahabi": "-",
+  "namings": [
+   "إبراهيم بن إسحاق الجعفي",
+   "إبراهيم بن إسحاق الصيني",
+   "إبراهيم بن إسحاق الأنصاري"
+  ],
+  "classical_sources": {
+   "mizan": {
+    "entry_id": 31,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك الحديث"
+   },
+   "jarh": {
+    "entry_id": 203,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   },
+   "thiqat": {
+    "entry_id": 12321,
+    "grade_en": "reliable",
+    "grade_ar": "ذكره ابن حبان في الثقات"
+   },
+   "mughni_ducafa": {
+    "entry_id": 29,
+    "grade_en": "abandoned",
+    "grade_ar": "متروك الحديث"
+   }
+  },
+  "teachers": [
+   466,
+   777,
+   1284,
+   1555,
+   1585,
+   1655,
+   2917,
+   3117,
+   9845
+  ],
+  "students": [
+   167,
+   327,
+   1088,
+   1429,
+   1660,
+   2244,
+   6547,
+   9942,
+   14263
+  ],
+  "global_id": 31745,
+  "id_score": 35,
+  "grade_score": 45,
+  "confidence": "C",
+  "id_flags": [
+   "short_nasab",
+   "has_death",
+   "has_kunya",
+   "collision_large",
+   "multi_source"
+  ],
+  "grade_flags": [
+   "source_graded",
+   "hokm_composite_abandoned"
+  ],
+  "provenance": {
+   "kaggle_id": 31745,
+   "origin": "merged",
+   "sources": [
+    {
+     "type": "mizan",
+     "entry_id": 31,
+     "grade": "abandoned"
+    },
+    {
+     "type": "jarh",
+     "entry_id": 203,
+     "grade": "unknown"
+    },
+    {
+     "type": "thiqat",
+     "entry_id": 12321,
+     "grade": "reliable"
+    },
+    {
+     "type": "mughni_ducafa",
+     "entry_id": 29,
+     "grade": "abandoned"
+    }
+   ],
+   "arsanad_id": 1554,
+   "source_count": 4,
+   "kaggle_name": "Ibrahim bin Ishaq al-Syna إبراهيم بن إسحاق الصيني",
+   "kaggle_grade": "3rd Century AH",
+   "introduced_via": {
+    "teacher_count": 9,
+    "student_count": 9
+   }
+  },
+  "unique_key": "ابراهيم بن اسحاق|d:230|k:ابو اسحاق|t:علي بن هاشم بن البري|s:محمد بن عبد الله بن ",
+  "uniqueness": "composite_unique",
+  "gk_id": 11346,
+  "gk_match_method": "name_kunya"
+ },
+ "18": {
+  "id": 18,
+  "full_name": "علقمة بن وقاص بن محصن بن كلدة بن عبد ياليل بن طريف بن عتوارة بن عامر بن مالك بن ليث بن بكر بن عبد مناة بن كنانة",
+  "kunya": "أبو يحيى ، وقيل : أبو واقد",
+  "grade_en": "companion",
+  "grade_ar": "له صحبة",
+  "color": "#9b59b6",
+  "death": "في خلافة عبد الملك بن مروان",
+  "tabaqat": "الثانية",
+  "city": "المدينة",
+  "laqab": "-",
+  "nasab": "الليثي ، العتواري ، المدني",
+  "dhahabi": "ثقة",
+  "namings": [
+   "أبيه",
+   "جده",
+   "جده علقمة بن وقاص",
+   "جدي",
+   "علقمة",
+   "علقمة بن أبي وقاص",
+   "علقمة بن وقاص",
+   "علقمة بن وقاص الليثي",
+   "علقمة بن وقاص العتواري"
+  ],
+  "classical_sources": {
+   "taqrib": {
+    "entry_id": 4685,
+    "grade_en": "companion",
+    "grade_ar": "له صحبة"
+   },
+   "jarh": {
+    "entry_id": 2259,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   },
+   "thiqat": {
+    "entry_id": 4560,
+    "grade_en": "reliable",
+    "grade_ar": "ذكره ابن حبان في الثقات"
+   },
+   "kashif": {
+    "entry_id": 3877,
+    "grade_en": "reliable",
+    "grade_ar": "ثقة"
+   },
+   "isaba": {
+    "entry_id": 5684,
+    "grade_en": "companion",
+    "grade_ar": "ذكره ابن حجر في الإصابة"
+   },
+   "siyar": {
+    "entry_id": 15,
+    "grade_en": "reliable",
+    "grade_ar": "ثقه"
+   },
+   "tahdhib_tahdhib": {
+    "entry_id": 489,
+    "grade_en": "reliable",
+    "grade_ar": "ثقة"
+   },
+   "tabaqat": {
+    "entry_id": 1457,
+    "grade_en": "reliable",
+    "grade_ar": "ثقة"
+   },
+   "tadhkirat_huffaz": {
+    "entry_id": 35,
+    "grade_en": "reliable",
+    "grade_ar": "ثقة"
+   },
+   "mucin_tabaqat": {
+    "entry_id": 222,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   },
+   "tahdhib_kamal": {
+    "entry_id": 4021,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   }
+  },
+  "teachers": [
+   19,
+   48,
+   165,
+   181,
+   231,
+   342,
+   356,
+   397,
+   567,
+   603,
+   623,
+   683,
+   828,
+   1122,
+   2139,
+   4258,
+   5241,
+   6011,
+   6336,
+   8621,
+   9839,
+   10179,
+   12471,
+   13783,
+   13944,
+   17523,
+   29451,
+   33950,
+   56335,
+   56357
+  ],
+  "students": [
+   17,
+   399,
+   569,
+   685,
+   1314,
+   1921,
+   2073,
+   8655,
+   13318
+  ],
+  "global_id": 11042,
+  "generation": 2,
+  "id_score": 80,
+  "grade_score": 75,
+  "confidence": "A",
+  "id_flags": [
+   "deep_nasab",
+   "has_kunya",
+   "unique_name",
+   "multi_source"
+  ],
+  "grade_flags": [
+   "taqrib_grade",
+   "source_graded"
+  ],
+  "provenance": {
+   "kaggle_id": 11042,
+   "origin": "merged",
+   "sources": [
+    {
+     "type": "taqrib",
+     "entry_id": 4685,
+     "grade": "companion"
+    },
+    {
+     "type": "jarh",
+     "entry_id": 2259,
+     "grade": "unknown"
+    },
+    {
+     "type": "thiqat",
+     "entry_id": 4560,
+     "grade": "reliable"
+    },
+    {
+     "type": "kashif",
+     "entry_id": 3877,
+     "grade": "reliable"
+    },
+    {
+     "type": "isaba",
+     "entry_id": 5684,
+     "grade": "companion"
+    },
+    {
+     "type": "siyar",
+     "entry_id": 15,
+     "grade": "reliable"
+    },
+    {
+     "type": "tahdhib_tahdhib",
+     "entry_id": 489,
+     "grade": "reliable"
+    },
+    {
+     "type": "tabaqat",
+     "entry_id": 1457,
+     "grade": "reliable"
+    },
+    {
+     "type": "tadhkirat_huffaz",
+     "entry_id": 35,
+     "grade": "reliable"
+    },
+    {
+     "type": "mucin_tabaqat",
+     "entry_id": 222,
+     "grade": "unknown"
+    },
+    {
+     "type": "tahdhib_kamal",
+     "entry_id": 4021,
+     "grade": "unknown"
+    }
+   ],
+   "arsanad_id": 18,
+   "source_count": 11,
+   "kaggle_name": "'Alqama bin Waqqas علقمة بن وقاص",
+   "kaggle_grade": "Follower(Tabi') [2nd Generation]",
+   "introduced_via": {
+    "teacher_count": 13,
+    "student_count": 9
+   }
+  },
+  "unique_key": "علقمة بن وقاص بن محصن بن كلدة بن عبد ياليل بن طريف بن عتوارة بن عامر بن مالك بن ليث",
+  "uniqueness": "name_unique",
+  "gk_id": 5719,
+  "gk_match_method": "prefix3_unique"
+ },
+ "32": {
+  "id": 32,
+  "full_name": "جوثة بن أبي جوثة ، ويقال : ابن عبيد",
+  "kunya": "أبو عبيد",
+  "grade_en": "companion",
+  "grade_ar": "من الصحابة",
+  "color": "#9b59b6",
+  "death": "127 هـ",
+  "tabaqat": "-",
+  "city": "-",
+  "laqab": "-",
+  "nasab": "المدني ، الديلي",
+  "dhahabi": "-",
+  "namings": [
+   "جوثة بن عبيد الديلي"
+  ],
+  "classical_sources": {
+   "thiqat": {
+    "entry_id": 2091,
+    "grade_en": "companion",
+    "grade_ar": "من الصحابة"
+   },
+   "tabaqat": {
+    "entry_id": 1978,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   }
+  },
+  "teachers": [
+   8,
+   5852,
+   70580
+  ],
+  "students": [
+   31
+  ],
+  "id_score": 70,
+  "grade_score": 45,
+  "confidence": "B",
+  "id_flags": [
+   "short_nasab",
+   "has_death",
+   "has_kunya",
+   "unique_name",
+   "has_source"
+  ],
+  "grade_flags": [
+   "source_graded"
+  ],
+  "provenance": {
+   "origin": "classical",
+   "sources": [
+    {
+     "type": "thiqat",
+     "entry_id": 2091,
+     "grade": "companion"
+    },
+    {
+     "type": "tabaqat",
+     "entry_id": 1978,
+     "grade": "unknown"
+    }
+   ],
+   "arsanad_id": 32,
+   "source_count": 2,
+   "introduced_via": {
+    "teacher_count": 1,
+    "student_count": 1
+   }
+  },
+  "unique_key": "جوثة بن ابي جوثة",
+  "uniqueness": "name_unique",
+  "gk_id": 14076,
+  "gk_match_method": "naming_variant"
+ },
+ "58": {
+  "id": 58,
+  "full_name": "سلمان بن مر",
+  "kunya": "أبو عبد الله",
+  "grade_en": "companion",
+  "grade_ar": "صحابي",
+  "color": "#9b59b6",
+  "death": "34 هـ  أو قبلها  ، أو 35 هـ أو 36 هـ أو 37 هـ",
+  "tabaqat": "صحابي",
+  "city": "المدائن، الكوفة",
+  "laqab": "سابق الفرس",
+  "nasab": "الفارسي ، الأصبهاني الأصل ، وقيل : الرامهرمزي الأصل ، مولى بني هاشم",
+  "dhahabi": "من نجباء الصحابة",
+  "namings": [
+   "أبو عبد الله",
+   "الفارسي يعني سلمان",
+   "سلمان",
+   "سلمان الخير",
+   "سلمان الفارسي",
+   "سلمان بن الإسلام",
+   "سليمان"
+  ],
+  "classical_sources": {
+   "tabaqat": {
+    "entry_id": 380,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   },
+   "tarikh": {
+    "entry_id": 10,
+    "grade_en": "companion",
+    "grade_ar": "صحابي"
+   },
+   "mucin_tabaqat": {
+    "entry_id": 49,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   }
+  },
+  "teachers": [
+   165,
+   187,
+   231,
+   405,
+   747,
+   1244,
+   2816,
+   4310,
+   5241,
+   9193,
+   9839,
+   11133,
+   12471,
+   13783,
+   16970,
+   18221,
+   18382,
+   56381,
+   112346
+  ],
+  "students": [
+   8,
+   23,
+   24,
+   42,
+   48,
+   57,
+   106,
+   110,
+   112,
+   148,
+   160,
+   181,
+   199,
+   209,
+   212,
+   221,
+   245,
+   250,
+   251,
+   301,
+   348,
+   369,
+   370,
+   375,
+   391,
+   479,
+   511,
+   536,
+   602,
+   690,
+   698,
+   710,
+   712,
+   736,
+   774,
+   781,
+   845,
+   888,
+   897,
+   973,
+   1074,
+   1085,
+   1136,
+   1256,
+   1280,
+   1309,
+   1314,
+   1533,
+   1763,
+   1816,
+   1818,
+   1998,
+   2052,
+   2057,
+   2076,
+   2088,
+   2107,
+   2146,
+   2177,
+   2233,
+   2379,
+   2424,
+   2456,
+   2513,
+   2605,
+   2864,
+   2868,
+   2971,
+   3480,
+   3675,
+   3700,
+   3749,
+   3793,
+   3795,
+   4228,
+   4265,
+   4496,
+   4707,
+   4711,
+   4909,
+   4923,
+   5018,
+   5299,
+   5329,
+   5427,
+   5448,
+   5623,
+   5639,
+   5655,
+   5736,
+   5773,
+   6210,
+   6292,
+   6315,
+   6375,
+   6494,
+   6649,
+   6666,
+   6758,
+   6862,
+   7349,
+   7351,
+   7475,
+   7525,
+   8775,
+   8823,
+   8861,
+   8947,
+   9299,
+   9525,
+   9557,
+   9633,
+   9779,
+   10111,
+   10229,
+   10648,
+   10855,
+   11130,
+   12318,
+   12363,
+   12525,
+   12905,
+   13487,
+   13949,
+   14015,
+   14495,
+   15624,
+   17495,
+   17517,
+   17710
+  ],
+  "global_id": 16355,
+  "id_score": 25,
+  "grade_score": 45,
+  "confidence": "C",
+  "id_flags": [
+   "no_nasab",
+   "has_death",
+   "has_kunya",
+   "collision_large",
+   "multi_source"
+  ],
+  "grade_flags": [
+   "source_graded"
+  ],
+  "provenance": {
+   "kaggle_id": 16355,
+   "origin": "merged",
+   "sources": [
+    {
+     "type": "tabaqat",
+     "entry_id": 380,
+     "grade": "unknown"
+    },
+    {
+     "type": "tarikh",
+     "entry_id": 10,
+     "grade": "companion"
+    },
+    {
+     "type": "mucin_tabaqat",
+     "entry_id": 49,
+     "grade": "unknown"
+    }
+   ],
+   "arsanad_id": 58,
+   "source_count": 3,
+   "kaggle_name": "Salman Shykh سلمان",
+   "kaggle_grade": "Follower(Tabi')",
+   "introduced_via": {
+    "teacher_count": 2,
+    "student_count": 130
+   }
+  },
+  "unique_key": "سلمان|d:34|k:ابو عبد الله|t:عمر بن الخطاب بن نفي|s:انس بن مالك بن النضر",
+  "uniqueness": "composite_unique",
+  "gk_id": 3476,
+  "gk_match_method": "naming_variant"
+ },
+ "98": {
+  "id": 98,
+  "full_name": "صهيب بن سنان بن خالد بن عمرو ، وقال ابن سعد : صهيب بن سنان بن مالك بن عبد عمرو بن عقيل بن عامر بن جندلة بن جذيمة بن كعب بن سعد بن أسلم بن أوس مناة بن النمر بن قاسط",
+  "kunya": "أبو يحيى ،  وقيل : أبو غسان",
+  "grade_en": "companion",
+  "grade_ar": "صحابي",
+  "color": "#9b59b6",
+  "death": "قال ابن سعد : 38 هـ ، وفي كتاب ابن الأثير : 39 هـ",
+  "tabaqat": "صحابي",
+  "city": "الروم ، نينوى ، مكة",
+  "laqab": "صهيب ، سابق الروم",
+  "nasab": "الرومي ، النمري الأصل ، من تيم الله بن النضر بن قاسط ، وقال ابن حبان : أصله من الجزيرة",
+  "dhahabi": "بدري من السابقين",
+  "namings": [
+   "أبيه",
+   "جده",
+   "صهيب",
+   "صهيب الحبر",
+   "صهيب الخير",
+   "صهيب بن سنان",
+   "صهيب صاحب النبي",
+   "صهيب مولى بني جدعان",
+   "صهيب الرومي"
+  ],
+  "classical_sources": {
+   "taqrib": {
+    "entry_id": 2954,
+    "grade_en": "companion",
+    "grade_ar": "صحابي"
+   },
+   "jarh": {
+    "entry_id": 1950,
+    "grade_en": "companion",
+    "grade_ar": "له صحبة"
+   },
+   "thiqat": {
+    "entry_id": 656,
+    "grade_en": "reliable",
+    "grade_ar": "ذكره ابن حبان في الثقات"
+   },
+   "kashif": {
+    "entry_id": 2416,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   },
+   "isaba": {
+    "entry_id": 4108,
+    "grade_en": "companion",
+    "grade_ar": "صحابي"
+   },
+   "siyar": {
+    "entry_id": 4,
+    "grade_en": "mostly_reliable",
+    "grade_ar": "إمام"
+   },
+   "tahdhib_kamal": {
+    "entry_id": 2904,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   },
+   "tahdhib_tahdhib": {
+    "entry_id": 769,
+    "grade_en": "companion",
+    "grade_ar": "أدرك النبي"
+   },
+   "tabaqat": {
+    "entry_id": 70,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   },
+   "mucin_tabaqat": {
+    "entry_id": 61,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   }
+  },
+  "teachers": [
+   187,
+   1244,
+   3100,
+   5847,
+   7019,
+   7822,
+   9839,
+   12751,
+   12787,
+   12845,
+   17671,
+   29451,
+   41555,
+   70404
+  ],
+  "students": [
+   42,
+   97,
+   120,
+   224,
+   569,
+   606,
+   661,
+   725,
+   874,
+   932,
+   1998,
+   2575,
+   2862,
+   3099,
+   3455,
+   4109,
+   4163,
+   5623,
+   5790,
+   6166,
+   6563,
+   7861,
+   8404,
+   8609,
+   9986,
+   11073,
+   11151,
+   12986,
+   13323,
+   13999,
+   14612
+  ],
+  "global_id": 182,
+  "id_score": 100,
+  "grade_score": 75,
+  "confidence": "A",
+  "id_flags": [
+   "deep_nasab",
+   "has_death",
+   "has_kunya",
+   "unique_name",
+   "multi_source"
+  ],
+  "grade_flags": [
+   "taqrib_grade",
+   "source_graded"
+  ],
+  "provenance": {
+   "kaggle_id": 182,
+   "origin": "merged",
+   "sources": [
+    {
+     "type": "taqrib",
+     "entry_id": 2954,
+     "grade": "companion"
+    },
+    {
+     "type": "jarh",
+     "entry_id": 1950,
+     "grade": "companion"
+    },
+    {
+     "type": "thiqat",
+     "entry_id": 656,
+     "grade": "reliable"
+    },
+    {
+     "type": "kashif",
+     "entry_id": 2416,
+     "grade": "unknown"
+    },
+    {
+     "type": "isaba",
+     "entry_id": 4108,
+     "grade": "companion"
+    },
+    {
+     "type": "siyar",
+     "entry_id": 4,
+     "grade": "mostly_reliable"
+    },
+    {
+     "type": "tahdhib_kamal",
+     "entry_id": 2904,
+     "grade": "unknown"
+    },
+    {
+     "type": "tahdhib_tahdhib",
+     "entry_id": 769,
+     "grade": "companion"
+    },
+    {
+     "type": "tabaqat",
+     "entry_id": 70,
+     "grade": "unknown"
+    },
+    {
+     "type": "mucin_tabaqat",
+     "entry_id": 61,
+     "grade": "unknown"
+    }
+   ],
+   "arsanad_id": 98,
+   "source_count": 10,
+   "kaggle_name": "Suhayb bin Sinan ar-Rumi ( صهيب بن سنان بن مالك الرومي ( رضي",
+   "kaggle_grade": "Comp.(RA) [1st Generation]",
+   "introduced_via": {
+    "teacher_count": 2,
+    "student_count": 31
+   }
+  },
+  "unique_key": "صهيب بن سنان بن خالد بن عمرو",
+  "uniqueness": "name_unique",
+  "gk_id": 3964,
+  "gk_match_method": "exact_name"
+ },
+ "106": {
+  "id": 106,
+  "full_name": "عبد الرحمن بن صخر ، وقيل : عبد الرحمن بن غنم ، وقيل : عبد الله بن عائذ ، وقيل : عبد الله بن عامر ، وقيل : عبد الله بن عمرو ، وقيل : سكين بن وذمة ، وقيل : سكين بن هانئ ، وقيل : سكين بن مل ، وقيل : سكين بن صخر ، وقيل : عامر بن عبد شمس ، وقيل : عامر بن عمير ، وقيل : برير بن عشرقة ، وقيل : عبد نهم ، وقيل : عبد شمس ،  وقيل : غنم ، وقيل : عبيد بن غنم ، وقيل : عمرو بن غنم ،  وقيل : عمرو بن عامر ، وقيل : سعيد بن الحارث ، وقيل غير ذلك ، وقال هشام بن محمد الكلبي اسمه : عمير بن عامر بن ذي الشري بن طريف بن عيان بن أبي صعب بن هنية بن سعد بن ثعلبة بن سليم بن فهم بن غنم بن دوس بن عدثان بن عبد الله بن زهران بن كعب بن الحارث بن كعب بن عبد الله بن مالك بن نصر بن الأزد ، وهكذا قال خليفة بن خياط في نسبه إلا أنه قال عتاب بدل عيان ، ويقال: كان اسمه في الجاهلية عبد شمس فسماه رسول الله صلى الله عليه وسلم عبد الله",
+  "kunya": "أبو هريرة ، ويقال كانت كنيته في الجاهلية :  أبو الأسود",
+  "grade_en": "companion",
+  "grade_ar": "صحابي",
+  "color": "#9b59b6",
+  "death": "57 هـ ، أو : 58 هـ ، أو : 59 هـ",
+  "tabaqat": "الصحابي الجليل",
+  "city": "المدينة ، ذو الحليفة ، البحرين",
+  "laqab": "-",
+  "nasab": "الدوسي ، اليماني",
+  "dhahabi": "كان حافظا متثبتا ذكيا مفتيا ، صاحب صيام وقيام ، قال عكرمة : كان يسبح في اليوم اثني عشر ألف تسبيحة",
+  "namings": [
+   "أبو هريرة",
+   "أبو هريرة الدوسي",
+   "أبي",
+   "أبيه",
+   "اليماني"
+  ],
+  "classical_sources": {
+   "taqrib": {
+    "entry_id": 8426,
+    "grade_en": "companion",
+    "grade_ar": "صحابي"
+   },
+   "thiqat": {
+    "entry_id": 924,
+    "grade_en": "reliable",
+    "grade_ar": "ذكره ابن حبان في الثقات"
+   },
+   "siyar": {
+    "entry_id": 126,
+    "grade_en": "mostly_reliable",
+    "grade_ar": "إمام"
+   },
+   "tahdhib_tahdhib": {
+    "entry_id": 1216,
+    "grade_en": "companion",
+    "grade_ar": "من الصحابة"
+   },
+   "tadhkirat_huffaz": {
+    "entry_id": 16,
+    "grade_en": "weak",
+    "grade_ar": "لين"
+   },
+   "tahdhib_kamal": {
+    "entry_id": 7681,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   }
+  },
+  "teachers": [
+   8,
+   58,
+   107,
+   120,
+   164,
+   165,
+   181,
+   182,
+   187,
+   238,
+   275,
+   276,
+   342,
+   368,
+   406,
+   456,
+   487,
+   498,
+   529,
+   559,
+   567,
+   603,
+   623,
+   638,
+   662,
+   725,
+   811,
+   974,
+   1213,
+   1347,
+   1599,
+   1754,
+   2200,
+   2248,
+   2513,
+   2748,
+   2814,
+   4043,
+   4328,
+   4401,
+   4934,
+   5054,
+   5393,
+   5852,
+   6895,
+   6959,
+   7981,
+   8760,
+   10732,
+   11596,
+   12751,
+   13684,
+   13783,
+   15394,
+   16872
+  ],
+  "students": [
+   4,
+   7,
+   8,
+   23,
+   29,
+   40,
+   42,
+   47,
+   48,
+   52,
+   57,
+   93,
+   97,
+   105,
+   110,
+   120,
+   126,
+   160,
+   182,
+   184,
+   185,
+   192,
+   195,
+   199,
+   208,
+   209,
+   212,
+   221,
+   233,
+   240,
+   245,
+   247,
+   250,
+   252,
+   274,
+   281,
+   288,
+   301,
+   302,
+   303,
+   342,
+   348,
+   368,
+   369,
+   375,
+   391,
+   394,
+   395,
+   396,
+   399,
+   400,
+   416,
+   448,
+   467,
+   490,
+   497,
+   523,
+   528,
+   536,
+   548,
+   555,
+   566,
+   569,
+   572,
+   573,
+   602,
+   606,
+   611,
+   622,
+   637,
+   649,
+   652,
+   657,
+   661,
+   664,
+   685,
+   688,
+   690,
+   699,
+   713,
+   729,
+   736,
+   749,
+   762,
+   781,
+   788,
+   792,
+   796,
+   799,
+   801,
+   810,
+   822,
+   827,
+   836,
+   845,
+   864,
+   871,
+   872,
+   873,
+   874,
+   888,
+   895,
+   928,
+   939,
+   950,
+   972,
+   1016,
+   1018,
+   1019,
+   1038,
+   1060,
+   1074,
+   1085,
+   1092,
+   1111,
+   1117,
+   1131,
+   1139,
+   1167,
+   1171,
+   1179,
+   1198,
+   1271,
+   1274,
+   1297,
+   1302,
+   1314,
+   1353,
+   1380,
+   1384,
+   1385,
+   1387,
+   1397,
+   1401,
+   1407,
+   1420,
+   1490,
+   1504,
+   1530,
+   1550,
+   1581,
+   1591,
+   1637,
+   1639,
+   1693,
+   1700,
+   1704,
+   1719,
+   1723,
+   1730,
+   1753,
+   1782,
+   1788,
+   1801,
+   1806,
+   1815,
+   1818,
+   1853,
+   1867,
+   1872,
+   1916,
+   1929,
+   1936,
+   1951,
+   1958,
+   1962,
+   1989,
+   1990,
+   1996,
+   2022,
+   2026,
+   2029,
+   2052,
+   2057,
+   2073,
+   2096,
+   2107,
+   2115,
+   2131,
+   2135,
+   2137,
+   2146,
+   2174,
+   2177,
+   2207,
+   2222,
+   2225,
+   2242,
+   2307,
+   2308,
+   2320,
+   2328,
+   2338,
+   2361,
+   2370,
+   2379,
+   2384,
+   2390,
+   2428,
+   2433,
+   2434,
+   2444,
+   2456,
+   2478,
+   2511,
+   2516,
+   2520,
+   2539,
+   2543,
+   2568,
+   2572,
+   2604,
+   2644,
+   2662,
+   2663,
+   2676,
+   2688,
+   2698,
+   2713,
+   2734,
+   2750,
+   2794,
+   2805,
+   2807,
+   2811,
+   2813,
+   2843,
+   2845,
+   2859,
+   2863,
+   2906,
+   2978,
+   2994,
+   3047,
+   3058,
+   3072,
+   3094,
+   3096,
+   3098,
+   3198,
+   3205,
+   3251,
+   3258,
+   3271,
+   3304,
+   3307,
+   3320,
+   3338,
+   3349,
+   3353,
+   3357,
+   3369,
+   3396,
+   3406,
+   3434,
+   3439,
+   3455,
+   3472,
+   3486,
+   3487,
+   3491,
+   3496,
+   3517,
+   3520,
+   3521,
+   3539,
+   3542,
+   3549,
+   3555,
+   3557,
+   3618,
+   3625,
+   3637,
+   3641,
+   3714,
+   3734,
+   3741,
+   3793,
+   3803,
+   3832,
+   3833,
+   3841,
+   3875,
+   3879,
+   3911,
+   3939,
+   4017,
+   4018,
+   4042,
+   4107,
+   4110,
+   4148,
+   4158,
+   4162,
+   4163,
+   4183,
+   4193,
+   4199,
+   4202,
+   4226,
+   4249,
+   4265,
+   4284,
+   4315,
+   4327,
+   4330,
+   4333,
+   4365,
+   4400,
+   4418,
+   4432,
+   4470,
+   4484,
+   4498,
+   4550,
+   4559,
+   4610,
+   4663,
+   4678,
+   4719,
+   4763,
+   4780,
+   4782,
+   4784,
+   4831,
+   4834,
+   4886,
+   4977,
+   5012,
+   5053,
+   5086,
+   5094,
+   5101,
+   5114,
+   5118,
+   5120,
+   5152,
+   5162,
+   5167,
+   5170,
+   5173,
+   5199,
+   5256,
+   5320,
+   5331,
+   5334,
+   5340,
+   5360,
+   5393,
+   5412,
+   5422,
+   5423,
+   5450,
+   5459,
+   5484,
+   5522,
+   5619,
+   5623,
+   5631,
+   5783,
+   5790,
+   5791,
+   5821,
+   5828,
+   5842,
+   5889,
+   5952,
+   5955,
+   5956,
+   5969,
+   6012,
+   6081,
+   6087,
+   6098,
+   6132,
+   6163,
+   6172,
+   6206,
+   6232,
+   6245,
+   6254,
+   6261,
+   6291,
+   6292,
+   6346,
+   6350,
+   6353,
+   6366,
+   6370,
+   6395,
+   6411,
+   6478,
+   6480,
+   6503,
+   6527,
+   6541,
+   6560,
+   6564,
+   6577,
+   6618,
+   6624,
+   6694,
+   6768,
+   6770,
+   6782,
+   6802,
+   6811,
+   6896,
+   6941,
+   6994,
+   7026,
+   7037,
+   7105,
+   7123,
+   7178,
+   7185,
+   7229,
+   7241,
+   7269,
+   7350,
+   7411,
+   7459,
+   7516,
+   7531,
+   7542,
+   7561,
+   7589,
+   7626,
+   7679,
+   7687,
+   7697,
+   7728,
+   7770,
+   7787,
+   7788,
+   7790,
+   7848,
+   7871,
+   7878,
+   7917,
+   7925,
+   7936,
+   7949,
+   7954,
+   8003,
+   8016,
+   8054,
+   8066,
+   8155,
+   8196,
+   8207,
+   8231,
+   8235,
+   8279,
+   8311,
+   8379,
+   8380,
+   8409,
+   8458,
+   8564,
+   8569,
+   8582,
+   8598,
+   8679,
+   8685,
+   8726,
+   8739,
+   8772,
+   8780,
+   8813,
+   8817,
+   8843,
+   8881,
+   8890,
+   8892,
+   8947,
+   8951,
+   9101,
+   9110,
+   9135,
+   9137,
+   9142,
+   9191,
+   9222,
+   9229,
+   9230,
+   9283,
+   9284,
+   9287,
+   9336,
+   9346,
+   9378,
+   9405,
+   9442,
+   9447,
+   9494,
+   9507,
+   9519,
+   9557,
+   9632,
+   9698,
+   9756,
+   9793,
+   9853,
+   9857,
+   9895,
+   9897,
+   9955,
+   9975,
+   9977,
+   10107,
+   10122,
+   10135,
+   10148,
+   10151,
+   10197,
+   10209,
+   10212,
+   10244,
+   10246,
+   10247,
+   10272,
+   10317,
+   10366,
+   10379,
+   10380,
+   10386,
+   10387,
+   10393,
+   10395,
+   10397,
+   10480,
+   10490,
+   10508,
+   10515,
+   10542,
+   10575,
+   10640,
+   10660,
+   10694,
+   10774,
+   10826,
+   10829,
+   10938,
+   10968,
+   10978,
+   11010,
+   11179,
+   11209,
+   11214,
+   11243,
+   11264,
+   11348,
+   11370,
+   11457,
+   11506,
+   11534,
+   11565,
+   11581,
+   11627,
+   11646,
+   11747,
+   11764,
+   12005,
+   12032,
+   12036,
+   12037,
+   12049,
+   12068,
+   12071,
+   12084,
+   12095,
+   12109,
+   12184,
+   12203,
+   12228,
+   12247,
+   12268,
+   12295,
+   12319,
+   12335,
+   12338,
+   12359,
+   12369,
+   12387,
+   12388,
+   12469,
+   12485,
+   12491,
+   12507,
+   12527,
+   12569,
+   12596,
+   12632,
+   12651,
+   12679,
+   12726,
+   12748,
+   12821,
+   12824,
+   12879,
+   12882,
+   12923,
+   12949,
+   12977,
+   13009,
+   13051,
+   13054,
+   13084,
+   13128,
+   13132,
+   13135,
+   13169,
+   13247,
+   13298,
+   13333,
+   13334,
+   13362,
+   13375,
+   13480,
+   13576,
+   13626,
+   13702,
+   13758,
+   13776,
+   13850,
+   13856,
+   13907,
+   13943,
+   14091,
+   14151,
+   14157,
+   14176,
+   14294,
+   14295,
+   14301,
+   14339,
+   14357,
+   14384,
+   14391,
+   14419,
+   14422,
+   14433,
+   14463,
+   14494,
+   14599,
+   14631,
+   14645,
+   14651,
+   14702,
+   14750,
+   14851,
+   14881,
+   14906,
+   14907,
+   14943,
+   15016,
+   15023,
+   15048,
+   15121,
+   15187,
+   15190,
+   15369,
+   15384,
+   15407,
+   15443,
+   15463,
+   15464,
+   15495,
+   15557,
+   15585,
+   15600,
+   15629,
+   15684,
+   15702,
+   15812,
+   15826,
+   15834,
+   15863,
+   15868,
+   15905,
+   15916,
+   15959,
+   16005,
+   16117,
+   16137,
+   16149,
+   16187,
+   16223,
+   16289,
+   16302,
+   16401,
+   16441,
+   16459,
+   16460,
+   16481,
+   16493,
+   16499,
+   16567,
+   16585,
+   16780,
+   16794,
+   16796,
+   16822,
+   16830,
+   16887,
+   16992,
+   17020,
+   17026,
+   17031,
+   17045,
+   17077,
+   17165,
+   17241,
+   17433,
+   17562,
+   17688,
+   17722,
+   17724,
+   17747,
+   17778,
+   17875,
+   17894,
+   17973,
+   17995,
+   18051,
+   18086
+  ],
+  "global_id": 28331,
+  "id_score": 80,
+  "grade_score": 75,
+  "confidence": "A",
+  "id_flags": [
+   "short_nasab",
+   "has_death",
+   "has_kunya",
+   "unique_name",
+   "multi_source"
+  ],
+  "grade_flags": [
+   "taqrib_grade",
+   "source_graded"
+  ],
+  "provenance": {
+   "kaggle_id": 28331,
+   "origin": "merged",
+   "sources": [
+    {
+     "type": "taqrib",
+     "entry_id": 8426,
+     "grade": "companion"
+    },
+    {
+     "type": "thiqat",
+     "entry_id": 924,
+     "grade": "reliable"
+    },
+    {
+     "type": "siyar",
+     "entry_id": 126,
+     "grade": "mostly_reliable"
+    },
+    {
+     "type": "tahdhib_tahdhib",
+     "entry_id": 1216,
+     "grade": "companion"
+    },
+    {
+     "type": "tadhkirat_huffaz",
+     "entry_id": 16,
+     "grade": "weak"
+    },
+    {
+     "type": "tahdhib_kamal",
+     "entry_id": 7681,
+     "grade": "unknown"
+    }
+   ],
+   "arsanad_id": 106,
+   "source_count": 6,
+   "kaggle_name": "'Abdur Rahman bin Skhr عبد الرحمن بن صخر",
+   "kaggle_grade": "Succ. (Taba' Tabi') [9th generation]",
+   "introduced_via": {
+    "teacher_count": 43,
+    "student_count": 734
+   }
+  },
+  "unique_key": "عبد الرحمن بن صخر",
+  "uniqueness": "name_unique",
+  "gk_id": 4396,
+  "gk_match_method": "exact_name"
+ },
+ "121": {
+  "id": 121,
+  "full_name": "رافع بن خديج بن رافع بن عدي بن تزيد بن جشم بن حارثة بن الحارث بن الخزرج بن عمرو بن مالك بن الأوس",
+  "kunya": "أبو عبد الله ، ويقال : أبو رافع ، ويقال : أبو خديج",
+  "grade_en": "companion",
+  "grade_ar": "له صحبة",
+  "color": "#9b59b6",
+  "death": "73 هـ ، أو 74 هـ ، وقيل : 59 هـ ، وقيل :  بعد 50 هـ إلى 60 هـ",
+  "tabaqat": "صحابي جليل",
+  "city": "المدينة ، والكوفة",
+  "laqab": "-",
+  "nasab": "الحارثي ، الأوسي ، الأنصاري ، المدني",
+  "dhahabi": "أحدي",
+  "namings": [
+   "أبي",
+   "أبيه",
+   "ابن خديج",
+   "جده",
+   "جده رافع بن خديج",
+   "رافع",
+   "رافع بن خديج",
+   "رافع بن خديج الأنصاري",
+   "رافع بن خديج بن رافع",
+   "رافع هو ابن خديج"
+  ],
+  "classical_sources": {
+   "taqrib": {
+    "entry_id": 1861,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   },
+   "jarh": {
+    "entry_id": 2150,
+    "grade_en": "companion",
+    "grade_ar": "له صحبة"
+   },
+   "thiqat": {
+    "entry_id": 407,
+    "grade_en": "reliable",
+    "grade_ar": "ذكره ابن حبان في الثقات"
+   },
+   "kashif": {
+    "entry_id": 1505,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   },
+   "isaba": {
+    "entry_id": 2528,
+    "grade_en": "weak",
+    "grade_ar": "واه"
+   },
+   "siyar": {
+    "entry_id": 34,
+    "grade_en": "reliable",
+    "grade_ar": "ثقة"
+   },
+   "tahdhib_tahdhib": {
+    "entry_id": 440,
+    "grade_en": "mostly_reliable",
+    "grade_ar": "وسط"
+   },
+   "mucin_tabaqat": {
+    "entry_id": 39,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   },
+   "tahdhib_kamal": {
+    "entry_id": 1833,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   }
+  },
+  "teachers": [
+   122,
+   165,
+   231,
+   353,
+   405,
+   1198,
+   2284,
+   4382,
+   4401,
+   7050,
+   7591,
+   7646,
+   9839,
+   11104,
+   12257,
+   12283,
+   12751,
+   12787,
+   14475,
+   18203,
+   21950,
+   22788,
+   29451,
+   41555,
+   45826,
+   54057,
+   74877
+  ],
+  "students": [
+   42,
+   51,
+   93,
+   97,
+   120,
+   160,
+   181,
+   247,
+   288,
+   303,
+   375,
+   396,
+   569,
+   579,
+   602,
+   690,
+   713,
+   716,
+   749,
+   788,
+   799,
+   864,
+   888,
+   1074,
+   1118,
+   1122,
+   1167,
+   1302,
+   1380,
+   1990,
+   2071,
+   2174,
+   2385,
+   4202,
+   4381,
+   4510,
+   4646,
+   4909,
+   5559,
+   5688,
+   5737,
+   6078,
+   6232,
+   6359,
+   6406,
+   6480,
+   6864,
+   6929,
+   6985,
+   7267,
+   7636,
+   7672,
+   7774,
+   9142,
+   9226,
+   9227,
+   10129,
+   10286,
+   10564,
+   10565,
+   11783,
+   12833,
+   13384,
+   14394,
+   14523,
+   15339,
+   15901,
+   16908,
+   17179,
+   18159
+  ],
+  "global_id": 1986,
+  "id_score": 100,
+  "grade_score": 75,
+  "confidence": "A",
+  "id_flags": [
+   "deep_nasab",
+   "has_death",
+   "has_kunya",
+   "unique_name",
+   "multi_source"
+  ],
+  "grade_flags": [
+   "taqrib_grade",
+   "source_graded"
+  ],
+  "provenance": {
+   "kaggle_id": 1986,
+   "origin": "merged",
+   "sources": [
+    {
+     "type": "taqrib",
+     "entry_id": 1861,
+     "grade": "unknown"
+    },
+    {
+     "type": "jarh",
+     "entry_id": 2150,
+     "grade": "companion"
+    },
+    {
+     "type": "thiqat",
+     "entry_id": 407,
+     "grade": "reliable"
+    },
+    {
+     "type": "kashif",
+     "entry_id": 1505,
+     "grade": "unknown"
+    },
+    {
+     "type": "isaba",
+     "entry_id": 2528,
+     "grade": "weak"
+    },
+    {
+     "type": "siyar",
+     "entry_id": 34,
+     "grade": "reliable"
+    },
+    {
+     "type": "tahdhib_tahdhib",
+     "entry_id": 440,
+     "grade": "mostly_reliable"
+    },
+    {
+     "type": "mucin_tabaqat",
+     "entry_id": 39,
+     "grade": "unknown"
+    },
+    {
+     "type": "tahdhib_kamal",
+     "entry_id": 1833,
+     "grade": "unknown"
+    }
+   ],
+   "arsanad_id": 121,
+   "source_count": 9,
+   "kaggle_name": "Rafi' bin Khadij bin Rafi' ( رافع بن خديج بن رافع الأنصاري (",
+   "kaggle_grade": "Comp.(RA) [1st Generation]",
+   "introduced_via": {
+    "teacher_count": 5,
+    "student_count": 70
+   }
+  },
+  "unique_key": "رافع بن خديج بن رافع بن عدي بن تزيد بن جشم بن حارثة بن الحارث بن الخزرج بن عمرو",
+  "uniqueness": "name_unique",
+  "gk_id": 2865,
+  "gk_match_method": "prefix4_death_±1"
+ },
+ "148": {
+  "id": 148,
+  "full_name": "خالد بن عبد الله بن عبد الرحمن بن يزيد.",
+  "kunya": "أبو الهيثم ، ويقال: أبو محمد.",
+  "grade_en": "companion",
+  "grade_ar": "له صحبة",
+  "color": "#9b59b6",
+  "death": "179 هـ ، أو 182 هـ ، وقيل : 183 هـ.",
+  "tabaqat": "الثامنة.",
+  "city": "-",
+  "laqab": "الحافظ ، الطحان",
+  "nasab": "الحافظ ، الطحان ، المزني مولاهم ، الواسطي.",
+  "dhahabi": "أحد العلماء ، ثقة ، عابد.",
+  "namings": [
+   "أبو الهيثم",
+   "أبي",
+   "خالد",
+   "خالد أظنه الواسطي",
+   "خالد الطحان",
+   "خالد الواسطي",
+   "خالد بن أبي نضرة",
+   "خالد بن عبد",
+   "خالد بن عبد الله",
+   "خالد بن عبد الله الطحان",
+   "خالد بن عبد الله الطحان المزني",
+   "خالد بن عبد الله المزني",
+   "خالد بن عبد الله الواسطي",
+   "خالد بن عبد الله بن خالد الواسطي",
+   "خالد بن عبد الله هو الطحان",
+   "خالد بن عبيد الله",
+   "خالد هو ابن عبد الله",
+   "خالد هو ابن عبد الله الطحان",
+   "خالد هو ابن عبد الله الواسطي",
+   "خالد هو ابن عبد الله الواسطي الطحان",
+   "خالد هو الطحان",
+   "خالد وهو ابن عبد الله الواسطي",
+   "خالد يعني ابن عبد الله",
+   "خالد يعني ابن عبد الله الطحان",
+   "خالد يعني ابن عبد الله الطحان الواسطي",
+   "خالد يعني ابن عبد الله الواسطي",
+   "خالد يعني ابن عبد الله الواسطي الطحان",
+   "خالد يعني الطحان",
+   "خالد يعني الواسطي",
+   "خالد يعني الواسطي الطحان",
+   "خلف"
+  ],
+  "classical_sources": {
+   "jarh": {
+    "entry_id": 1524,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   },
+   "isaba": {
+    "entry_id": 2181,
+    "grade_en": "companion",
+    "grade_ar": "له صحبة"
+   },
+   "tabaqat": {
+    "entry_id": 4252,
+    "grade_en": "reliable",
+    "grade_ar": "ثقة"
+   }
+  },
+  "teachers": [
+   17,
+   23,
+   45,
+   58,
+   103,
+   149,
+   154,
+   172,
+   252,
+   346,
+   347,
+   365,
+   380,
+   394,
+   412,
+   435,
+   537,
+   542,
+   569,
+   593,
+   607,
+   610,
+   611,
+   626,
+   664,
+   678,
+   685,
+   739,
+   853,
+   888,
+   964,
+   983,
+   1066,
+   1074,
+   1146,
+   1210,
+   1245,
+   1313,
+   1367,
+   1393,
+   1445,
+   1655,
+   1712,
+   1961,
+   2115,
+   2209,
+   2233,
+   2252,
+   2276,
+   2277,
+   2391,
+   2487,
+   2609,
+   2796,
+   2837,
+   2918,
+   2925,
+   2988,
+   3000,
+   3597,
+   3822,
+   3837,
+   3850,
+   4132,
+   4364,
+   4441,
+   4532,
+   4558,
+   4640,
+   4783,
+   6038,
+   6134,
+   6329,
+   6708,
+   6973,
+   7497,
+   7901,
+   7999,
+   8040,
+   9585,
+   12451,
+   12880,
+   13854
+  ],
+  "students": [
+   15,
+   54,
+   84,
+   143,
+   147,
+   157,
+   171,
+   205,
+   410,
+   414,
+   441,
+   550,
+   591,
+   670,
+   679,
+   695,
+   983,
+   1002,
+   1007,
+   1008,
+   1076,
+   1165,
+   1261,
+   1287,
+   1619,
+   1635,
+   1821,
+   1946,
+   1959,
+   1978,
+   2004,
+   2087,
+   2092,
+   2547,
+   2628,
+   2734,
+   2912,
+   2950,
+   3147,
+   3208,
+   3317,
+   3582,
+   3596,
+   3600,
+   4127,
+   4140,
+   4261,
+   4339,
+   4393,
+   4442,
+   4685,
+   4689,
+   5455,
+   5859,
+   6123,
+   7385,
+   7793,
+   7856,
+   7968,
+   9317,
+   9900,
+   15705,
+   17290
+  ],
+  "id_score": 65,
+  "grade_score": 45,
+  "confidence": "B",
+  "id_flags": [
+   "deep_nasab",
+   "has_death",
+   "has_kunya",
+   "collision_small",
+   "multi_source"
+  ],
+  "grade_flags": [
+   "source_graded"
+  ],
+  "provenance": {
+   "origin": "classical",
+   "sources": [
+    {
+     "type": "jarh",
+     "entry_id": 1524,
+     "grade": "unknown"
+    },
+    {
+     "type": "isaba",
+     "entry_id": 2181,
+     "grade": "companion"
+    },
+    {
+     "type": "tabaqat",
+     "entry_id": 4252,
+     "grade": "reliable"
+    }
+   ],
+   "arsanad_id": 148,
+   "source_count": 3,
+   "introduced_via": {
+    "teacher_count": 83,
+    "student_count": 63
+   }
+  },
+  "unique_key": "خالد بن عبد الله بن عبد الرحمن بن يزيد|d:179|k:ابو الهيثم ، ويقال: ابو محمد.|t:محمد بن عمرو بن علقم|s:فضيل بن حسين بن طلحة",
+  "uniqueness": "composite_unique",
+  "gk_id": 41258,
+  "gk_match_method": "naming_variant"
+ },
+ "151": {
+  "id": 151,
+  "full_name": "عبد الله بن قيس بن سليم بن حضار بن حرب بن عامر بن عنز بن بكر بن عامر بن عذر بن وائل بن ناجية بن الجماهر بن الأشعر",
+  "kunya": "أبو موسى",
+  "grade_en": "companion",
+  "grade_ar": "له صحبة",
+  "color": "#9b59b6",
+  "death": "42 هـ ، أو 44 هـ ، أو 50 هـ ، أو 52 هـ ، أو 53 هـ ، ويقال 49 هـ ، ويقال 51 هـ",
+  "tabaqat": "صحابي مشهور",
+  "city": "مكة ، الحبشة ، زبيد ، عدن ، البصرة ، الكوفة ، المدينة",
+  "laqab": "-",
+  "nasab": "الأشعري ، المدني ، التميمي ، المقرئ ، اليماني",
+  "dhahabi": "صحابى",
+  "namings": [
+   "أبو موسى",
+   "أبو موسى الأشعري",
+   "أبو موسى الأشعري عبد الله بن قيس",
+   "أبو موسى يعني الأشعري",
+   "أبوك",
+   "أبوه",
+   "أبوهما",
+   "أبي",
+   "أبيه",
+   "الأشعري",
+   "الأشعري أبو موسى",
+   "الأشعري يعني أبا موسى",
+   "جدك",
+   "جده",
+   "عبد الله بن قيس",
+   "عبد الله بن قيس أبو موسى الأشعري",
+   "عبد الله بن قيس الأشعري"
+  ],
+  "classical_sources": {
+   "jarh": {
+    "entry_id": 642,
+    "grade_en": "companion",
+    "grade_ar": "له صحبة"
+   },
+   "isaba": {
+    "entry_id": 10584,
+    "grade_en": "companion",
+    "grade_ar": "ذكره ابن حجر في الإصابة"
+   },
+   "siyar": {
+    "entry_id": 82,
+    "grade_en": "weak",
+    "grade_ar": "واه"
+   },
+   "tahdhib_tahdhib": {
+    "entry_id": 1152,
+    "grade_en": "unknown",
+    "grade_ar": ""
+   },
+   "tabaqat": {
+    "entry_id": 388,
+    "grade_en": "companion",
+    "grade_ar": "صحابي"
+   },
+   "tadhkirat_huffaz": {
+    "entry_id": 10,
+    "grade_en": "reliable",
+    "grade_ar": "حجة"
+   },
+   "macrifa_qurra": {
+    "entry_id": 6,
+    "grade_en": "companion",
+    "grade_ar": "صحابي"
+   }
+  },
+  "teachers": [
+   48,
+   164,
+   165,
+   182,
+   187,
+   275,
+   342,
+   397,
+   487,
+   529,
+   559,
+   601,
+   700,
+   828,
+   3371,
+   11309
+  ],
+  "students": [
+   8,
+   40,
+   42,
+   45,
+   48,
+   51,
+   57,
+   93,
+   120,
+   126,
+   150,
+   154,
+   181,
+   184,
+   199,
+   209,
+   212,
+   213,
+   245,
+   250,
+   254,
+   301,
+   303,
+   369,
+   375,
+   394,
+   422,
+   448,
+   529,
+   536,
+   543,
+   544,
+   548,
+   558,
+   569,
+   637,
+   657,
+   661,
+   686,
+   690,
+   799,
+   820,
+   845,
+   873,
+   888,
+   1053,
+   1066,
+   1074,
+   1085,
+   1136,
+   1179,
+   1256,
+   1297,
+   1314,
+   1407,
+   1474,
+   1507,
+   1543,
+   1565,
+   1637,
+   1815,
+   1818,
+   1853,
+   1925,
+   1958,
+   1960,
+   1998,
+   2022,
+   2049,
+   2076,
+   2107,
+   2131,
+   2208,
+   2273,
+   2304,
+   2328,
+   2361,
+   2486,
+   2525,
+   2544,
+   2572,
+   2605,
+   2676,
+   2692,
+   2835,
+   2862,
+   2868,
+   3020,
+   3258,
+   3396,
+   3472,
+   3473,
+   3501,
+   3523,
+   3547,
+   3664,
+   3700,
+   3749,
+   3793,
+   3841,
+   3929,
+   4163,
+   4550,
+   4637,
+   4739,
+   4840,
+   5299,
+   5322,
+   5333,
+   5446,
+   5459,
+   5490,
+   5619,
+   5623,
+   5631,
+   5773,
+   5823,
+   5842,
+   5993,
+   6142,
+   6374,
+   6553,
+   6666,
+   6959,
+   7080,
+   7453,
+   7504,
+   7643,
+   7702,
+   7842,
+   7927,
+   8057,
+   8061,
+   8584,
+   8599,
+   8707,
+   8772,
+   9517,
+   10229,
+   10275,
+   10593,
+   10637,
+   11074,
+   11123,
+   11134,
+   11136,
+   11660,
+   11765,
+   12044,
+   12699,
+   12877,
+   12880,
+   12963,
+   13126,
+   13712,
+   13955,
+   14044,
+   14362,
+   14746,
+   14894,
+   15164,
+   16308,
+   16629,
+   16863,
+   17193,
+   17303,
+   17922,
+   18148
+  ],
+  "global_id": 41,
+  "generation": 1,
+  "id_score": 65,
+  "grade_score": 45,
+  "confidence": "B",
+  "id_flags": [
+   "deep_nasab",
+   "has_death",
+   "has_kunya",
+   "collision_small",
+   "multi_source"
+  ],
+  "grade_flags": [
+   "source_graded"
+  ],
+  "provenance": {
+   "kaggle_id": 41,
+   "origin": "merged",
+   "sources": [
+    {
+     "type": "jarh",
+     "entry_id": 642,
+     "grade": "companion"
+    },
+    {
+     "type": "isaba",
+     "entry_id": 10584,
+     "grade": "companion"
+    },
+    {
+     "type": "siyar",
+     "entry_id": 82,
+     "grade": "weak"
+    },
+    {
+     "type": "tahdhib_tahdhib",
+     "entry_id": 1152,
+     "grade": "unknown"
+    },
+    {
+     "type": "tabaqat",
+     "entry_id": 388,
+     "grade": "companion"
+    },
+    {
+     "type": "tadhkirat_huffaz",
+     "entry_id": 10,
+     "grade": "reliable"
+    },
+    {
+     "type": "macrifa_qurra",
+     "entry_id": 6,
+     "grade": "companion"
+    }
+   ],
+   "arsanad_id": 151,
+   "source_count": 7,
+   "kaggle_name": "Abu Musa al-Asha'ari ( أبو موسى الأشعري ( رضي الله عنه",
+   "kaggle_grade": "Comp.(RA) [1st Generation]",
+   "introduced_via": {
+    "teacher_count": 16,
+    "student_count": 168
+   }
+  },
+  "unique_key": "عبد الله بن قيس بن سليم بن حضار بن حرب بن عامر بن عنز بن بكر بن عامر بن عذر بن وائل|d:42|k:ابو موسى|t:عبد الله بن عباس بن |s:انس بن مالك بن النضر",
+  "uniqueness": "composite_unique"
+ }
+}

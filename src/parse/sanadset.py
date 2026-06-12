@@ -26,6 +26,7 @@ from src.parse.base import (
     safe_str,
     write_parquet,
 )
+from src.parse.identity import ID_DELIMITER
 from src.parse.schemas import HADITH_SCHEMA, NARRATOR_BIO_SCHEMA, NARRATOR_MENTION_SCHEMA
 from src.utils.arabic import extract_transmission_phrases, normalize_arabic
 from src.utils.logging import get_logger
@@ -238,11 +239,12 @@ def _parse_narrators_bio(narrators_dir: Path) -> pa.Table | None:
 
             name_ar = safe_str(row_dict.get(field_map.get("name_ar", "")))
             ext_id = safe_str(row_dict.get(field_map.get("external_id", "")))
-            bio_id = generate_source_id(
-                _BIO_SOURCE,
-                csv_file.stem,
-                str(ext_id or i),
-            )
+            # The bio_id is a narrator-biography provenance key namespaced by the
+            # *bio source* (``kaggle_narrators``), which is NOT a hadith
+            # ``SourceCorpus``. Building it with ``generate_source_id`` would trip
+            # that helper's da#82 fail-fast on an unknown corpus, so we join the
+            # key directly with the shared delimiter instead.
+            bio_id = ID_DELIMITER.join([_BIO_SOURCE, csv_file.stem, str(ext_id or i)])
             name_ar_norm = normalize_arabic(name_ar) if name_ar else None
 
             all_bios.append(

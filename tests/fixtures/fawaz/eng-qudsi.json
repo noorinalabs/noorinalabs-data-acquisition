@@ -1,0 +1,75 @@
+{
+ "metadata": {
+  "name": "Forty Hadith Qudsi",
+  "sections": {
+   "0": "",
+   "1": "Forty Hadith Qudsi"
+  },
+  "section_details": {
+   "0": {
+    "hadithnumber_first": 0,
+    "hadithnumber_last": 0,
+    "arabicnumber_first": 0,
+    "arabicnumber_last": 0
+   },
+   "1": {
+    "hadithnumber_first": 1,
+    "hadithnumber_last": 40,
+    "arabicnumber_first": 1,
+    "arabicnumber_last": 40
+   }
+  }
+ },
+ "hadiths": [
+  {
+   "hadithnumber": 1,
+   "arabicnumber": 1,
+   "text": "On the authority of Abu Hurayrah (may Allah be pleased with him), who said that the Messenger of Allah (ﷺ) said: When Allah decreed the Creation He pledged Himself by writing in His book which is laid down with Him: My mercy prevails over my wrath. It was related by Muslim (also by al-Bukhari, an-Nasa'i and Ibn Majah)",
+   "grades": [],
+   "reference": {
+    "book": 1,
+    "hadith": 1
+   }
+  },
+  {
+   "hadithnumber": 2,
+   "arabicnumber": 2,
+   "text": "On the authority of Abu Hurayrah (may Allah be pleased with him), who said that the Messenger of Allah (ﷺ) said: Allah Almighty has said: The son of Adam denied Me and he had no right to do so. And he reviled Me and he had no right to do so. As for his denying Me, it is his saying: He will not remake me as He made me at first (1) - and the initial creation [of him] is no easier for Me than remaking him. As for his reviling Me, it is his saying: Allah has taken to Himself a son, while I am the One, the Everlasting Refuge. I begot not nor was I begotten, and there is none comparable to Me.(1) i.e., bring me back to life after death. It was related by al-Bukhari (also by an-Nasa'i)",
+   "grades": [],
+   "reference": {
+    "book": 1,
+    "hadith": 2
+   }
+  },
+  {
+   "hadithnumber": 3,
+   "arabicnumber": 3,
+   "text": "On the authority of Zayd ibn Khalid al-Juhaniyy (may Allah be pleased with him), who said: The Messenger of Allah (ﷺ) led the morning prayer for us at al-Hudaybiyah following rainfall during the night. When the Prophet (ﷺ) finished, he faced the people and said to them: Do you know what your Lord has said? They said: Allah and his Messenger know best. He said: This morning one of my servants became a believer in Me and one a disbeliever. As for him who said: We have been given rain by virtue of Allah and His mercy, that one is a believer in Me, a disbeliever in the stars (2); and as for him who said: We have been given rain by such-and-such a star, that one is a disbeliever in Me, a believer in the stars. (2) The pre-Islamic Arabs believed that rain was brought about by the movement of stars. This Hadith draws attention to the fact that whatever be the direct cause of such natural phenomena as rain, it is Allah the Almighty who is the Disposer of all things. It was related by al-Bukhari (also by Malik and an-Nasa'i)",
+   "grades": [],
+   "reference": {
+    "book": 1,
+    "hadith": 3
+   }
+  },
+  {
+   "hadithnumber": 4,
+   "arabicnumber": 4,
+   "text": "On the authority of Abu Hurayrah (may Allah be pleased with him), who said that the Messenger of Allah (ﷺ) said: Allah said: Sons of Adam inveigh against [the vicissitudes of] Time, and I am Time, in My hand is the night and the day (1). (1) As the Almighty is the Ordainer of all things, to inveigh against misfortunes that are part of Time is tantamount to inveighing against Him. It was related by al-Bukhari (also by Muslim)",
+   "grades": [],
+   "reference": {
+    "book": 1,
+    "hadith": 4
+   }
+  },
+  {
+   "hadithnumber": 5,
+   "arabicnumber": 5,
+   "text": "On the authority of Abu Hurayrah (may Allah be pleased with him), who said that the Messenger of Allah (ﷺ) said: Allah (glorified and exalted be He) said: I am so self-sufficient that I am in no need of having an associate. Thus he who does an action for someone else's sake as well as Mine will have that action renounced by Me to him whom he associated with Me. It was related by Muslim (also by Ibn Majah)",
+   "grades": [],
+   "reference": {
+    "book": 1,
+    "hadith": 5
+   }
+  }
+ ]
+}

@@ -15,6 +15,12 @@ from typing import Any
 
 import pyarrow.parquet as pq
 
+from src.parse.identity import (
+    collection_node_id,
+    grading_node_id,
+    hadith_node_id,
+    narrator_node_id,
+)
 from src.utils.logging import get_logger
 from src.utils.neo4j_client import Neo4jClient
 
@@ -242,7 +248,7 @@ def _load_narrated(
 
     batch: list[dict[str, Any]] = []
     for hid, (_pos, nid) in first_narrators.items():
-        full_hid = f"hdt:{hid}" if not hid.startswith("hdt:") else hid
+        full_hid = hadith_node_id(hid)
         batch.append({"narrator_id": nid, "hadith_id": full_hid})
 
     if not batch:
@@ -334,12 +340,12 @@ def _load_appears_in(
             if not sid or not cname:
                 skipped += 1
                 continue
-            hid = f"hdt:{sid}" if not sid.startswith("hdt:") else sid
+            hid = hadith_node_id(sid)
             # Collection IDs in staging use "{corpus}:{name}" format (e.g. "lk:bukhari").
             # Build the same key so we match the Collection nodes that were loaded.
             corpus = row.get("source_corpus", "")
             raw_cid = f"{corpus}:{cname}" if corpus else cname
-            cid = f"col:{raw_cid}" if not raw_cid.startswith("col:") else raw_cid
+            cid = collection_node_id(raw_cid)
             batch.append(
                 {
                     "hadith_id": hid,
@@ -377,15 +383,22 @@ def _load_appears_in(
 # 4. PARALLEL_OF — from parallel_links.parquet
 # ---------------------------------------------------------------------------
 
+# Identity of a PARALLEL_OF edge is the (hadith_a, hadith_b) PAIR — the similarity
+# score / variant tier / cross_sect flag are *attributes* of that one edge, not
+# part of its key. They are therefore SET after a bare-edge MERGE, never inside
+# the MERGE pattern (da#77 / main#139): Neo4j refuses to MERGE a relationship with
+# a null property in the pattern, and keying on the properties would mint a SECOND
+# edge between the same pair whenever a re-run produced a slightly different score
+# (dedup is re-run as more corpora land). coalesce-preserve keeps re-runs
+# idempotent and null-safe — exactly the APPEARS_IN contract.
 _PARALLEL_OF_QUERY = """\
 UNWIND $batch AS row
 MATCH (h1:Hadith {id: row.id_a})
 MATCH (h2:Hadith {id: row.id_b})
-MERGE (h1)-[:PARALLEL_OF {
-    similarity_score: row.score,
-    variant_type: row.variant_type,
-    cross_sect: row.cross_sect
-}]->(h2)
+MERGE (h1)-[r:PARALLEL_OF]->(h2)
+SET r.similarity_score = coalesce(row.score, r.similarity_score),
+    r.variant_type = coalesce(row.variant_type, r.variant_type),
+    r.cross_sect = coalesce(row.cross_sect, r.cross_sect)
 """
 
 _PARALLEL_OF_CHECK = """\
@@ -426,8 +439,8 @@ def _load_parallel_of(
             skipped += 1
             continue
         # Ensure lower ID -> higher ID for consistent directionality
-        full_a = f"hdt:{id_a}" if not id_a.startswith("hdt:") else id_a
-        full_b = f"hdt:{id_b}" if not id_b.startswith("hdt:") else id_b
+        full_a = hadith_node_id(id_a)
+        full_b = hadith_node_id(id_b)
         if full_a > full_b:
             full_a, full_b = full_b, full_a
         batch.append(
@@ -511,8 +524,8 @@ def _load_studied_under(
             skipped += 1
             continue
         # Ensure narrator prefix
-        full_from = f"nar:{from_id}" if not from_id.startswith("nar:") else from_id
-        full_to = f"nar:{to_id}" if not to_id.startswith("nar:") else to_id
+        full_from = narrator_node_id(from_id)
+        full_to = narrator_node_id(to_id)
         batch.append({"from_id": full_from, "to_id": full_to})
 
     if not batch:
@@ -588,8 +601,8 @@ def _load_graded_by(
             if not sid:
                 skipped += 1
                 continue
-            hid = f"hdt:{sid}" if not sid.startswith("hdt:") else sid
-            gid = f"grd:{sid}"
+            hid = hadith_node_id(sid)
+            gid = grading_node_id(sid)
             batch.append({"hadith_id": hid, "grading_id": gid})
 
     if not batch:
