@@ -4,20 +4,40 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from src.graph.load_edges import (
     _APPEARS_IN_QUERY,
     EdgeLoadResult,
     _build_chain_pairs,
+    _load_studied_under,
+    _studied_under_endpoint,
     load_all_edges,
 )
+from src.parse.identity import make_canonical_id, narrator_node_id
+from src.parse.schemas import NETWORK_EDGE_SCHEMA
+from src.utils.arabic import normalize_arabic
 from tests.test_graph.conftest import (
     MockNeo4jClient,
     write_hadiths,
     write_narrator_mentions_resolved,
     write_parallel_links,
 )
+
+
+def _write_network_edges(staging: Path, suffix: str, rows: list[dict[str, object]]) -> Path:
+    """Write a network_edges_<suffix>.parquet."""
+    full = []
+    for r in rows:
+        base: dict[str, object] = {f.name: None for f in NETWORK_EDGE_SCHEMA}
+        base.update(r)
+        full.append(base)
+    arrays = {f.name: [r[f.name] for r in full] for f in NETWORK_EDGE_SCHEMA}
+    path = staging / f"network_edges_{suffix}.parquet"
+    pq.write_table(pa.table(arrays, schema=NETWORK_EDGE_SCHEMA), path)
+    return path
 
 
 class TestEdgeLoadResult:
@@ -331,3 +351,82 @@ class TestLoadAllEdges:
             assert r.created >= 0
             assert r.skipped >= 0
             assert r.missing_endpoints >= 0
+
+
+class TestStudiedUnderEndpoint:
+    def test_resolves_by_name_to_canonical_id(self) -> None:
+        # Canonical Narrator nodes are keyed by name, not by the source id.
+        assert _studied_under_endpoint("مالك", "42") == make_canonical_id(normalize_arabic("مالك"))
+
+    def test_falls_back_to_external_id_when_name_missing(self) -> None:
+        assert _studied_under_endpoint(None, "42") == narrator_node_id("42")
+        assert _studied_under_endpoint("   ", "42") == narrator_node_id("42")
+
+    def test_none_when_both_absent(self) -> None:
+        assert _studied_under_endpoint(None, None) is None
+
+
+class TestLoadStudiedUnderGlob:
+    def test_globs_all_sources_and_resolves_by_name(self, staging_dir: Path) -> None:
+        # Two source files: muhaddithat (A->B) and itqan (B->C).
+        _write_network_edges(
+            staging_dir,
+            "muhaddithat",
+            [
+                {
+                    "from_narrator_name": "أ",
+                    "to_narrator_name": "ب",
+                    "source": "muhaddithat",
+                    "from_external_id": "1",
+                    "to_external_id": "2",
+                }
+            ],
+        )
+        _write_network_edges(
+            staging_dir,
+            "itqan",
+            [
+                {
+                    "from_narrator_name": "ب",
+                    "to_narrator_name": "ج",
+                    "source": "itqan",
+                    "from_external_id": "2",
+                    "to_external_id": "3",
+                }
+            ],
+        )
+        client = MockNeo4jClient()
+        client.set_read_results([{"from_exists": True, "to_exists": True} for _ in range(2)])
+        result = _load_studied_under(client, staging_dir)
+        assert result.created == 2  # both files loaded
+        # The written batch keys endpoints by canonical name id, not nar:<source-id>.
+        write_calls = [b for q, b in client.calls if "MERGE" in q and isinstance(b, list)]
+        batch = write_calls[-1]
+        assert {
+            "from_id": make_canonical_id(normalize_arabic("أ")),
+            "to_id": make_canonical_id(normalize_arabic("ب")),
+        } in batch
+        assert {
+            "from_id": make_canonical_id(normalize_arabic("ب")),
+            "to_id": make_canonical_id(normalize_arabic("ج")),
+        } in batch
+
+    def test_dedups_same_pair_across_files(self, staging_dir: Path) -> None:
+        edge = {
+            "from_narrator_name": "أ",
+            "to_narrator_name": "ب",
+            "source": "x",
+            "from_external_id": "1",
+            "to_external_id": "2",
+        }
+        _write_network_edges(staging_dir, "muhaddithat", [edge])
+        _write_network_edges(staging_dir, "itqan", [dict(edge, source="itqan")])
+        client = MockNeo4jClient()
+        client.set_read_results([{"from_exists": True, "to_exists": True}])
+        result = _load_studied_under(client, staging_dir)
+        assert result.created == 1  # the duplicate pair is collapsed
+
+    def test_skips_when_no_edge_files(self, staging_dir: Path) -> None:
+        result = _load_studied_under(MockNeo4jClient(), staging_dir)
+        assert result.edge_type == "STUDIED_UNDER"
+        assert result.created == 0

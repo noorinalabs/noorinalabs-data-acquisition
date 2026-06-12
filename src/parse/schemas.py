@@ -13,6 +13,7 @@ __all__ = [
     "HADITH_SCHEMA",
     "NARRATOR_MENTION_SCHEMA",
     "NARRATOR_BIO_SCHEMA",
+    "NARRATOR_ALIAS_SCHEMA",
     "COLLECTION_SCHEMA",
     "NETWORK_EDGE_SCHEMA",
 ]
@@ -102,5 +103,24 @@ NETWORK_EDGE_SCHEMA = pa.schema(
         pa.field("source", pa.string(), nullable=False),
         pa.field("from_external_id", pa.string(), nullable=True),
         pa.field("to_external_id", pa.string(), nullable=True),
+    ]
+)
+
+# One row per (narrator, distinct name-variant). Produced by rijal-style sources
+# that carry alternate spellings of a narrator's name (e.g. Itqan ``namings`` —
+# da#94). ``canonical_name_ar_normalized`` is the SAME normalized form the bio
+# carries as ``name_ar_normalized`` and from which ``identity.make_canonical_id``
+# mints the ``nar:`` id, so the resolve stage (``bio_promote``) can attach each
+# variant to the right canonical Narrator without re-parsing the source. The
+# variant is stored both raw (``alias``) and Arabic-normalized (``alias_normalized``)
+# — the normalized form is what a future matcher keys on, the raw form preserves
+# the source spelling for provenance/display.
+NARRATOR_ALIAS_SCHEMA = pa.schema(
+    [
+        pa.field("bio_id", pa.string(), nullable=False),
+        pa.field("source", pa.string(), nullable=False),
+        pa.field("canonical_name_ar_normalized", pa.string(), nullable=False),
+        pa.field("alias", pa.string(), nullable=False),
+        pa.field("alias_normalized", pa.string(), nullable=False),
     ]
 )

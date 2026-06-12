@@ -1,16 +1,34 @@
-"""Parse the Itqan rijal dataset into NARRATOR_BIO staging Parquet.
+"""Parse the Itqan rijal dataset into staging Parquet.
 
-Produces one output file — ``narrators_bio_itqan.parquet`` (NARRATOR_BIO_SCHEMA)
-— from the per-grade profile buckets downloaded by ``src/acquire/itqan.py``.
+Produces three output files from the per-grade profile buckets downloaded by
+``src/acquire/itqan.py``:
+
+* ``narrators_bio_itqan.parquet``    (NARRATOR_BIO_SCHEMA)   — the bios (da#92a).
+* ``network_edges_itqan.parquet``    (NETWORK_EDGE_SCHEMA)   — teacher↔student
+  transmission edges built from each profile's ``teachers``/``students`` id
+  lists (da#93). Loaded as ``STUDIED_UNDER`` edges, mirroring muhaddithat.
+* ``narrator_aliases_itqan.parquet`` (NARRATOR_ALIAS_SCHEMA) — name variants
+  from each profile's ``namings`` array (da#94), keyed to the same canonical
+  identity the bio mints so the resolve stage attaches them as aliases.
 
 Each bucket file (``profiles_<grade>.json``) is a JSON object keyed by the
 narrator id; every value is a profile dict. The jarh-wa-ta'dil grade is carried
 both by the filename bucket and the per-profile ``grade_en`` field (they agree);
 we trust the per-profile field and fall back to the bucket.
 
-Scope (da#92a — narrators only): the ``teachers``/``students`` id lists (isnad
-edges, #93) and the ``namings``/``by_name`` name variants (#94) are deliberately
-NOT emitted here — this PR populates Narrator bios only.
+Edges (da#93): Itqan is a rijal database — it has no hadith-scoped isnad chains,
+so there is nothing to emit as NARRATOR_MENTION rows (those need a
+``source_hadith_id`` + ``position_in_chain``). Instead each profile carries the
+ids of its ``teachers`` and ``students``; the transmission relation is
+``student STUDIED_UNDER teacher`` (``from_narrator`` = student, ``to_narrator`` =
+teacher), exactly the orientation the muhaddithat NETWORK_EDGE loader uses. A
+profile P thus contributes ``(P -> t)`` for each teacher t and ``(s -> P)`` for
+each student s; the two perspectives are deduplicated on the id pair.
+
+Aliases (da#94): each profile's ``namings`` array lists alternate spellings of
+the narrator's name. We emit one alias row per distinct variant, tagged with the
+profile's canonical normalized name so ``bio_promote`` can union the variants
+onto the matching ``nar:`` record without re-reading the source.
 """
 
 from __future__ import annotations
@@ -22,7 +40,11 @@ from pathlib import Path
 import pyarrow as pa
 
 from src.parse.base import safe_str, write_parquet
-from src.parse.schemas import NARRATOR_BIO_SCHEMA
+from src.parse.schemas import (
+    NARRATOR_ALIAS_SCHEMA,
+    NARRATOR_BIO_SCHEMA,
+    NETWORK_EDGE_SCHEMA,
+)
 from src.utils.arabic import normalize_arabic
 from src.utils.logging import get_logger
 
@@ -144,22 +166,138 @@ def _parse_profile(raw_id: str, profile: dict[str, object]) -> dict[str, object 
     }
 
 
-def _parse_profiles_file(path: Path) -> list[dict[str, object | None]]:
-    """Parse one ``profiles_<grade>.json`` bucket into bio rows."""
-    data = json.loads(path.read_text(encoding="utf-8"))
-    rows: list[dict[str, object | None]] = []
-    for raw_id, profile in data.items():
-        if not isinstance(profile, dict):
+def _id_list(value: object) -> list[str]:
+    """Coerce a ``teachers``/``students`` field (ints or strs) to clean id strings."""
+    if not isinstance(value, list):
+        return []
+    ids: list[str] = []
+    for item in value:
+        s = safe_str(item)
+        if s:
+            ids.append(s)
+    return ids
+
+
+def _iter_profiles(bucket_files: list[Path]) -> list[tuple[str, dict[str, object]]]:
+    """Load every bucket into a flat ``(profile_id, profile)`` list.
+
+    ``id`` is globally unique across buckets (verified — da#92a); the first
+    occurrence of a profile id wins so re-running over an overlapping bucket set
+    does not double-count. A profile with no id is dropped (it can key neither a
+    bio nor a transmission edge).
+    """
+    profiles: list[tuple[str, dict[str, object]]] = []
+    seen: set[str] = set()
+    for bucket in bucket_files:
+        data = json.loads(bucket.read_text(encoding="utf-8"))
+        count = 0
+        for raw_id, profile in data.items():
+            if not isinstance(profile, dict):
+                continue
+            pid = safe_str(profile.get("id")) or safe_str(raw_id)
+            if pid is None:
+                continue
+            if pid in seen:
+                logger.warning("itqan_duplicate_profile_id", profile_id=pid)
+                continue
+            seen.add(pid)
+            profiles.append((pid, profile))
+            count += 1
+        logger.info("itqan_bucket_parsed", file=bucket.name, profiles=count)
+    return profiles
+
+
+def _build_edges(
+    profiles: list[tuple[str, dict[str, object]]],
+    id_to_name: dict[str, str],
+) -> list[dict[str, str | None]]:
+    """Build deduplicated ``student -> teacher`` STUDIED_UNDER edges (da#93).
+
+    For each profile P: ``P -> t`` for every teacher ``t`` in ``P.teachers``, and
+    ``s -> P`` for every student ``s`` in ``P.students``. ``from`` is always the
+    student, ``to`` the teacher (the orientation the NETWORK_EDGE loader maps to
+    ``(student)-[:STUDIED_UNDER]->(teacher)``). The same edge surfaces from both
+    endpoints, so it is deduplicated on the ``(from_id, to_id)`` id pair. The name
+    columns fall back to the bare id when a referenced profile is absent from the
+    parsed slice, keeping them non-null per NETWORK_EDGE_SCHEMA.
+    """
+    edges: list[dict[str, str | None]] = []
+    seen_pairs: set[tuple[str, str]] = set()
+
+    def _add(student_id: str, teacher_id: str) -> None:
+        if student_id == teacher_id:
+            return
+        key = (student_id, teacher_id)
+        if key in seen_pairs:
+            return
+        seen_pairs.add(key)
+        edges.append(
+            {
+                "from_narrator_name": id_to_name.get(student_id, student_id),
+                "to_narrator_name": id_to_name.get(teacher_id, teacher_id),
+                "hadith_id": None,  # rijal transmission network — not hadith-scoped
+                "source": SOURCE,
+                "from_external_id": student_id,
+                "to_external_id": teacher_id,
+            }
+        )
+
+    for pid, profile in profiles:
+        for teacher_id in _id_list(profile.get("teachers")):
+            _add(pid, teacher_id)
+        for student_id in _id_list(profile.get("students")):
+            _add(student_id, pid)
+
+    return edges
+
+
+def _build_aliases(profiles: list[tuple[str, dict[str, object]]]) -> list[dict[str, str]]:
+    """Build name-variant alias rows from each profile's ``namings`` array (da#94).
+
+    One row per distinct variant whose normalized form differs from the
+    narrator's primary normalized name — the primary spelling is not an alias of
+    itself, and exact duplicate variants are collapsed. ``canonical_name_ar_normalized``
+    carries the primary normalized name so ``bio_promote`` can key each variant
+    onto the matching ``nar:`` record.
+    """
+    rows: list[dict[str, str]] = []
+    for pid, profile in profiles:
+        name_ar = _clean(profile.get("full_name"))
+        if name_ar is None:
+            continue  # no canonical name to attach the variants to
+        canonical_norm = normalize_arabic(name_ar)
+        namings = profile.get("namings")
+        if not isinstance(namings, list):
             continue
-        row = _parse_profile(raw_id, profile)
-        if row is not None:
-            rows.append(row)
-    logger.info("itqan_bucket_parsed", file=path.name, rows=len(rows))
+        bio_id = f"{SOURCE}:{pid}"
+        seen: set[str] = set()
+        for raw_variant in namings:
+            variant = _clean(raw_variant)
+            if variant is None:
+                continue
+            variant_norm = normalize_arabic(variant)
+            if not variant_norm or variant_norm == canonical_norm or variant_norm in seen:
+                continue
+            seen.add(variant_norm)
+            rows.append(
+                {
+                    "bio_id": bio_id,
+                    "source": SOURCE,
+                    "canonical_name_ar_normalized": canonical_norm,
+                    "alias": variant,
+                    "alias_normalized": variant_norm,
+                }
+            )
     return rows
 
 
-def run(raw_dir: Path, staging_dir: Path) -> Path:
-    """Parse Itqan rijal buckets into ``narrators_bio_itqan.parquet``."""
+def run(raw_dir: Path, staging_dir: Path) -> list[Path]:
+    """Parse Itqan rijal buckets into bio, network-edge, and alias Parquet.
+
+    Returns ``[bios, edges, aliases]``. ``src.parse.run_all`` flattens a list
+    result, so a single adapter emitting three staging files is a first-class
+    return shape (``ParseOutput``).
+    """
     source_dir = raw_dir / "itqan"
     if not source_dir.exists():
         msg = f"Source directory not found: {source_dir}"
@@ -170,25 +308,47 @@ def run(raw_dir: Path, staging_dir: Path) -> Path:
         msg = f"No profiles_*.json buckets under {source_dir}"
         raise FileNotFoundError(msg)
 
-    rows: list[dict[str, object | None]] = []
-    seen_bio_ids: set[str] = set()
-    for bucket in bucket_files:
-        for row in _parse_profiles_file(bucket):
-            bio_id = str(row["bio_id"])
-            if bio_id in seen_bio_ids:
-                logger.warning("itqan_duplicate_bio_id", bio_id=bio_id)
-                continue
-            seen_bio_ids.add(bio_id)
-            rows.append(row)
+    profiles = _iter_profiles(bucket_files)
 
-    if not rows:
+    # Bios (da#92a) — every named profile becomes a NARRATOR_BIO row.
+    bio_rows: list[dict[str, object | None]] = []
+    for pid, profile in profiles:
+        row = _parse_profile(pid, profile)
+        if row is not None:
+            bio_rows.append(row)
+    if not bio_rows:
         msg = "No valid Itqan narrator bios parsed"
         raise ValueError(msg)
+    bio_arrays = {f.name: [r[f.name] for r in bio_rows] for f in NARRATOR_BIO_SCHEMA}
+    bio_table = pa.table(bio_arrays, schema=NARRATOR_BIO_SCHEMA)
+    bio_path = staging_dir / "narrators_bio_itqan.parquet"
+    write_parquet(bio_table, bio_path, schema=NARRATOR_BIO_SCHEMA)
 
-    arrays = {field.name: [r[field.name] for r in rows] for field in NARRATOR_BIO_SCHEMA}
-    table = pa.table(arrays, schema=NARRATOR_BIO_SCHEMA)
+    # Network edges (da#93) — teacher/student id lists -> STUDIED_UNDER edges.
+    id_to_name: dict[str, str] = {}
+    for pid, profile in profiles:
+        name = _clean(profile.get("full_name"))
+        if name is not None:
+            id_to_name[pid] = name
+    edges = _build_edges(profiles, id_to_name)
+    edge_arrays = {f.name: [e[f.name] for e in edges] for f in NETWORK_EDGE_SCHEMA}
+    edge_table = pa.table(edge_arrays, schema=NETWORK_EDGE_SCHEMA)
+    edge_path = staging_dir / "network_edges_itqan.parquet"
+    write_parquet(edge_table, edge_path, schema=NETWORK_EDGE_SCHEMA)
 
-    out_path = staging_dir / "narrators_bio_itqan.parquet"
-    write_parquet(table, out_path, schema=NARRATOR_BIO_SCHEMA)
-    logger.info("itqan_bios_parsed", total=len(rows), buckets=len(bucket_files))
-    return out_path
+    # Name variants (da#94) -> identity aliases consumed by bio_promote.
+    aliases = _build_aliases(profiles)
+    alias_arrays = {f.name: [a[f.name] for a in aliases] for f in NARRATOR_ALIAS_SCHEMA}
+    alias_table = pa.table(alias_arrays, schema=NARRATOR_ALIAS_SCHEMA)
+    alias_path = staging_dir / "narrator_aliases_itqan.parquet"
+    write_parquet(alias_table, alias_path, schema=NARRATOR_ALIAS_SCHEMA)
+
+    logger.info(
+        "itqan_parsed",
+        buckets=len(bucket_files),
+        profiles=len(profiles),
+        bios=len(bio_rows),
+        edges=len(edges),
+        aliases=len(aliases),
+    )
+    return [bio_path, edge_path, alias_path]
