@@ -17,6 +17,11 @@ __all__ = [
     "NETWORK_EDGE_SCHEMA",
 ]
 
+# ``source_id`` grammar and the graph node-id rules derived from it are the
+# canonical identity contract — see :mod:`src.parse.identity` (``<corpus>:
+# <collection>[:<part>...]``, corpus exactly once). ``hadith_number`` is the
+# IN-BOOK ordinal that flows to ``APPEARS_IN.hadith_number_in_book`` (da#77) —
+# NOT the collection-wide reference number.
 HADITH_SCHEMA = pa.schema(
     [
         pa.field("source_id", pa.string(), nullable=False),

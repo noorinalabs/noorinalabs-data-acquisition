@@ -9,6 +9,7 @@ import pyarrow as pa
 import pyarrow.csv as pcsv
 import pyarrow.parquet as pq
 
+from src.parse.identity import ID_DELIMITER, SOURCE_CORPORA
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -63,12 +64,23 @@ def read_csv_robust(path: Path, encoding: str = "utf-8", **kwargs: Any) -> tuple
 
 
 def generate_source_id(corpus: str, collection: str, *parts: int | str) -> str:
-    """Generate deterministic source_id.
+    """Generate a deterministic, corpus-namespaced ``source_id``.
 
     Example: ``generate_source_id("lk", "bukhari", 1, 1)`` -> ``"lk:bukhari:1:1"``
+
+    *corpus* MUST be a known source corpus (:data:`identity.SOURCE_CORPORA`); an
+    unknown corpus is a collision hazard (ids only stay unique across sources
+    because the corpus namespaces them), so it fails fast. The canonical grammar
+    and the graph node-id rules live in :mod:`src.parse.identity`.
     """
+    if corpus not in SOURCE_CORPORA:
+        msg = (
+            f"unknown source corpus {corpus!r}; source_id must be namespaced by a "
+            f"known corpus (one of {sorted(SOURCE_CORPORA)}) to stay collision-safe"
+        )
+        raise ValueError(msg)
     segments = [corpus, collection, *[str(p) for p in parts]]
-    return ":".join(segments)
+    return ID_DELIMITER.join(segments)
 
 
 def safe_int(value: Any) -> int | None:
