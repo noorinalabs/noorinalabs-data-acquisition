@@ -24,6 +24,7 @@ from rapidfuzz import fuzz
 from rapidfuzz.distance import Levenshtein
 
 from src.parse.base import safe_str, write_parquet
+from src.parse.identity import narrator_node_id
 from src.resolve.schemas import AMBIGUOUS_NARRATORS_SCHEMA, NARRATORS_CANONICAL_SCHEMA
 from src.utils.arabic import normalize_arabic
 from src.utils.logging import get_logger
@@ -440,9 +441,12 @@ def _make_canonical_id(name_normalized: str) -> str:
     """Deterministic canonical ID via uuid5 with fixed namespace.
 
     Returns ``nar:<uuid5>`` to match the ``nar:`` prefix the graph
-    loader (``load_nodes._load_narrators``) validates on import.
+    loader (``load_nodes._load_narrators``) validates on import. The ``nar:``
+    prefix is applied through the canonical :func:`narrator_node_id` helper
+    (da#82) so resolve agrees with the loaders on one prefixing rule rather than
+    hand-concatenating the prefix here.
     """
-    return f"nar:{uuid.uuid5(_CANONICAL_NAMESPACE, name_normalized)}"
+    return narrator_node_id(str(uuid.uuid5(_CANONICAL_NAMESPACE, name_normalized)))
 
 
 # ---------------------------------------------------------------------------
