@@ -15,6 +15,12 @@ from typing import Any
 
 import pyarrow.parquet as pq
 
+from src.parse.identity import (
+    collection_node_id,
+    grading_node_id,
+    hadith_node_id,
+    narrator_node_id,
+)
 from src.utils.logging import get_logger
 from src.utils.neo4j_client import Neo4jClient
 
@@ -242,7 +248,7 @@ def _load_narrated(
 
     batch: list[dict[str, Any]] = []
     for hid, (_pos, nid) in first_narrators.items():
-        full_hid = f"hdt:{hid}" if not hid.startswith("hdt:") else hid
+        full_hid = hadith_node_id(hid)
         batch.append({"narrator_id": nid, "hadith_id": full_hid})
 
     if not batch:
@@ -334,12 +340,12 @@ def _load_appears_in(
             if not sid or not cname:
                 skipped += 1
                 continue
-            hid = f"hdt:{sid}" if not sid.startswith("hdt:") else sid
+            hid = hadith_node_id(sid)
             # Collection IDs in staging use "{corpus}:{name}" format (e.g. "lk:bukhari").
             # Build the same key so we match the Collection nodes that were loaded.
             corpus = row.get("source_corpus", "")
             raw_cid = f"{corpus}:{cname}" if corpus else cname
-            cid = f"col:{raw_cid}" if not raw_cid.startswith("col:") else raw_cid
+            cid = collection_node_id(raw_cid)
             batch.append(
                 {
                     "hadith_id": hid,
@@ -426,8 +432,8 @@ def _load_parallel_of(
             skipped += 1
             continue
         # Ensure lower ID -> higher ID for consistent directionality
-        full_a = f"hdt:{id_a}" if not id_a.startswith("hdt:") else id_a
-        full_b = f"hdt:{id_b}" if not id_b.startswith("hdt:") else id_b
+        full_a = hadith_node_id(id_a)
+        full_b = hadith_node_id(id_b)
         if full_a > full_b:
             full_a, full_b = full_b, full_a
         batch.append(
@@ -511,8 +517,8 @@ def _load_studied_under(
             skipped += 1
             continue
         # Ensure narrator prefix
-        full_from = f"nar:{from_id}" if not from_id.startswith("nar:") else from_id
-        full_to = f"nar:{to_id}" if not to_id.startswith("nar:") else to_id
+        full_from = narrator_node_id(from_id)
+        full_to = narrator_node_id(to_id)
         batch.append({"from_id": full_from, "to_id": full_to})
 
     if not batch:
@@ -588,8 +594,8 @@ def _load_graded_by(
             if not sid:
                 skipped += 1
                 continue
-            hid = f"hdt:{sid}" if not sid.startswith("hdt:") else sid
-            gid = f"grd:{sid}"
+            hid = hadith_node_id(sid)
+            gid = grading_node_id(sid)
             batch.append({"hadith_id": hid, "grading_id": gid})
 
     if not batch:
