@@ -37,6 +37,7 @@ EXPECTED_SLUGS = [
     "open_hadith",
     "muhaddithat",
     "itqan",
+    "halimbahae",
 ]
 
 

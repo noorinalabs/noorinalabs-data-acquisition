@@ -215,6 +215,19 @@ SOURCE_REGISTRY: tuple[SourceAdapter, ...] = (
         ),
         description="Itqan rijal DB — 115,735 narrator profiles from 22 classical texts.",
     ),
+    SourceAdapter(
+        slug="halimbahae",
+        corpus=SourceCorpus.HALIMBAHAE,
+        sect=Sect.SUNNI,
+        acquire_module="halimbahae",
+        parse_module="halimbahae",
+        reachable=True,
+        license_note=(
+            "halimbahae/Hadith — open GitHub, 9 Sunni books incl. the Six Books, "
+            "Open Database License (ODbL 1.0) + Database Contents License (DbCL 1.0)."
+        ),
+        description="halimbahae/Hadith — 9 Sunni books with full Arabic diacritics (tashkeel).",
+    ),
 )
 
 
