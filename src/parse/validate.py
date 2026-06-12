@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict
 from src.parse.schemas import (
     COLLECTION_SCHEMA,
     HADITH_SCHEMA,
+    NARRATOR_ALIAS_SCHEMA,
     NARRATOR_BIO_SCHEMA,
     NARRATOR_MENTION_SCHEMA,
     NETWORK_EDGE_SCHEMA,
@@ -37,6 +38,7 @@ EXPECTED_SCHEMAS: dict[str, pa.Schema] = {
     "hadiths_": HADITH_SCHEMA,
     "narrator_mentions_": NARRATOR_MENTION_SCHEMA,
     "narrators_bio_": NARRATOR_BIO_SCHEMA,
+    "narrator_aliases_": NARRATOR_ALIAS_SCHEMA,
     "collections_": COLLECTION_SCHEMA,
     "network_edges_": NETWORK_EDGE_SCHEMA,
 }
@@ -150,6 +152,9 @@ DEFAULT_BASELINES: dict[str, dict[str, float | int]] = {
     "collections_lk": {"row_count": 6},
     "collections_fawaz": {"row_count": 0},
     "network_edges_muhaddithat": {"row_count": 330},
+    # Itqan teacher/student transmission edges and name variants (da#93 / da#94).
+    "network_edges_itqan": {"row_count": 100656},
+    "narrator_aliases_itqan": {"row_count": 217762},
 }
 
 DEFAULT_DRIFT_TOLERANCE_PCT = 30.0
@@ -164,6 +169,7 @@ REQUIRED_COLUMNS: dict[str, set[str]] = {
         "position_in_chain",
     },
     "narrators_bio_": {"bio_id", "source"},
+    "narrator_aliases_": {"bio_id", "source", "canonical_name_ar_normalized", "alias"},
     "collections_": {"collection_id", "name_en", "sect", "source_corpus"},
     "network_edges_": {"from_narrator_name", "to_narrator_name", "source"},
 }
