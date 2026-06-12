@@ -56,7 +56,9 @@ class TestItqanNarratorLoadLive:
         assert count == expected, "every canonical Itqan narrator should be a Narrator node"
 
         nodes = neo4j_client.execute_read(
-            "MATCH (n:Narrator) RETURN n.id AS id, n.external_id AS ext, n.trustworthiness AS trust"
+            "MATCH (n:Narrator) "
+            "RETURN n.id AS id, n.external_id AS ext, n.trustworthiness AS trust, "
+            "n.source_ids AS source_ids"
         )
         # Correct ids: canonical nar: prefix on every node.
         assert all(n["id"].startswith("nar:") for n in nodes)
@@ -65,6 +67,16 @@ class TestItqanNarratorLoadLive:
         # Grading made it onto the graph: the fixture's three real jarh tiers.
         trust = {n["trust"] for n in nodes}
         assert {"matruk", "kadhdhab", "thiqa"} <= trust
+
+        # Node-level provenance: every node carries an itqan: source_id, so the
+        # corpus is auditable AND removable on the graph itself (the property the
+        # owner's licensing clearance relies on).
+        assert all(any(s.startswith("itqan:") for s in n["source_ids"]) for n in nodes)
+        removable = neo4j_client.execute_read(
+            "MATCH (n:Narrator) WHERE any(s IN n.source_ids WHERE s STARTS WITH 'itqan:') "
+            "RETURN count(n) AS n"
+        )[0]["n"]
+        assert removable == count, "every Itqan narrator must be selectable for removal"
 
     def test_reload_is_idempotent(self, neo4j_client, tmp_path: Path) -> None:
         raw = tmp_path / "raw" / "itqan"

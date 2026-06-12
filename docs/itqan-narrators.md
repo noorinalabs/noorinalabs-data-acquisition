@@ -98,7 +98,23 @@ narrators** and loaded **12,820 `Narrator` nodes** into `neo4j:5` with 0 errors
 - **Reachability:** plain HTTPS from `raw.githubusercontent.com` — no auth, no
   API key. The 7 buckets total ~150 MB.
 - **Licensing:** the upstream repo ships **no LICENSE file** → all-rights-reserved
-  by default. Acquisition here is for research/analysis. Redistribution or
-  production publication of the raw corpus needs an explicit usage grant from the
-  upstream author (Ali Bin Shahid) — **flagged for owner confirmation; not
-  cleared for redistribution.**
+  by default. We do not redistribute their files — we ingest **facts** (names,
+  grades, dates) re-expressed in our own schema, with full provenance. Cleared by
+  the owner for this non-profit use on that basis (upstream author: Ali Bin Shahid).
+
+### Provenance & removability
+
+Every `Narrator` node carries `source_ids` (a `<corpus>:<bare-id>` list, e.g.
+`["itqan:320"]`), so the Itqan contribution is auditable and **cleanly removable
+on the graph** if the upstream author ever objects:
+
+```cypher
+// remove every narrator that came (solely) from Itqan
+MATCH (n:Narrator) WHERE any(s IN n.source_ids WHERE s STARTS WITH 'itqan:')
+DETACH DELETE n
+```
+
+> `source_ids` (a list) is the correct removal handle rather than a scalar
+> `source_corpus`: after cross-source dedup a canonical narrator can carry ids
+> from several corpora, so to *strip* Itqan from a multi-source narrator you would
+> remove its `itqan:` entries rather than delete the whole node.
