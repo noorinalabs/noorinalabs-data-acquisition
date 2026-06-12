@@ -40,6 +40,21 @@ Two historical identity hazards this module designs out
    ``APPEARS_IN.hadith_number_in_book`` is the staging ``hadith_number`` column —
    **not** the collection-wide reference number (sunnah.com exposes both). See
    ``HADITH_SCHEMA`` and ``src/graph/load_edges.py`` ``_APPEARS_IN_QUERY``.
+
+Free-text provenance keys are NOT corpus ids (da#89)
+----------------------------------------------------
+:func:`base.generate_source_id` is for hadith ``source_id``\\ s only: its first
+argument MUST be a :data:`SOURCE_CORPORA` value and it fails fast otherwise. A
+bio/narrator provenance key is namespaced by its *bio source* (a free-text label
+like ``"kaggle_narrators"``), which is **not** a hadith ``SourceCorpus`` — so
+build it with ``ID_DELIMITER.join([...])`` directly, never with
+``generate_source_id`` (see ``sanadset.py`` ``bio_id``). Passing a non-corpus
+first arg to ``generate_source_id`` aborted the whole parse at runtime and was
+masked by unit tests with no raw dir (the da#89 crash). ``scripts/
+check_source_id_corpus.py`` (test: ``tests/test_parse/
+test_source_id_corpus_guard.py``) is a CI static guard that asserts every
+``generate_source_id`` call-site passes a statically-provable ``SourceCorpus``
+first arg, blocking reintroduction.
 """
 
 from __future__ import annotations
