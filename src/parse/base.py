@@ -6,9 +6,11 @@ from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.csv as pcsv
 import pyarrow.parquet as pq
 
+from src.models.enums import Sect, SourceCorpus
 from src.parse.identity import ID_DELIMITER, SOURCE_CORPORA
 from src.utils.logging import get_logger
 
@@ -21,17 +23,74 @@ __all__ = [
     "safe_int",
     "safe_str",
     "validate_enum_fields",
+    "provenance_violations",
 ]
+
+# Provenance columns every staging schema is expected to populate, mapped to the
+# closed value-domain each must stay within. ``sect`` / ``source_corpus`` are the
+# enum-namespaced provenance on the hadith/collection/mention schemas; ``source``
+# is the free-text provenance label on the narrator-bio / network-edge schemas
+# (no enum domain, but it must still be non-empty). A table carrying none of
+# these columns (a non-canonical intermediate) is simply not provenance-checked.
+_PROVENANCE_DOMAINS: dict[str, frozenset[str] | None] = {
+    "sect": frozenset(s.value for s in Sect),
+    "source_corpus": frozenset(s.value for s in SourceCorpus),
+    "source": None,
+}
+
+
+def provenance_violations(table: pa.Table) -> list[str]:
+    """Return provenance-tagging violations for *table* (empty list == clean).
+
+    The conformance gate for da#83: a non-nullable schema column already rejects
+    a *null* ``sect``/``source_corpus`` at construction, but an **empty string**
+    slips through a non-nullable column, and a **wrong-domain** value
+    (``source_corpus="sunna"`` typo, a ``sect`` outside the enum) is never caught
+    anywhere. This checks both, for whichever provenance columns the table
+    carries, so every parser's output is tagged consistently and in-domain.
+    """
+    problems: list[str] = []
+    columns = set(table.column_names)
+    for column, domain in _PROVENANCE_DOMAINS.items():
+        if column not in columns:
+            continue
+        values = table.column(column)
+        if values.null_count:
+            problems.append(f"{column}: {values.null_count} null value(s)")
+        non_null = values.drop_null()
+        if not len(non_null):
+            continue
+        empty = pc.sum(pc.equal(pc.utf8_trim_whitespace(non_null), "")).as_py() or 0
+        if empty:
+            problems.append(f"{column}: {empty} empty/whitespace value(s)")
+        if domain is not None:
+            out_of_domain = sorted(
+                {
+                    v
+                    for v in pc.unique(non_null).to_pylist()
+                    if v is not None and v.strip() != "" and v not in domain
+                }
+            )
+            if out_of_domain:
+                problems.append(f"{column}: value(s) outside {sorted(domain)}: {out_of_domain}")
+    return problems
 
 
 def write_parquet(table: pa.Table, path: Path, schema: pa.Schema | None = None) -> Path:
     """Write PyArrow Table to Parquet with Snappy compression.
 
-    Validate against schema if provided. Create parent dirs. Log stats.
+    Validate against schema if provided, then enforce the provenance-tagging
+    contract (:func:`provenance_violations`) as a fail-fast invariant so no
+    parser can ship staging data with an empty or out-of-domain ``sect`` /
+    ``source_corpus`` / ``source``. Create parent dirs. Log stats.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     if schema is not None:
         table = table.cast(schema)
+    violations = provenance_violations(table)
+    if violations:
+        msg = f"provenance conformance failed for {path.name}: " + "; ".join(violations)
+        raise ValueError(msg)
     pq.write_table(table, path, compression="snappy")
     size_mb = path.stat().st_size / (1024 * 1024)
     logger.info("wrote_parquet", path=str(path), rows=table.num_rows, size_mb=round(size_mb, 2))
