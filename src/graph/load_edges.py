@@ -383,15 +383,22 @@ def _load_appears_in(
 # 4. PARALLEL_OF — from parallel_links.parquet
 # ---------------------------------------------------------------------------
 
+# Identity of a PARALLEL_OF edge is the (hadith_a, hadith_b) PAIR — the similarity
+# score / variant tier / cross_sect flag are *attributes* of that one edge, not
+# part of its key. They are therefore SET after a bare-edge MERGE, never inside
+# the MERGE pattern (da#77 / main#139): Neo4j refuses to MERGE a relationship with
+# a null property in the pattern, and keying on the properties would mint a SECOND
+# edge between the same pair whenever a re-run produced a slightly different score
+# (dedup is re-run as more corpora land). coalesce-preserve keeps re-runs
+# idempotent and null-safe — exactly the APPEARS_IN contract.
 _PARALLEL_OF_QUERY = """\
 UNWIND $batch AS row
 MATCH (h1:Hadith {id: row.id_a})
 MATCH (h2:Hadith {id: row.id_b})
-MERGE (h1)-[:PARALLEL_OF {
-    similarity_score: row.score,
-    variant_type: row.variant_type,
-    cross_sect: row.cross_sect
-}]->(h2)
+MERGE (h1)-[r:PARALLEL_OF]->(h2)
+SET r.similarity_score = coalesce(row.score, r.similarity_score),
+    r.variant_type = coalesce(row.variant_type, r.variant_type),
+    r.cross_sect = coalesce(row.cross_sect, r.cross_sect)
 """
 
 _PARALLEL_OF_CHECK = """\
