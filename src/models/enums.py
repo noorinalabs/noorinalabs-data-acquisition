@@ -153,6 +153,7 @@ class SourceCorpus(StrEnum):
     MUHADDITHAT = "muhaddithat"
     ITQAN = "itqan"
     HALIMBAHAE = "halimbahae"
+    MIS = "mis"
 
 
 class Sect(StrEnum):

@@ -228,6 +228,23 @@ SOURCE_REGISTRY: tuple[SourceAdapter, ...] = (
         ),
         description="halimbahae/Hadith — 9 Sunni books with full Arabic diacritics (tashkeel).",
     ),
+    SourceAdapter(
+        slug="mis",
+        corpus=SourceCorpus.MIS,
+        sect=Sect.SUNNI,
+        acquire_module="mis",
+        parse_module="mis",
+        reachable=True,
+        license_note=(
+            "Multi-IsnadSet (MIS) — Mendeley Data 10.17632/gzprcr93zn.2 (Farooqi et al., "
+            "Data in Brief 2024). CC BY 4.0; keyless public download over the same "
+            "data.mendeley.com mechanism proven for sanadset."
+        ),
+        description=(
+            "Multi-IsnadSet — Sahih Muslim with the MULTIPLE isnad chains per hadith "
+            "made explicit (Sunni); one hadith emits N distinct transmission chains."
+        ),
+    ),
 )
 
 
