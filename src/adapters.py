@@ -245,6 +245,22 @@ SOURCE_REGISTRY: tuple[SourceAdapter, ...] = (
             "made explicit (Sunni); one hadith emits N distinct transmission chains."
         ),
     ),
+    SourceAdapter(
+        slug="bihar",
+        corpus=SourceCorpus.BIHAR,
+        sect=Sect.SHIA,
+        acquire_module="bihar",
+        parse_module="bihar",
+        reachable=True,
+        license_note=(
+            "Bihar al-Anwar via hubeali.com 'Read Online' (bilingual AR+EN) — NOT "
+            "carried by Thaqalayn (da#95). NO machine-readable upstream license; "
+            "owner-approved (da#95, same posture as Itqan da#92a): non-profit, facts "
+            "re-expressed in our own schema, cleanly removable via "
+            "source_corpus='bihar' provenance. Polite bounded scrape (robots.txt OK)."
+        ),
+        description="Bihar al-Anwar — al-Majlisi's ~100k-hadith Shia encyclopedia (hubeali).",
+    ),
 )
 
 
