@@ -157,3 +157,37 @@ class TestSanadsetParser:
                 mock_settings.return_value.data_raw_dir = tmp_path / "raw"
                 mock_settings.return_value.data_staging_dir = staging_dir
                 parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
+
+    def test_narrator_bios_parsed_without_corpus_failfast(self, tmp_path: Path) -> None:
+        """Bios parse cleanly even though their id namespace is not a SourceCorpus.
+
+        Regression for da#89: the bio_id is namespaced by the bio *source*
+        (``kaggle_narrators``), which is not a hadith ``SourceCorpus``. Building
+        it through ``generate_source_id`` would trip that helper's da#82
+        fail-fast on an unknown corpus and abort the whole parse the moment a
+        ``narrators/`` directory is present (the real acquisition path). Here a
+        bio CSV IS present, so a regression resurfaces as a raised ValueError.
+        """
+        raw_dir = tmp_path / "raw" / "sanadset"
+        raw_dir.mkdir(parents=True)
+        narrators_dir = raw_dir / "narrators"
+        narrators_dir.mkdir()
+        staging_dir = tmp_path / "staging"
+
+        _make_sanadset_csv(raw_dir / "hadiths.csv")
+        (narrators_dir / "bios.csv").write_text(
+            "name,death_year\nمالك بن أنس,179\nأبو هريرة,59\n",
+            encoding="utf-8",
+        )
+
+        with patch("src.parse.sanadset.get_settings") as mock_settings:
+            mock_settings.return_value.data_raw_dir = tmp_path / "raw"
+            mock_settings.return_value.data_staging_dir = staging_dir
+            outputs = parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
+
+        assert "narrators_bio" in outputs
+        bio_table = pq.read_table(outputs["narrators_bio"])
+        assert bio_table.num_rows == 2
+        # bio_id is the bio-source-namespaced provenance key, never corpus-gated.
+        bio_ids = bio_table.column("bio_id").to_pylist()
+        assert all(bid.startswith("kaggle_narrators:bios:") for bid in bio_ids)
