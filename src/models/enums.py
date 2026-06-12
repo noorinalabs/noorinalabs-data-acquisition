@@ -151,6 +151,7 @@ class SourceCorpus(StrEnum):
     FAWAZ = "fawaz"
     OPEN_HADITH = "open_hadith"
     MUHADDITHAT = "muhaddithat"
+    ITQAN = "itqan"
 
 
 class Sect(StrEnum):

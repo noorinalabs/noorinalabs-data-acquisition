@@ -7,6 +7,7 @@ from types import ModuleType
 
 from src.parse import (
     fawaz,
+    itqan,
     lk_corpus,
     muhaddithat,
     open_hadith,
@@ -28,6 +29,7 @@ PARSERS: list[tuple[str, ModuleType | None]] = [
     ("sunnah_scraped", sunnah_scraped),
     ("open_hadith", open_hadith),
     ("muhaddithat", muhaddithat),
+    ("itqan", itqan),
 ]
 
 

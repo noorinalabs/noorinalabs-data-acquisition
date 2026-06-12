@@ -12,6 +12,7 @@ from types import ModuleType
 
 from src.acquire import (
     fawaz,
+    itqan,
     lk_corpus,
     muhaddithat,
     open_hadith,
@@ -35,6 +36,7 @@ SOURCES: list[tuple[str, ModuleType | None]] = [
     ("sunnah_scraped", sunnah_scraper),
     ("open_hadith", open_hadith),
     ("muhaddithat", muhaddithat),
+    ("itqan", itqan),
 ]
 
 

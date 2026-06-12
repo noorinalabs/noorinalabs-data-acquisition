@@ -143,6 +143,7 @@ DEFAULT_BASELINES: dict[str, dict[str, float | int]] = {
     "narrator_mentions_sanadset": {"row_count": 2789517},
     "narrators_bio_kaggle": {"row_count": 24326},
     "narrators_bio_muhaddithat": {"row_count": 113},
+    "narrators_bio_itqan": {"row_count": 115735},
     "collections_sunnah_api": {"row_count": 15},
     "collections_sunnah_scraped": {"row_count": 5},
     "collections_thaqalayn": {"row_count": 64},
