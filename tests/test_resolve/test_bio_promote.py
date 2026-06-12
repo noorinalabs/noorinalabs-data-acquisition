@@ -97,7 +97,10 @@ def test_bio_promote_tags_sect_and_corpus(tmp_path: Path) -> None:
     rec = pq.read_table(path).to_pylist()[0]
     assert rec["source_corpora"] == ["muhaddithat"]
     assert rec["source_corpus"] == "muhaddithat"
-    assert rec["sect_affiliation"] == "sunni"
+    # muhaddithat is cross-tradition (spans both sects, no per-narrator sect in
+    # the source) → a muhaddithat-only narrator is neutral, not a sunni guess
+    # (da#90).
+    assert rec["sect_affiliation"] == "neutral"
 
 
 def test_same_name_dedups_to_one_canonical(tmp_path: Path) -> None:

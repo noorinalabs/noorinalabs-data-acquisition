@@ -33,6 +33,11 @@ class TestDeriveSectAffiliation:
             (["sunnah", "open_hadith"], "sunni"),
             (["thaqalayn"], "shia"),
             (["sunnah", "thaqalayn"], "neutral"),  # transmits in both traditions
+            # muhaddithat is cross-tradition (no per-narrator sect in the source,
+            # spans both): a muhaddithat-only narrator is neutral, never sunni and
+            # never unknown (da#90).
+            (["muhaddithat"], "neutral"),
+            (["muhaddithat", "sunnah"], "neutral"),  # cross-tradition stays neutral
             (["muhaddithat", "thaqalayn"], "neutral"),
             (["kaggle_narrators"], "sunni"),  # sanadset bio provenance alias
             ([], "unknown"),

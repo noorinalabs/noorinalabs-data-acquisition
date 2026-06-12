@@ -21,6 +21,14 @@ corpora are intentionally left unmapped: ``fawaz`` (sect is per-collection, not
 per-corpus) and ``itqan`` (a mixed rijal database) — both contribute ``unknown``
 rather than a guess.
 
+``muhaddithat`` is a **cross-tradition** corpus (``CROSS_TRADITION_CORPORA``):
+the upstream isnad-datasets carry no per-narrator sect/madhhab column — only
+id/name/gender/generation — and the corpus deliberately spans female narrators
+recognized across **both** Sunni and Shia chains (da#90, epic #81). So rather
+than a single-tradition guess, a narrator observed in such a corpus contributes
+*both* traditions: a ``muhaddithat``-only narrator therefore derives ``neutral``
+(both), not ``sunni`` and not ``unknown``.
+
 ``normalize_corpus`` reconciles the **bio provenance inconsistency** #103 flags:
 ``narrators_bio_*`` rows carry a free-text ``source`` that is not always a
 ``SourceCorpus`` value (e.g. the sanadset narrator bios use
@@ -40,6 +48,7 @@ __all__ = [
     "derive_sect_affiliation",
     "normalize_corpus",
     "primary_corpus",
+    "CROSS_TRADITION_CORPORA",
     "SECT_BY_CORPUS",
 ]
 
@@ -51,15 +60,21 @@ _CORPUS_ALIASES: dict[str, str] = {
 }
 
 # Corpus → collection-level tradition. Unmapped corpora (``fawaz`` per-collection,
-# ``itqan`` mixed rijal DB) contribute nothing → ``unknown`` when nothing maps.
+# ``itqan`` mixed rijal DB) contribute nothing → ``unknown`` when nothing maps;
+# ``muhaddithat`` is handled separately as a cross-tradition corpus (see below).
 SECT_BY_CORPUS: dict[str, Sect] = {
     SourceCorpus.SUNNAH.value: Sect.SUNNI,
     SourceCorpus.OPEN_HADITH.value: Sect.SUNNI,
     SourceCorpus.LK.value: Sect.SUNNI,
     SourceCorpus.SANADSET.value: Sect.SUNNI,
-    SourceCorpus.MUHADDITHAT.value: Sect.SUNNI,
     SourceCorpus.THAQALAYN.value: Sect.SHIA,
 }
+
+# Cross-tradition corpora: no per-narrator sect signal in the source and the
+# corpus spans both traditions, so an observation contributes *both* Sunni and
+# Shia. A narrator seen only here aggregates to ``neutral`` (both) — never a
+# one-sided ``sunni``/``shia`` guess, never ``unknown`` (da#90, epic #81).
+CROSS_TRADITION_CORPORA: frozenset[str] = frozenset({SourceCorpus.MUHADDITHAT.value})
 
 
 def normalize_corpus(source: str | None) -> str | None:
@@ -96,10 +111,15 @@ def derive_sect_affiliation(corpora: Iterable[str]) -> str:
     into a Parquet string column and the Neo4j ``Narrator.sect_affiliation``
     property.
     """
-    sects = set()
+    sects: set[Sect] = set()
     for raw in corpora:
         corpus = normalize_corpus(raw)
-        if corpus is not None and corpus in SECT_BY_CORPUS:
+        if corpus is None:
+            continue
+        if corpus in CROSS_TRADITION_CORPORA:
+            # Spans both traditions → contributes Sunni *and* Shia.
+            sects.update((Sect.SUNNI, Sect.SHIA))
+        elif corpus in SECT_BY_CORPUS:
             sects.add(SECT_BY_CORPUS[corpus])
     if not sects:
         return SectAffiliation.UNKNOWN.value
