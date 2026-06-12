@@ -73,7 +73,11 @@ def promote_bios_to_canonical(
     Args:
         staging_dir: directory holding ``narrators_bio_*.parquet`` files.
         output_dir: directory the canonical Parquet is written to (and read from
-            when merging into a pre-existing file).
+            when merging into a pre-existing file). This is the resolve stage's
+            ``output_dir`` — the same curated location the graph loader reads
+            ``narrators_canonical.parquet`` from (the CLI maps it to
+            ``DATA_CURATED_DIR``; see ``load_nodes`` artifact-location contract,
+            da#112). Point it at the *curated* dir, never staging.
         sources: if given, only bios whose ``source`` column is in this set are
             promoted (e.g. ``{"itqan"}``).
 

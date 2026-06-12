@@ -41,8 +41,9 @@ class TestItqanNarratorLoadLive:
 
         # parse -> narrators_bio_itqan.parquet
         itqan.run(tmp_path / "raw", staging)
-        # promote -> narrators_canonical.parquet IN staging (where the loader reads it)
-        canonical = promote_bios_to_canonical(staging, staging, sources={"itqan"})
+        # promote -> narrators_canonical.parquet IN curated (where the loader reads
+        # it — da#112 artifact-location contract)
+        canonical = promote_bios_to_canonical(staging, curated, sources={"itqan"})
         assert canonical is not None
         expected = pq.read_table(canonical).num_rows
         assert expected >= 20  # the 24-profile fixture, minus any name collisions
@@ -88,7 +89,7 @@ class TestItqanNarratorLoadLive:
         curated.mkdir()
 
         itqan.run(tmp_path / "raw", staging)
-        promote_bios_to_canonical(staging, staging, sources={"itqan"})
+        promote_bios_to_canonical(staging, curated, sources={"itqan"})
 
         load_all_nodes(neo4j_client, staging, curated, strict=False)
         first = neo4j_client.execute_read("MATCH (n:Narrator) RETURN count(n) AS n")[0]["n"]

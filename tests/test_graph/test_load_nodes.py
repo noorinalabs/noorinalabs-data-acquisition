@@ -34,7 +34,7 @@ class TestLoadNarrators:
         self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
     ) -> None:
         write_narrators_canonical(
-            staging_dir,
+            curated_dir,
             [
                 {
                     "canonical_id": "nar:abu-hurayra",
@@ -54,7 +54,7 @@ class TestLoadNarrators:
         self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
     ) -> None:
         write_narrators_canonical(
-            staging_dir,
+            curated_dir,
             [
                 {"canonical_id": "nar:valid", "name_en": "Valid"},
                 {"canonical_id": "INVALID", "name_en": "Bad"},  # no nar: prefix
@@ -79,6 +79,48 @@ class TestLoadNarrators:
         narrator_result = results[0]
         assert narrator_result.created == 0
         assert narrator_result.merged == 0
+
+    def test_canonical_read_path_matches_resolve_write_path(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """da#112 contract: the loader reads narrators_canonical.parquet from the
+        SAME dir the resolve stage writes it to (the curated/resolve-output dir),
+        and NOT from staging.
+
+        ``write_narrators_canonical`` writes into ``curated_dir`` (mirroring
+        ``disambiguate.run`` / ``bio_promote`` whose ``output_dir`` the CLI maps
+        to ``DATA_CURATED_DIR``). A stray copy in ``staging_dir`` must be ignored,
+        proving writer-path == reader-path.
+        """
+        # Resolve-output location (curated): loaded.
+        write_narrators_canonical(
+            curated_dir,
+            [{"canonical_id": "nar:from-curated", "name_en": "From Curated"}],
+        )
+        # A stale staging copy that the OLD loader would have read: must be ignored.
+        write_narrators_canonical(
+            staging_dir,
+            [
+                {"canonical_id": "nar:stale-staging-a", "name_en": "Stale A"},
+                {"canonical_id": "nar:stale-staging-b", "name_en": "Stale B"},
+            ],
+        )
+
+        results = load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        narrator_result = results[0]
+        assert narrator_result.node_type == "Narrator"
+        # Exactly the single curated row — never the two staging rows.
+        assert narrator_result.created + narrator_result.merged == 1
+        assert narrator_result.skipped == 0
+
+        loaded_ids = {
+            row["id"]
+            for _query, batch in mock_client.calls
+            if isinstance(batch, list)
+            for row in batch
+            if isinstance(row, dict) and str(row.get("id", "")).startswith("nar:")
+        }
+        assert loaded_ids == {"nar:from-curated"}
 
 
 class TestLoadHadiths:
@@ -156,7 +198,7 @@ class TestLoadHadiths:
     ) -> None:
         # Provide narrators but no hadiths
         write_narrators_canonical(
-            staging_dir,
+            curated_dir,
             [
                 {"canonical_id": "nar:test", "name_en": "Test"},
             ],
@@ -345,7 +387,7 @@ class TestLoadAllNodes:
         self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
     ) -> None:
         write_narrators_canonical(
-            staging_dir,
+            curated_dir,
             [
                 {"canonical_id": "nar:1", "name_en": "Narrator 1"},
             ],
