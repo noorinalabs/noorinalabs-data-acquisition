@@ -43,6 +43,15 @@ NARRATORS_CANONICAL_SCHEMA = pa.schema(
         pa.field("source_ids", pa.list_(pa.string()), nullable=True),
         pa.field("external_id", pa.string(), nullable=True),
         pa.field("mention_count", pa.int32(), nullable=True),
+        # Sect/corpus provenance on the canonical narrator (da#103, epic #81).
+        # ``source_corpus`` is the scalar primary corpus (mirrors the Hadith /
+        # Collection node property); ``source_corpora`` is the full multi-source
+        # set; ``sect_affiliation`` is the resolution-time SectAffiliation derived
+        # from those corpora (see src/resolve/sect_affiliation.py). All nullable so
+        # other narrators_canonical producers (#109/#117) need not populate them.
+        pa.field("source_corpus", pa.string(), nullable=True),
+        pa.field("source_corpora", pa.list_(pa.string()), nullable=True),
+        pa.field("sect_affiliation", pa.string(), nullable=True),
     ]
 )
 

@@ -29,6 +29,11 @@ from src.resolve.schemas import (
     NARRATOR_MENTIONS_RESOLVED_SCHEMA,
     NARRATORS_CANONICAL_SCHEMA,
 )
+from src.resolve.sect_affiliation import (
+    derive_sect_affiliation,
+    normalize_corpus,
+    primary_corpus,
+)
 from src.utils.arabic import normalize_arabic
 from src.utils.logging import get_logger
 
@@ -655,6 +660,11 @@ def _build_canonical_table(
     canonical_map: dict[str, dict[str, str | int | list[str] | None]],
 ) -> pa.Table:
     """Build narrators_canonical Parquet table."""
+
+    def _corpora(r: dict[str, str | int | list[str] | None]) -> list[str]:
+        v = r.get("source_corpora")
+        return v if isinstance(v, list) else []
+
     rows = list(canonical_map.values())
     if not rows:
         return pa.table(
@@ -680,6 +690,14 @@ def _build_canonical_table(
         ),
         "external_id": pa.array([r.get("external_id") for r in rows], type=pa.string()),
         "mention_count": pa.array([r.get("mention_count", 0) for r in rows], type=pa.int32()),
+        # Sect/corpus provenance finalized from the accumulated corpora set (da#103).
+        "source_corpus": pa.array([primary_corpus(_corpora(r)) for r in rows], type=pa.string()),
+        "source_corpora": pa.array(
+            [sorted(set(_corpora(r))) for r in rows], type=pa.list_(pa.string())
+        ),
+        "sect_affiliation": pa.array(
+            [derive_sect_affiliation(_corpora(r)) for r in rows], type=pa.string()
+        ),
     }
     return pa.table(arrays, schema=NARRATORS_CANONICAL_SCHEMA)
 
@@ -721,6 +739,7 @@ def _upsert_canonical(
     name_en: str | None,
     alias: str | None,
     candidate: Candidate | None,
+    corpus: str | None = None,
 ) -> None:
     """Create or merge the canonical narrator record for *canonical_id*.
 
@@ -750,8 +769,18 @@ def _upsert_canonical(
             "source_ids": [],
             "external_id": None,
             "mention_count": 0,
+            # Corpora this canonical narrator has been observed in (da#103). The
+            # scalar ``source_corpus`` + derived ``sect_affiliation`` are finalized
+            # from this set in :func:`_build_canonical_table`.
+            "source_corpora": [],
         }
         canonical_map[canonical_id] = rec
+
+    norm_corpus = normalize_corpus(corpus)
+    if norm_corpus:
+        corpora = rec.get("source_corpora")
+        if isinstance(corpora, list) and norm_corpus not in corpora:
+            corpora.append(norm_corpus)
 
     raw_count = rec.get("mention_count")
     rec["mention_count"] = (int(raw_count) if isinstance(raw_count, int | str) else 0) + 1
@@ -872,6 +901,7 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
                     name_en=c.name_en,
                     alias=mention_text,
                     candidate=c,
+                    corpus=corpus,
                 )
                 naive_identity_pairs.add((corpus, canonical_id))
                 resolved_map[mention_id] = (canonical_id, float(best.score))
@@ -907,6 +937,7 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
                         name_en=None,
                         alias=None,
                         candidate=None,
+                        corpus=corpus,
                     )
                     naive_identity_pairs.add((corpus, fallback_id))
                     # Self-canonicalized by exact name only (no bio corroboration),

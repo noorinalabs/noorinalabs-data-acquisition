@@ -97,6 +97,11 @@ def write_narrators_canonical(curated: Path, rows: list[dict[str, Any]]) -> Path
         "source_ids": pa.array([r.get("source_ids", []) for r in rows], type=pa.list_(pa.string())),
         "external_id": pa.array([r.get("external_id") for r in rows], type=pa.string()),
         "mention_count": pa.array([r.get("mention_count") for r in rows], type=pa.int32()),
+        "source_corpus": pa.array([r.get("source_corpus") for r in rows], type=pa.string()),
+        "source_corpora": pa.array(
+            [r.get("source_corpora", []) for r in rows], type=pa.list_(pa.string())
+        ),
+        "sect_affiliation": pa.array([r.get("sect_affiliation") for r in rows], type=pa.string()),
     }
     table = pa.table(arrays, schema=NARRATORS_CANONICAL_SCHEMA)
     path = curated / "narrators_canonical.parquet"

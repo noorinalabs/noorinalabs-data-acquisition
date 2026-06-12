@@ -100,7 +100,10 @@ SET n.name_ar           = row.name_ar,
     n.aliases           = row.aliases,
     n.external_id       = row.external_id,
     n.source_ids        = row.source_ids,
-    n.mention_count     = row.mention_count
+    n.mention_count     = row.mention_count,
+    n.source_corpus     = row.source_corpus,
+    n.source_corpora    = row.source_corpora,
+    n.sect_affiliation  = row.sect_affiliation
 """
 
 
@@ -159,6 +162,13 @@ def _load_narrators(
                 # ``MATCH (n:Narrator) WHERE any(s IN n.source_ids WHERE s STARTS WITH 'itqan:')``.
                 "source_ids": _val(row, "source_ids", []),
                 "mention_count": _val(row, "mention_count"),
+                # Sect/corpus provenance (da#103). ``source_corpus`` defaults to ""
+                # so the property is always present even for legacy canonical files
+                # written before these columns existed; ``sect_affiliation`` defaults
+                # to ``unknown`` for the same reason.
+                "source_corpus": _val(row, "source_corpus", ""),
+                "source_corpora": _val(row, "source_corpora", []),
+                "sect_affiliation": _val(row, "sect_affiliation", "unknown"),
             }
         )
 

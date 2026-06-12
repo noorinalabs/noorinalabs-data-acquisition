@@ -55,7 +55,12 @@ def provenance_violations(table: pa.Table) -> list[str]:
         if column not in columns:
             continue
         values = table.column(column)
-        if values.null_count:
+        # A *nullable* provenance column is resolve-derived (e.g. the canonical
+        # narrator master's source_corpus, da#103) where "no attributable corpus"
+        # is legitimately null; only a non-nullable parser-staging column must be
+        # fully populated. Empty-string and out-of-domain checks below still apply
+        # to whatever values ARE present, for both kinds.
+        if values.null_count and not table.schema.field(column).nullable:
             problems.append(f"{column}: {values.null_count} null value(s)")
         non_null = values.drop_null()
         if not len(non_null):

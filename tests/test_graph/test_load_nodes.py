@@ -50,6 +50,50 @@ class TestLoadNarrators:
         assert narrator_result.created + narrator_result.merged == 2
         assert narrator_result.skipped == 0
 
+    def test_narrator_sets_sect_and_corpus(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """da#103: Narrator nodes carry sect_affiliation + source_corpus/_corpora."""
+        write_narrators_canonical(
+            curated_dir,
+            [
+                {
+                    "canonical_id": "nar:cross-sect",
+                    "name_en": "Cross Sect",
+                    "source_corpus": "sunnah",
+                    "source_corpora": ["sunnah", "thaqalayn"],
+                    "sect_affiliation": "neutral",
+                },
+            ],
+        )
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        query, batch = next((q, b) for q, b in mock_client.calls if "MERGE (n:Narrator" in q)
+        # The MERGE explicitly SETs each property (no blanket ``SET n += row``).
+        assert "n.source_corpus" in query
+        assert "n.source_corpora" in query
+        assert "n.sect_affiliation" in query
+        assert isinstance(batch, list)
+        row = batch[0]
+        assert row["source_corpus"] == "sunnah"
+        assert row["source_corpora"] == ["sunnah", "thaqalayn"]
+        assert row["sect_affiliation"] == "neutral"
+
+    def test_narrator_sect_corpus_defaults_when_absent(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """A legacy canonical row with null sect/corpus loads with safe defaults."""
+        write_narrators_canonical(
+            curated_dir,
+            [{"canonical_id": "nar:legacy", "name_en": "Legacy"}],
+        )
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        _, batch = next((q, b) for q, b in mock_client.calls if "MERGE (n:Narrator" in q)
+        assert isinstance(batch, list)
+        row = batch[0]
+        assert row["source_corpus"] == ""
+        assert row["source_corpora"] == []
+        assert row["sect_affiliation"] == "unknown"
+
     def test_invalid_canonical_id_skipped(
         self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
     ) -> None:

@@ -63,6 +63,34 @@ def test_promotes_bios_to_canonical_with_nar_ids(tmp_path: Path) -> None:
     assert rec["mention_count"] == 0
 
 
+def test_bio_promote_tags_sect_and_corpus(tmp_path: Path) -> None:
+    """da#103: promoted bios carry source_corpus/_corpora + derived sect_affiliation."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+    name = "فاطمة بنت محمد"
+    _write_bios(
+        staging,
+        "muhaddithat",
+        [
+            {
+                "bio_id": "muhaddithat:1",
+                "source": "muhaddithat",
+                "name_ar": name,
+                "name_ar_normalized": normalize_arabic(name),
+            }
+        ],
+    )
+
+    path = promote_bios_to_canonical(staging, out_dir)
+    assert path is not None
+    rec = pq.read_table(path).to_pylist()[0]
+    assert rec["source_corpora"] == ["muhaddithat"]
+    assert rec["source_corpus"] == "muhaddithat"
+    assert rec["sect_affiliation"] == "sunni"
+
+
 def test_same_name_dedups_to_one_canonical(tmp_path: Path) -> None:
     staging = tmp_path / "staging"
     staging.mkdir()
