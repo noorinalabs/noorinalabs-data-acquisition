@@ -83,6 +83,16 @@ _CLUSTER_RATIO_THRESHOLD = 90.0
 # are not the same person). One source rounding a death year by a year is fine.
 _DEATH_YEAR_TOLERANCE = 2
 
+# Minimum number of *shared* significant (non-connector) name tokens required to
+# merge. token_set_ratio scores a bare given name as a perfect (100) subset of
+# every fuller name carrying it (``محمد`` ⊂ ``محمد بن اسماعيل البخاري``), and a
+# sparse bare-name record has no death-year/gender to trip the other guards — so
+# name score alone would over-merge distinct people who merely share one common
+# given name. Requiring ≥2 shared significant tokens means a pure single-token
+# subset never clusters, while a genuine variant (which shares the nasab/nisba
+# stem) still does.
+_MIN_SHARED_TOKENS = 2
+
 # Name tokens that carry no disambiguating signal (Arabic genealogical
 # connectors / honorific particles). Excluded as *blocking* keys so a block does
 # not balloon to "every name containing بن"; still scored as part of the name.
@@ -184,9 +194,23 @@ def _genders_conflict(a: dict[str, Any], b: dict[str, Any]) -> bool:
     return bool(ga and gb and ga != gb)
 
 
+def _shared_significant_token_count(a: dict[str, Any], b: dict[str, Any]) -> int:
+    """Number of significant (non-connector) name tokens the two records share."""
+    return len(_significant_tokens(_match_keys(a)) & _significant_tokens(_match_keys(b)))
+
+
 def _can_merge(a: dict[str, Any], b: dict[str, Any], *, threshold: float) -> bool:
-    """Decide whether two canonical records are the same person (precision-guarded)."""
+    """Decide whether two canonical records are the same person (precision-guarded).
+
+    A merge requires ALL of: no death-year conflict, no gender conflict, at least
+    :data:`_MIN_SHARED_TOKENS` shared significant name tokens (so a bare
+    single-token subset never clusters), and a name similarity at/above
+    ``threshold``. Pairwise and symmetric — the cluster post-validation relies on
+    that to refuse any cluster harbouring a guard-conflicting pair.
+    """
     if _death_years_conflict(a, b) or _genders_conflict(a, b):
+        return False
+    if _shared_significant_token_count(a, b) < _MIN_SHARED_TOKENS:
         return False
     return _name_similarity(_match_keys(a), _match_keys(b)) >= threshold
 
@@ -220,6 +244,38 @@ class _UnionFind:
         return list(clusters.values())
 
 
+def _safe_partition(
+    group: list[int],
+    records: list[dict[str, Any]],
+    *,
+    threshold: float,
+) -> list[list[int]]:
+    """Split a union-find group into sub-clusters with NO guard-conflicting pair.
+
+    Union-find is transitive but :func:`_can_merge` is pairwise, so a bridge
+    record can chain two endpoints that fail the guards against each other
+    (A–B ✓, B–C ✓, but A–C death-conflict): the conflicting A–C pair would
+    survive in one cluster and merge two real people. This greedily places each
+    member into the first existing sub-cluster it is ``_can_merge``-compatible
+    with *every* member of, opening a new sub-cluster otherwise. By induction
+    each sub-cluster is a clique under ``_can_merge``, so no conflicting pair can
+    co-occur. Deterministic: members are processed in ``canonical_id`` order.
+    """
+    if len(group) <= 1:
+        return [list(group)]
+
+    ordered = sorted(group, key=lambda i: safe_str(records[i].get("canonical_id")) or "")
+    subclusters: list[list[int]] = []
+    for i in ordered:
+        for sub in subclusters:
+            if all(_can_merge(records[i], records[j], threshold=threshold) for j in sub):
+                sub.append(i)
+                break
+        else:
+            subclusters.append([i])
+    return subclusters
+
+
 def cluster_records(
     records: list[dict[str, Any]],
     *,
@@ -228,21 +284,21 @@ def cluster_records(
     """Cluster canonical narrator records into same-person groups (as index lists).
 
     Token-blocks the records, scores each candidate pair within a block with
-    rapidfuzz ``token_set_ratio`` over name + aliases, applies the death-year and
-    gender precision guards, and unions the survivors. Returns one index list per
-    cluster (singletons included), so the i-th record's cluster is recoverable.
-    Pure and deterministic — the IO wrapper and the quality test both drive it.
+    rapidfuzz ``token_set_ratio`` over name + aliases, applies the precision
+    guards (death-year, gender, ≥2 shared significant tokens), and unions the
+    survivors. Each transitive union-find group is then re-partitioned into
+    cliques (:func:`_safe_partition`) so a bridge record can never chain a
+    guard-conflicting pair into one cluster. Returns one index list per cluster
+    (singletons included), so the i-th record's cluster is recoverable. Pure and
+    deterministic — the IO wrapper and the quality test both drive it.
     """
     n = len(records)
     uf = _UnionFind(n)
 
     # Inverted index: significant token -> record indices carrying it (blocking).
     token_index: dict[str, list[int]] = {}
-    record_keys: list[list[str]] = []
     for i, rec in enumerate(records):
-        keys = _match_keys(rec)
-        record_keys.append(keys)
-        for tok in _significant_tokens(keys):
+        for tok in _significant_tokens(_match_keys(rec)):
             token_index.setdefault(tok, []).append(i)
 
     # Candidate pairs = records sharing ≥1 significant token. Dedup pairs so each
@@ -258,7 +314,12 @@ def cluster_records(
                 if _can_merge(records[i], records[j], threshold=threshold):
                     uf.union(i, j)
 
-    return uf.groups()
+    # Re-partition each transitive group into guard-safe cliques (closes the
+    # bridge-bypass: A–B ✓, B–C ✓, A–C conflict must NOT yield one {A,B,C}).
+    clusters: list[list[int]] = []
+    for group in uf.groups():
+        clusters.extend(_safe_partition(group, records, threshold=threshold))
+    return clusters
 
 
 def cluster_assignment(

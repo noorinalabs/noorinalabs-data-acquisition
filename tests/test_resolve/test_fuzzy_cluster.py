@@ -17,6 +17,7 @@ from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+from rapidfuzz import fuzz
 
 from src.parse.identity import make_canonical_id
 from src.resolve.fuzzy_cluster import (
@@ -138,6 +139,39 @@ def test_distinct_names_do_not_cluster() -> None:
     b = _rec("سفيان بن عيينة", source_corpora=["sanadset"], death_year_ah=198)
     clusters = cluster_records([a, b])
     assert sorted(len(g) for g in clusters) == [1, 1]
+
+
+def test_bare_single_token_subset_does_not_merge() -> None:
+    """Over-merge vector 1: a bare given name is a 100-score subset but must NOT merge.
+
+    ``token_set_ratio("محمد", "محمد بن اسماعيل البخاري") == 100`` and the sparse
+    bare-name record carries no death-year/gender to trip the other guards — so
+    only the ≥2-shared-significant-token rule keeps them apart.
+    """
+    bare = _rec("محمد", source_corpora=["sanadset"])  # one significant token
+    full = _rec("محمد بن اسماعيل البخاري", source_corpora=["itqan"])
+    assert fuzz.token_set_ratio(bare["name_ar_normalized"], full["name_ar_normalized"]) == 100.0
+    clusters = cluster_records([bare, full])
+    assert sorted(len(g) for g in clusters) == [1, 1]  # stayed split
+
+
+def test_transitive_bridge_does_not_merge_conflicting_endpoints() -> None:
+    """Over-merge vector 2: a bridge must not chain a guard-conflicting pair.
+
+    A (Bukhari, d256) –bridge– B (bare ``محمد بن اسماعيل``, no death year) –bridge–
+    C (Kufi, d320): A–B and B–C each pass, but A–C conflicts on death year. The
+    transitive union must be re-partitioned so A and C never share a cluster.
+    """
+    a = _rec("محمد بن اسماعيل البخاري", source_corpora=["itqan"], death_year_ah=256)
+    b = _rec("محمد بن اسماعيل", source_corpora=["sanadset"])  # bridge, no death year
+    c = _rec("محمد بن اسماعيل الكوفي", source_corpora=["thaqalayn"], death_year_ah=320)
+
+    clusters = cluster_records([a, b, c])
+    cluster_of = {idx: ci for ci, grp in enumerate(clusters) for idx in grp}
+    # records passed as [a, b, c] → indices 0, 1, 2.
+    assert cluster_of[0] != cluster_of[2]  # A and C never co-cluster
+    # No cluster harbours the conflicting A–C pair; B attaches to exactly one side.
+    assert sorted(len(g) for g in clusters) == [1, 2]
 
 
 # ---------------------------------------------------------------------------
