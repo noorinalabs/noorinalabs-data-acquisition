@@ -1,39 +1,21 @@
-"""Phase 1: Parsers producing normalized Parquet from raw data."""
+"""Phase 1: Parsers producing normalized Parquet from raw data.
+
+The set of sources and their run order is the single registry in
+:mod:`src.adapters` (epic da#81); :func:`run_all` iterates it, so the parse and
+acquire orchestrators can no longer drift on which sources exist.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
-from types import ModuleType
 
-from src.parse import (
-    fawaz,
-    itqan,
-    lk_corpus,
-    muhaddithat,
-    open_hadith,
-    sunnah_api,
-    sunnah_scraped,
-    thaqalayn,
-)
-from src.parse.sanadset import parse_sanadset
+from src.adapters import SOURCE_REGISTRY, ParseOutput
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-PARSERS: list[tuple[str, ModuleType | None]] = [
-    ("lk", lk_corpus),
-    ("sanadset", None),
-    ("thaqalayn", thaqalayn),
-    ("fawaz", fawaz),
-    ("sunnah", sunnah_api),
-    ("sunnah_scraped", sunnah_scraped),
-    ("open_hadith", open_hadith),
-    ("muhaddithat", muhaddithat),
-    ("itqan", itqan),
-]
 
-
-def _normalize_output(result: Path | tuple[Path, ...] | list[Path] | dict[str, Path]) -> list[Path]:
+def _normalize_output(result: ParseOutput) -> list[Path]:
     """Normalize parser return values to a flat list of Paths."""
     if isinstance(result, dict):
         return list(result.values())
@@ -44,23 +26,14 @@ def _normalize_output(result: Path | tuple[Path, ...] | list[Path] | dict[str, P
     return [result]
 
 
-def _parse_one(
-    name: str, module: ModuleType | None, raw_dir: Path, staging_dir: Path
-) -> list[Path]:
-    """Run a single parser, returning its output files as a list."""
-    if name == "sanadset":
-        return _normalize_output(parse_sanadset(raw_dir / "sanadset", staging_dir))
-    assert module is not None
-    return _normalize_output(module.run(raw_dir, staging_dir))
-
-
 def run_all(raw_dir: Path, staging_dir: Path) -> dict[str, list[Path]]:
     """Run all parsers. Continue on failure. Return dict of source -> output files."""
     results: dict[str, list[Path]] = {}
-    for name, module in PARSERS:
+    for adapter in SOURCE_REGISTRY:
+        name = adapter.slug
         try:
             logger.info("parsing", source=name)
-            output_files = _parse_one(name, module, raw_dir, staging_dir)
+            output_files = _normalize_output(adapter.parse(raw_dir, staging_dir))
             results[name] = output_files
             logger.info("parsed", source=name, files=len(output_files))
         except Exception as exc:  # noqa: BLE001
