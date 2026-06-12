@@ -1,12 +1,17 @@
 """Phase 2: Entity Resolution pipeline.
 
 Dependency-aware orchestrator:
-``NER -> disambiguate -> bio_promote -> (dedup + detect_parallels)``.
+``NER -> disambiguate -> bio_promote -> fuzzy_cluster -> (dedup + detect_parallels)``.
 
 Ordering invariants (da#117):
 - ``disambiguate`` OVERWRITES ``narrators_canonical.parquet`` while
   ``bio_promote`` MERGEs into it, so ``bio_promote`` MUST run *after*
   ``disambiguate`` or promoted bio-only narrators get clobbered (da#99).
+- ``fuzzy_cluster`` (da#118) runs *after* both: it clusters cross-source name
+  variants the exact-name pass under-merged, operating on the canonical set
+  those two produce. It re-keys nothing (merges route through
+  ``make_canonical_id``) and is idempotent, so adding it never perturbs the
+  disambiguate→bio_promote invariant above.
 - ``dedup`` (semantic embeddings, degrades to empty without the model) and
   ``detect_parallels`` (deterministic lexical, offline/CI) both write the shared
   ``staging/parallel_links.parquet``. run_all runs both and *composes* their
@@ -241,12 +246,13 @@ def run_all(raw_dir: Path, staging_dir: Path, output_dir: Path) -> dict[str, lis
     """
     logger.info("resolve_pipeline_start")
 
-    from src.resolve import bio_promote, dedup, disambiguate, ner, parallels
+    from src.resolve import bio_promote, dedup, disambiguate, fuzzy_cluster, ner, parallels
 
     results: dict[str, list[Path]] = {
         "ner": [],
         "disambiguate": [],
         "bio_promote": [],
+        "cluster": [],
         "dedup": [],
         "parallels": [],
     }
@@ -314,6 +320,31 @@ def run_all(raw_dir: Path, staging_dir: Path, output_dir: Path) -> dict[str, lis
         )
     except Exception:  # noqa: BLE001
         logger.error("resolve_step_failed", step="bio_promote", traceback=traceback.format_exc())
+
+    # Step 3.5: Fuzzy cross-source clustering (da#118) — recall increment on the
+    # exact-name pass. Merges high-confidence cross-source name variants the
+    # byte-exact collapse left split, operating ON the canonical set the prior two
+    # steps produced. Routes every merge through make_canonical_id and is
+    # idempotent, so it never perturbs the disambiguate→bio_promote ordering. The
+    # mentions file is remapped so graph NARRATED edges follow the merge (#109).
+    try:
+        logger.info("resolve_step", step="cluster", status="running")
+        canonical_path = output_dir / "narrators_canonical.parquet"
+        mentions_path = output_dir / "narrator_mentions_resolved.parquet"
+        cluster_metrics = fuzzy_cluster.cluster_canonical_narrators(
+            canonical_path,
+            mentions_path=mentions_path if mentions_path.exists() else None,
+        )
+        results["cluster"] = [canonical_path] if cluster_metrics.merged_records else []
+        logger.info(
+            "resolve_step",
+            step="cluster",
+            status="complete",
+            merged=cluster_metrics.merged_records,
+            clusters=cluster_metrics.multi_member_clusters,
+        )
+    except Exception:  # noqa: BLE001
+        logger.error("resolve_step_failed", step="cluster", traceback=traceback.format_exc())
 
     # Step 4: Dedup (semantic; degrades to an empty table without the embedding
     # model). Runs independently of NER/disambiguation. Capture its output before
