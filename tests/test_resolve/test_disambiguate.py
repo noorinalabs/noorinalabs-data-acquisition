@@ -6,8 +6,8 @@ import uuid
 
 import pytest
 
+from src.parse.identity import CANONICAL_NAMESPACE
 from src.resolve.disambiguate import (
-    _CANONICAL_NAMESPACE,
     Candidate,
     ChainContext,
     Match,
@@ -227,7 +227,7 @@ class TestCanonicalId:
         assert parsed.version == 5
 
     def test_uses_fixed_namespace(self) -> None:
-        expected = f"nar:{uuid.uuid5(_CANONICAL_NAMESPACE, 'test_input')}"
+        expected = f"nar:{uuid.uuid5(CANONICAL_NAMESPACE, 'test_input')}"
         assert _make_canonical_id("test_input") == expected
 
 

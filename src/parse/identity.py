@@ -44,6 +44,8 @@ Two historical identity hazards this module designs out
 
 from __future__ import annotations
 
+import uuid
+
 from src.models.enums import SourceCorpus
 from src.utils.logging import get_logger
 
@@ -66,7 +68,18 @@ __all__ = [
     "grading_node_id",
     "is_double_prefixed",
     "validate_source_id",
+    "CANONICAL_NAMESPACE",
+    "make_canonical_id",
 ]
+
+# Fixed UUID5 namespace for canonical Narrator ids. A canonical narrator's id is
+# ``nar:<uuid5(CANONICAL_NAMESPACE, normalized-name)>`` — deterministic from the
+# narrator's normalized name so every producer (the mention-driven disambiguator
+# in ``src/resolve/disambiguate.py`` and the bio-direct promoter in
+# ``src/resolve/bio_promote.py``) that sees the same name converges on the same
+# Narrator node. This namespace value is load-bearing: changing it re-keys every
+# existing canonical narrator, so it is pinned here as the single source of truth.
+CANONICAL_NAMESPACE = uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
 
 # The corpus namespace — derived from the enum so the two never drift. Note that
 # ``sunnah_scraped`` intentionally shares the ``sunnah`` corpus (the scraper and
@@ -157,6 +170,21 @@ def collection_node_id(collection_id: str) -> str:
 def narrator_node_id(canonical_id: str) -> str:
     """Canonical Narrator graph node id (``nar:<canonical-id>``)."""
     return apply_prefix(canonical_id, NARRATOR_ID_PREFIX)
+
+
+def make_canonical_id(name_normalized: str) -> str:
+    """Deterministic canonical Narrator id from a *normalized* name.
+
+    Returns ``nar:<uuid5(CANONICAL_NAMESPACE, name_normalized)>``. THE one rule
+    for minting a canonical narrator id — both the mention-driven disambiguator
+    (``src/resolve/disambiguate.py``) and the bio-direct promoter
+    (``src/resolve/bio_promote.py``) route through it so the same normalized name
+    always maps to the same Narrator node (and the ``nar:`` prefix the graph
+    loader ``load_nodes._load_narrators`` validates on import). The input must be
+    pre-normalized (see ``src.utils.arabic.normalize_arabic``) so equivalent
+    spellings collapse to one id.
+    """
+    return narrator_node_id(str(uuid.uuid5(CANONICAL_NAMESPACE, name_normalized)))
 
 
 def chain_node_id(source_id: str, index: int = 0) -> str:

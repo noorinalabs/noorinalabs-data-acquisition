@@ -12,7 +12,6 @@ mentions in batches to keep memory under 4GB.
 from __future__ import annotations
 
 import csv
-import uuid
 from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -24,7 +23,7 @@ from rapidfuzz import fuzz
 from rapidfuzz.distance import Levenshtein
 
 from src.parse.base import safe_str, write_parquet
-from src.parse.identity import narrator_node_id
+from src.parse.identity import make_canonical_id
 from src.resolve.schemas import AMBIGUOUS_NARRATORS_SCHEMA, NARRATORS_CANONICAL_SCHEMA
 from src.utils.arabic import normalize_arabic
 from src.utils.logging import get_logger
@@ -32,11 +31,6 @@ from src.utils.logging import get_logger
 logger = get_logger(__name__)
 
 __all__ = ["run"]
-
-# ---------------------------------------------------------------------------
-# Fixed namespace for deterministic canonical IDs
-# ---------------------------------------------------------------------------
-_CANONICAL_NAMESPACE = uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
 
 # ---------------------------------------------------------------------------
 # Thresholds
@@ -438,15 +432,13 @@ def _load_mentions(
 # Canonical ID generation
 # ---------------------------------------------------------------------------
 def _make_canonical_id(name_normalized: str) -> str:
-    """Deterministic canonical ID via uuid5 with fixed namespace.
+    """Deterministic canonical ID — delegates to the identity contract.
 
-    Returns ``nar:<uuid5>`` to match the ``nar:`` prefix the graph
-    loader (``load_nodes._load_narrators``) validates on import. The ``nar:``
-    prefix is applied through the canonical :func:`narrator_node_id` helper
-    (da#82) so resolve agrees with the loaders on one prefixing rule rather than
-    hand-concatenating the prefix here.
+    Thin wrapper over :func:`src.parse.identity.make_canonical_id` so the
+    mention-driven path and the bio-direct promoter share one ``nar:<uuid5>``
+    scheme and namespace (no drift). Kept as a local name for call-site brevity.
     """
-    return narrator_node_id(str(uuid.uuid5(_CANONICAL_NAMESPACE, name_normalized)))
+    return make_canonical_id(name_normalized)
 
 
 # ---------------------------------------------------------------------------

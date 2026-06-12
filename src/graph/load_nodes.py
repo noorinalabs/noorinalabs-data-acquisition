@@ -80,6 +80,7 @@ SET n.name_ar           = row.name_ar,
     n.trustworthiness   = row.trustworthiness,
     n.aliases           = row.aliases,
     n.external_id       = row.external_id,
+    n.source_ids        = row.source_ids,
     n.mention_count     = row.mention_count
 """
 
@@ -128,6 +129,10 @@ def _load_narrators(
                 "trustworthiness": _val(row, "trustworthiness"),
                 "aliases": _val(row, "aliases", []),
                 "external_id": _val(row, "external_id"),
+                # Per-source provenance (``<corpus>:<bare-id>`` list) so a corpus is
+                # auditable/removable on the graph itself, e.g.
+                # ``MATCH (n:Narrator) WHERE any(s IN n.source_ids WHERE s STARTS WITH 'itqan:')``.
+                "source_ids": _val(row, "source_ids", []),
                 "mention_count": _val(row, "mention_count"),
             }
         )
