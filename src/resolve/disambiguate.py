@@ -24,7 +24,11 @@ from rapidfuzz.distance import Levenshtein
 
 from src.parse.base import safe_str, write_parquet
 from src.parse.identity import make_canonical_id
-from src.resolve.schemas import AMBIGUOUS_NARRATORS_SCHEMA, NARRATORS_CANONICAL_SCHEMA
+from src.resolve.schemas import (
+    AMBIGUOUS_NARRATORS_SCHEMA,
+    NARRATOR_MENTIONS_RESOLVED_SCHEMA,
+    NARRATORS_CANONICAL_SCHEMA,
+)
 from src.utils.arabic import normalize_arabic
 from src.utils.logging import get_logger
 
@@ -428,6 +432,79 @@ def _load_mentions(
     return rows
 
 
+def _backfill_mention_canonical_ids(
+    mentions_path: Path,
+    resolved: dict[str, tuple[str, float | None]],
+) -> int:
+    """Write resolved canonical ids + confidence back onto the mention rows.
+
+    The NER stage writes ``narrator_mentions_resolved.parquet`` with
+    ``canonical_narrator_id = None`` placeholders; disambiguation is the step
+    that actually knows each mention's canonical narrator. Without rewriting
+    these rows the graph edge/chain loaders — which read ``canonical_narrator_id``
+    straight off the mentions — see only ``None`` and emit zero NARRATED edges
+    and empty Chains (#109).
+
+    ``resolved`` maps ``mention_id -> (canonical_id, confidence)`` and covers
+    *every* mention that received a canonical narrator: both bio-matched mentions
+    and the da#99 self-canonicalized (fallback) mentions, so the whole chain —
+    not just the bio-backed positions — wires into the graph.
+
+    Streams row-group by row-group and rewrites the file in place so the
+    artifact stays self-contained for all downstream consumers and peak memory
+    stays bounded (mirrors ``_iter_mention_batches``). Idempotent: re-running
+    with the same ``resolved`` map yields the same file. Returns the number of
+    mention rows backfilled.
+    """
+    if not mentions_path.exists():
+        logger.warning("backfill_mentions_file_missing", path=str(mentions_path))
+        return 0
+
+    pf = pq.ParquetFile(mentions_path)
+    total_rows = pf.metadata.num_rows
+    id_idx = NARRATOR_MENTIONS_RESOLVED_SCHEMA.get_field_index("canonical_narrator_id")
+    conf_idx = NARRATOR_MENTIONS_RESOLVED_SCHEMA.get_field_index("confidence")
+
+    tmp_path = mentions_path.with_name(mentions_path.name + ".backfill.tmp")
+    writer = pq.ParquetWriter(tmp_path, NARRATOR_MENTIONS_RESOLVED_SCHEMA, compression="snappy")
+    backfilled = 0
+    try:
+        for rg_idx in range(pf.metadata.num_row_groups):
+            table = pf.read_row_group(rg_idx).cast(NARRATOR_MENTIONS_RESOLVED_SCHEMA)
+            mention_ids = table.column("mention_id").to_pylist()
+            existing_conf = table.column("confidence").to_pylist()
+
+            new_ids: list[str | None] = []
+            new_conf: list[float | None] = []
+            for mid, conf in zip(mention_ids, existing_conf, strict=True):
+                hit = resolved.get(str(mid))
+                if hit is None:
+                    # Unresolved mention — leave the NER placeholder untouched.
+                    new_ids.append(None)
+                    new_conf.append(conf)
+                else:
+                    new_ids.append(hit[0])
+                    new_conf.append(hit[1])
+                    backfilled += 1
+
+            table = table.set_column(
+                id_idx, "canonical_narrator_id", pa.array(new_ids, type=pa.string())
+            )
+            table = table.set_column(conf_idx, "confidence", pa.array(new_conf, type=pa.float32()))
+            writer.write_table(table)
+    finally:
+        writer.close()
+
+    tmp_path.replace(mentions_path)
+    logger.info(
+        "backfill_mentions_complete",
+        path=str(mentions_path),
+        backfilled=backfilled,
+        total=total_rows,
+    )
+    return backfilled
+
+
 # ---------------------------------------------------------------------------
 # Canonical ID generation
 # ---------------------------------------------------------------------------
@@ -749,6 +826,11 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
     merge_log_rows: list[dict[str, str | float | None]] = []
     ambiguous_rows: list[dict[str, str | float | None]] = []
 
+    # mention_id -> (canonical_id, confidence) for the #109 backfill. Captured
+    # for EVERY mention that received a canonical narrator — bio-matched and
+    # self-canonicalized (da#99) alike — so the full chain wires into the graph.
+    resolved_map: dict[str, tuple[str, float | None]] = {}
+
     # Cross-source collapse measurement (da#99): the naive baseline keeps one
     # node per (source, canonical) pair; the collapsed count is distinct
     # canonicals. naive > collapsed exactly when a narrator spans >1 source.
@@ -792,6 +874,7 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
                     candidate=c,
                 )
                 naive_identity_pairs.add((corpus, canonical_id))
+                resolved_map[mention_id] = (canonical_id, float(best.score))
 
                 # Merge log entry.
                 merge_log_rows.append(
@@ -826,6 +909,10 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
                         candidate=None,
                     )
                     naive_identity_pairs.add((corpus, fallback_id))
+                    # Self-canonicalized by exact name only (no bio corroboration),
+                    # so confidence is left unknown (None); the canonical id is
+                    # what wires the NARRATED edge / Chain (#109).
+                    resolved_map[mention_id] = (fallback_id, None)
 
                 # Record the top-3 bio candidates for the ambiguous-audit report
                 # (a fallback canonical node was still created above when named).
@@ -935,6 +1022,16 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
         log_path = output_dir / "merge_log.parquet"
         write_parquet(log_table, log_path, schema=_MERGE_LOG_SCHEMA)
         output_paths.append(log_path)
+
+    # 4. Backfill canonical ids onto the resolved-mention rows (#109).
+    # The NER stage left canonical_narrator_id=None on every mention; rewrite
+    # them with what disambiguation resolved so the downstream graph loaders
+    # (which key NARRATED edges and Chains off canonical_narrator_id) actually
+    # materialize narrator->hadith wiring instead of producing zero edges.
+    if resolved_map:
+        _backfill_mention_canonical_ids(
+            output_dir / "narrator_mentions_resolved.parquet", resolved_map
+        )
 
     logger.info(
         "disambiguate_run_complete",
