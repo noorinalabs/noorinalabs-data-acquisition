@@ -147,3 +147,63 @@ def test_appears_in_edges_match_collection(staged_sample: Path, tmp_path: Path) 
     edge_collection_id = f"col:{h0['source_corpus']}:{h0['collection_name']}"
     node_collection_id = f"col:{coll_rows[0]['collection_id']}"
     assert edge_collection_id == node_collection_id == "col:sunnah:riyadussalihin"
+
+
+# ---------------------------------------------------------------------------
+# da#84: extend the scraped light-up beyond riyadussalihin — multi-collection.
+# Locks the multi-collection parse + load path in CI (no Docker); the live
+# neo4j:5 proof is tests/integration/test_sunnah_scraped_multicollection.py.
+# ---------------------------------------------------------------------------
+
+ADAB_SAMPLE_JSON = SAMPLE_JSON.parent / "adab.json"
+
+# Per-collection book-1 counts; total = 47 + 46.
+EXPECTED_PER_COLLECTION = {"riyadussalihin": 47, "adab": 46}
+EXPECTED_MULTI_HADITHS = sum(EXPECTED_PER_COLLECTION.values())
+EXPECTED_MULTI_COLLECTIONS = len(EXPECTED_PER_COLLECTION)
+
+
+@pytest.fixture
+def staged_multi(tmp_path: Path) -> Path:
+    """Parse both real samples (riyadussalihin + adab) into one staging dir."""
+    raw = tmp_path / "raw" / "sunnah_scraped"
+    raw.mkdir(parents=True)
+    for sample in (SAMPLE_JSON, ADAB_SAMPLE_JSON):
+        assert sample.exists(), f"committed sample missing: {sample}"
+        shutil.copyfile(sample, raw / sample.name)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    sunnah_scraped.run(tmp_path / "raw", staging)
+    return staging
+
+
+def test_multi_collection_parses_to_distinct_source_ids(staged_multi: Path) -> None:
+    """Both collections parse: 93 hadiths, 2 collections, no source_id collision
+    across collections, each adab id namespaced under sunnah:adab."""
+    hadiths = pq.read_table(staged_multi / "hadiths_sunnah_scraped.parquet").to_pylist()
+    collections = pq.read_table(staged_multi / "collections_sunnah_scraped.parquet").to_pylist()
+    assert len(hadiths) == EXPECTED_MULTI_HADITHS
+    assert {c["collection_id"] for c in collections} == {"sunnah:adab", "sunnah:riyadussalihin"}
+    assert len({h["source_id"] for h in hadiths}) == EXPECTED_MULTI_HADITHS
+    adab = [h for h in hadiths if h["collection_name"] == "adab"]
+    assert len(adab) == EXPECTED_PER_COLLECTION["adab"]
+    assert all(h["source_id"].startswith("sunnah:adab:") for h in adab)
+    # Every row is Sunni / sunnah-tagged regardless of collection.
+    assert all(h["sect"] == "sunni" and h["source_corpus"] == "sunnah" for h in hadiths)
+
+
+def test_multi_collection_node_and_edge_counts(staged_multi: Path, tmp_path: Path) -> None:
+    """load_all_nodes/edges load both collections: 93 Hadith + 2 Collection,
+    93 APPEARS_IN edges, no dangling endpoints."""
+    curated = tmp_path / "curated"
+    curated.mkdir()
+    client = _AllEndpointsExistMock()
+    node_results = load_all_nodes(cast(Neo4jClient, client), staged_multi, curated, strict=False)
+    by_node = {r.node_type: r for r in node_results}
+    assert by_node["Hadith"].created == EXPECTED_MULTI_HADITHS
+    assert by_node["Collection"].created == EXPECTED_MULTI_COLLECTIONS
+
+    edge_results = load_all_edges(cast(Neo4jClient, client), staged_multi, curated, strict=False)
+    by_edge = {r.edge_type: r for r in edge_results}
+    assert by_edge["APPEARS_IN"].created == EXPECTED_MULTI_HADITHS
+    assert by_edge["APPEARS_IN"].missing_endpoints == 0
