@@ -19,7 +19,7 @@ from src.parse.base import (
     safe_str,
     write_parquet,
 )
-from src.parse.schemas import HADITH_SCHEMA
+from src.parse.schemas import COLLECTION_SCHEMA, HADITH_SCHEMA
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -52,16 +52,39 @@ def _find_column(headers: list[str], candidates: set[str]) -> str | None:
 
 
 def _collection_name_from_path(csv_path: Path) -> str:
-    """Derive a collection name from the file path."""
-    stem = csv_path.stem
-    # Remove tashkeel/diacritics suffix to get clean book name.
-    cleaned = re.sub(r"[-_]?(tashkeel|diacritics|with[-_]?diacritics)", "", stem, flags=re.I)
-    cleaned = cleaned.strip("-_ ")
-    return cleaned or stem
+    """Derive a clean collection slug from the file path.
+
+    Open Hadith filenames look like
+    ``sahih_al-bukhari_ahadith_mushakkala_mufassala.utf8.csv``; we want the book
+    slug (``sahih_al-bukhari``) so the loaded ``Collection`` node and the
+    ``source_id`` namespace stay human-readable. Strip the ``.utf8`` suffix, drop
+    the ``_ahadith…`` descriptor tail, and (as a fallback) the diacritics markers.
+    """
+    stem = re.sub(r"\.utf8$", "", csv_path.stem, flags=re.I)
+    # The book slug is everything before the "_ahadith" descriptor tail.
+    book = re.split(r"_ahadith", stem, maxsplit=1, flags=re.I)[0]
+    if book == stem:
+        # No "_ahadith" segment — fall back to stripping diacritics markers.
+        book = re.sub(
+            r"[-_]?(tashkeel|diacritics|mushakkala|mufassala|with[-_]?diacritics)",
+            "",
+            stem,
+            flags=re.I,
+        )
+    return book.strip("-_ ") or stem
 
 
-def run(raw_dir: Path, staging_dir: Path) -> Path:
-    """Parse Open Hadith diacritics CSVs into hadiths_open_hadith.parquet."""
+SOURCE_CORPUS = "open_hadith"
+SECT = "sunni"
+
+
+def run(raw_dir: Path, staging_dir: Path) -> list[Path]:
+    """Parse Open Hadith diacritics CSVs into hadith + collection Parquet.
+
+    Emits ``hadiths_open_hadith.parquet`` and ``collections_open_hadith.parquet``
+    (one ``Collection`` per book) so the graph load lands Hadith **and**
+    Collection nodes and the ``APPEARS_IN`` edges resolve to a real target.
+    """
     source_dir = raw_dir / "open_hadith"
     if not source_dir.exists():
         msg = f"Source directory not found: {source_dir}"
@@ -79,6 +102,9 @@ def run(raw_dir: Path, staging_dir: Path) -> Path:
     logger.info("open_hadith_csvs_found", count=len(diacritics_csvs))
 
     rows: list[dict[str, str | int | None]] = []
+    # Preserve first-seen order of collections, with a hadith count each, so the
+    # emitted Collection rows mirror the books actually parsed.
+    collection_counts: dict[str, int] = {}
 
     for csv_path in sorted(diacritics_csvs):
         collection = _collection_name_from_path(csv_path)
@@ -115,12 +141,12 @@ def run(raw_dir: Path, staging_dir: Path) -> Path:
             book_num = safe_int(book_vals[i]) if book_vals is not None else None
             chapter_num = safe_int(chapter_vals[i]) if chapter_vals is not None else None
 
-            source_id = generate_source_id("open_hadith", collection, hadith_num or (i + 1))
+            source_id = generate_source_id(SOURCE_CORPUS, collection, hadith_num or (i + 1))
 
             rows.append(
                 {
                     "source_id": source_id,
-                    "source_corpus": "open_hadith",
+                    "source_corpus": SOURCE_CORPUS,
                     "collection_name": collection,
                     "book_number": book_num,
                     "chapter_number": chapter_num,
@@ -134,10 +160,11 @@ def run(raw_dir: Path, staging_dir: Path) -> Path:
                     "grade": None,
                     "chapter_name_ar": None,
                     "chapter_name_en": None,
-                    "sect": "sunni",
+                    "sect": SECT,
                 }
             )
 
+        collection_counts[collection] = collection_counts.get(collection, 0) + table.num_rows
         logger.info(
             "open_hadith_csv_parsed",
             collection=collection,
@@ -149,11 +176,34 @@ def run(raw_dir: Path, staging_dir: Path) -> Path:
         msg = "No hadith rows parsed from Open Hadith Data"
         raise ValueError(msg)
 
-    # Build PyArrow table from row dicts.
+    # Build the hadith table from row dicts.
     arrays = {field.name: [r[field.name] for r in rows] for field in HADITH_SCHEMA}
     out_table = pa.table(arrays, schema=HADITH_SCHEMA)
 
-    out_path = staging_dir / "hadiths_open_hadith.parquet"
-    write_parquet(out_table, out_path, schema=HADITH_SCHEMA)
+    hadith_path = staging_dir / "hadiths_open_hadith.parquet"
+    write_parquet(out_table, hadith_path, schema=HADITH_SCHEMA)
     logger.info("open_hadith_parsed", total_hadiths=len(rows))
-    return out_path
+
+    # One Collection per parsed book, so APPEARS_IN edges resolve to a real node.
+    collection_rows = [
+        {
+            "collection_id": generate_source_id(SOURCE_CORPUS, collection),
+            "name_ar": None,
+            "name_en": collection,
+            "compiler_name": None,
+            "compilation_year_ah": None,
+            "sect": SECT,
+            "total_hadiths": count,
+            "source_corpus": SOURCE_CORPUS,
+        }
+        for collection, count in collection_counts.items()
+    ]
+    collection_arrays = {
+        field.name: [r[field.name] for r in collection_rows] for field in COLLECTION_SCHEMA
+    }
+    collection_table = pa.table(collection_arrays, schema=COLLECTION_SCHEMA)
+    collection_path = staging_dir / "collections_open_hadith.parquet"
+    write_parquet(collection_table, collection_path, schema=COLLECTION_SCHEMA)
+    logger.info("open_hadith_collections_parsed", count=len(collection_rows))
+
+    return [hadith_path, collection_path]
