@@ -430,3 +430,47 @@ class TestLoadStudiedUnderGlob:
         result = _load_studied_under(MockNeo4jClient(), staging_dir)
         assert result.edge_type == "STUDIED_UNDER"
         assert result.created == 0
+
+    def test_excludes_non_studentship_source(self, staging_dir: Path) -> None:
+        """A non-studentship NETWORK_EDGE producer (mis = isnad transmission) is
+        NOT globbed into STUDIED_UNDER — only the muhaddithat edge loads (da#133)."""
+        _write_network_edges(
+            staging_dir,
+            "muhaddithat",
+            [
+                {
+                    "from_narrator_name": "أ",
+                    "to_narrator_name": "ب",
+                    "source": "muhaddithat",
+                    "from_external_id": "1",
+                    "to_external_id": "2",
+                }
+            ],
+        )
+        _write_network_edges(
+            staging_dir,
+            "mis",
+            [
+                {
+                    "from_narrator_name": "X",
+                    "to_narrator_name": "Y",
+                    "source": "mis",
+                    "hadith_id": "mis:sahih_muslim:1:1",
+                }
+            ],
+        )
+        client = MockNeo4jClient()
+        client.set_read_results([{"from_exists": True, "to_exists": True}])
+        result = _load_studied_under(client, staging_dir)
+        assert result.created == 1  # only the muhaddithat studentship edge
+
+        batch = [b for q, b in client.calls if "MERGE" in q and isinstance(b, list)][-1]
+        # The mis isnad pair never reaches the STUDIED_UNDER batch.
+        assert {
+            "from_id": make_canonical_id(normalize_arabic("X")),
+            "to_id": make_canonical_id(normalize_arabic("Y")),
+        } not in batch
+        assert {
+            "from_id": make_canonical_id(normalize_arabic("أ")),
+            "to_id": make_canonical_id(normalize_arabic("ب")),
+        } in batch

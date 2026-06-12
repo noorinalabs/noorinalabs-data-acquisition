@@ -479,8 +479,29 @@ def _load_parallel_of(
 
 
 # ---------------------------------------------------------------------------
-# 5. STUDIED_UNDER — from every network_edges_*.parquet (muhaddithat, itqan, …)
+# 5. STUDIED_UNDER — from the studentship network_edges_*.parquet (muhaddithat, itqan)
 # ---------------------------------------------------------------------------
+
+# NETWORK_EDGE_SCHEMA is reused by producers whose edges mean DIFFERENT relations.
+# muhaddithat + itqan emit teacher↔student (studentship) pairs that ARE
+# STUDIED_UNDER. Others — e.g. `mis`, whose rows are *isnad transmission* pairs (a
+# different relation type AND the opposite direction) — must NOT be globbed in
+# here, or their edges would load as wrong-type, wrong-direction STUDIED_UNDER.
+# This filename allowlist is the cheap, safe interim; the durable fix is an
+# explicit edge-relation field on NETWORK_EDGE_SCHEMA so the loader keys on the
+# data, not on a slug — tracked in da#133.
+_STUDIED_UNDER_SOURCES: frozenset[str] = frozenset({"muhaddithat", "itqan"})
+
+
+def _is_studied_under_file(path: Path) -> bool:
+    """True if a ``network_edges_<slug>.parquet`` belongs to a studentship source.
+
+    Matches the exact slug or a chunked ``<slug>_NNN`` variant, so a future
+    sharded write still resolves but a different corpus (``mis``) never does.
+    """
+    slug = path.stem.removeprefix("network_edges_")
+    return any(slug == src or slug.startswith(f"{src}_") for src in _STUDIED_UNDER_SOURCES)
+
 
 _STUDIED_UNDER_QUERY = """\
 UNWIND $batch AS row
@@ -526,13 +547,17 @@ def _load_studied_under(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> EdgeLoadResult:
-    """Load STUDIED_UNDER edges from every ``network_edges_*.parquet``.
+    """Load STUDIED_UNDER edges from the studentship ``network_edges_*.parquet``.
 
-    Source-agnostic: muhaddithat, itqan, and any future NETWORK_EDGE producer are
-    picked up by glob (mirroring how the bio/canonical loaders glob their inputs).
-    Gracefully skips when no such file exists.
+    Globs ``network_edges_*`` but keeps only the studentship producers
+    (:data:`_STUDIED_UNDER_SOURCES` — muhaddithat, itqan); a NETWORK_EDGE producer
+    whose edges are a different relation (e.g. ``mis`` isnad transmission) is
+    deliberately skipped here (see da#133). Gracefully skips when no such file
+    exists.
     """
-    edge_files = _parquet_files(staging_dir, "network_edges_")
+    edge_files = [
+        p for p in _parquet_files(staging_dir, "network_edges_") if _is_studied_under_file(p)
+    ]
     if not edge_files:
         logger.info("studied_under_skipped", reason="file_not_found", staging_dir=str(staging_dir))
         return EdgeLoadResult("STUDIED_UNDER", 0, 0, 0)

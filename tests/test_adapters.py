@@ -38,6 +38,7 @@ EXPECTED_SLUGS = [
     "muhaddithat",
     "itqan",
     "halimbahae",
+    "mis",
 ]
 
 
