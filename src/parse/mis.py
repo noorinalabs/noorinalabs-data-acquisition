@@ -45,7 +45,11 @@ from typing import Any
 import pyarrow as pa
 
 from src.parse.base import generate_source_id, read_csv_robust, safe_int, safe_str, write_parquet
-from src.parse.schemas import HADITH_SCHEMA, NETWORK_EDGE_SCHEMA
+from src.parse.schemas import (
+    EDGE_RELATION_TRANSMITTED_TO,
+    HADITH_SCHEMA,
+    NETWORK_EDGE_SCHEMA,
+)
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -261,7 +265,13 @@ def _emit_edge(
     from_id: str | None = None,
     to_id: str | None = None,
 ) -> None:
-    """Append one NETWORK_EDGE row, skipping incomplete / self-loop pairs."""
+    """Append one NETWORK_EDGE row, skipping incomplete / self-loop pairs.
+
+    MIS rows are *isnad transmission* pairs, so each declares the TRANSMITTED_TO
+    relation — never STUDIED_UNDER. The graph loader keys on that field, which is
+    what keeps these edges off the STUDIED_UNDER loader once MIS is wired into the
+    production load path (da#133).
+    """
     if not from_name or not to_name or from_name == to_name:
         return
     edges.append(
@@ -272,6 +282,7 @@ def _emit_edge(
             "source": SOURCE_CORPUS,
             "from_external_id": from_id,
             "to_external_id": to_id,
+            "relation": EDGE_RELATION_TRANSMITTED_TO,
         }
     )
 

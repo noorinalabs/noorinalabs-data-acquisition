@@ -106,6 +106,7 @@ class TestSampleData:
             "source": ["lk"],
             "from_external_id": [None],
             "to_external_id": [None],
+            "relation": ["STUDIED_UNDER"],
         }
         table = pa.table(data).cast(NETWORK_EDGE_SCHEMA)
         assert table.num_rows == 1

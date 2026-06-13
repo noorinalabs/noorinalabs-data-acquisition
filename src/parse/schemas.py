@@ -16,7 +16,21 @@ __all__ = [
     "NARRATOR_ALIAS_SCHEMA",
     "COLLECTION_SCHEMA",
     "NETWORK_EDGE_SCHEMA",
+    "EDGE_RELATION_STUDIED_UNDER",
+    "EDGE_RELATION_TRANSMITTED_TO",
+    "DEFAULT_EDGE_RELATION",
 ]
+
+# ``NETWORK_EDGE_SCHEMA.relation`` values (da#133). The graph loader routes a
+# network edge to a Neo4j relationship type by this DECLARED relation rather than
+# guessing it from the producing file's name: a studentship producer (muhaddithat,
+# itqan) emits ``STUDIED_UNDER``; an isnad-transmission producer (mis) emits
+# ``TRANSMITTED_TO``. ``DEFAULT_EDGE_RELATION`` is the back-compat value the loader
+# assumes for a row that carries no relation — a pre-da#133 parquet — which is
+# exactly what those legacy (studentship-only) files meant.
+EDGE_RELATION_STUDIED_UNDER = "STUDIED_UNDER"
+EDGE_RELATION_TRANSMITTED_TO = "TRANSMITTED_TO"
+DEFAULT_EDGE_RELATION = EDGE_RELATION_STUDIED_UNDER
 
 # ``source_id`` grammar and the graph node-id rules derived from it are the
 # canonical identity contract — see :mod:`src.parse.identity` (``<corpus>:
@@ -95,6 +109,11 @@ COLLECTION_SCHEMA = pa.schema(
     ]
 )
 
+# ``relation`` declares which graph relationship the row's narrator pair forms
+# (:data:`EDGE_RELATION_STUDIED_UNDER` vs :data:`EDGE_RELATION_TRANSMITTED_TO`) so
+# the loader keys on the data, not on the filename (da#133). It is nullable for
+# back-compat: a pre-da#133 file carries no relation and the loader falls back to
+# :data:`DEFAULT_EDGE_RELATION`. Current producers always populate it.
 NETWORK_EDGE_SCHEMA = pa.schema(
     [
         pa.field("from_narrator_name", pa.string(), nullable=False),
@@ -103,6 +122,7 @@ NETWORK_EDGE_SCHEMA = pa.schema(
         pa.field("source", pa.string(), nullable=False),
         pa.field("from_external_id", pa.string(), nullable=True),
         pa.field("to_external_id", pa.string(), nullable=True),
+        pa.field("relation", pa.string(), nullable=True),
     ]
 )
 

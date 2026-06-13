@@ -119,6 +119,9 @@ class TestMisSequenceLayout:
         table = pq.read_table(edges_path)
         assert table.schema == NETWORK_EDGE_SCHEMA
         assert set(table.column("source").to_pylist()) == {"mis"}
+        # MIS isnad edges declare TRANSMITTED_TO so the graph loader never routes
+        # them to STUDIED_UNDER (da#133).
+        assert set(table.column("relation").to_pylist()) == {"TRANSMITTED_TO"}
 
     def test_multiplicity_preserved(self, tmp_path: Path) -> None:
         """The three isnads of hadith 1 must survive as three distinct chains."""

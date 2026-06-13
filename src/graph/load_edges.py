@@ -22,6 +22,7 @@ from src.parse.identity import (
     make_canonical_id,
     narrator_node_id,
 )
+from src.parse.schemas import EDGE_RELATION_STUDIED_UNDER
 from src.utils.arabic import normalize_arabic
 from src.utils.logging import get_logger
 from src.utils.neo4j_client import Neo4jClient
@@ -485,11 +486,17 @@ def _load_parallel_of(
 # NETWORK_EDGE_SCHEMA is reused by producers whose edges mean DIFFERENT relations.
 # muhaddithat + itqan emit teacher↔student (studentship) pairs that ARE
 # STUDIED_UNDER. Others — e.g. `mis`, whose rows are *isnad transmission* pairs (a
-# different relation type AND the opposite direction) — must NOT be globbed in
-# here, or their edges would load as wrong-type, wrong-direction STUDIED_UNDER.
-# This filename allowlist is the cheap, safe interim; the durable fix is an
-# explicit edge-relation field on NETWORK_EDGE_SCHEMA so the loader keys on the
-# data, not on a slug — tracked in da#133.
+# different relation type AND the opposite direction) — must NOT load as
+# STUDIED_UNDER, or their edges would land as wrong-type, wrong-direction edges.
+#
+# The durable routing (da#133) is the per-row ``relation`` field on
+# NETWORK_EDGE_SCHEMA: a row is loaded here iff it DECLARES STUDIED_UNDER. The
+# filename allowlist below is no longer the primary gate — it survives only as the
+# back-compat inference for a pre-da#133 file whose rows carry no ``relation`` at
+# all (a legacy studentship file → STUDIED_UNDER; anything else → skipped). Once a
+# file carries an explicit ``relation`` the allowlist is never consulted, so a new
+# studentship source needs no allowlist edit and a transmission file named like a
+# studentship one (or vice-versa) is still routed correctly by its data.
 _STUDIED_UNDER_SOURCES: frozenset[str] = frozenset({"muhaddithat", "itqan"})
 
 
@@ -497,10 +504,25 @@ def _is_studied_under_file(path: Path) -> bool:
     """True if a ``network_edges_<slug>.parquet`` belongs to a studentship source.
 
     Matches the exact slug or a chunked ``<slug>_NNN`` variant, so a future
-    sharded write still resolves but a different corpus (``mis``) never does.
+    sharded write still resolves but a different corpus (``mis``) never does. Used
+    only as the back-compat default for relation-less (pre-da#133) rows.
     """
     slug = path.stem.removeprefix("network_edges_")
     return any(slug == src or slug.startswith(f"{src}_") for src in _STUDIED_UNDER_SOURCES)
+
+
+def _row_relation(row: dict[str, Any], *, legacy_default: str | None) -> str | None:
+    """Relation a NETWORK_EDGE row declares.
+
+    Honors an explicit ``relation`` value (da#133). A row carrying none — a
+    pre-da#133 parquet — falls back to *legacy_default*: the relation the file's
+    name implied under the old filename allowlist (``None`` when the name matched
+    no studentship source, so such legacy rows are skipped rather than mislabeled).
+    """
+    rel = row.get("relation")
+    if isinstance(rel, str) and rel.strip():
+        return rel
+    return legacy_default
 
 
 _STUDIED_UNDER_QUERY = """\
@@ -547,17 +569,16 @@ def _load_studied_under(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> EdgeLoadResult:
-    """Load STUDIED_UNDER edges from the studentship ``network_edges_*.parquet``.
+    """Load STUDIED_UNDER edges from the ``network_edges_*.parquet`` files.
 
-    Globs ``network_edges_*`` but keeps only the studentship producers
-    (:data:`_STUDIED_UNDER_SOURCES` — muhaddithat, itqan); a NETWORK_EDGE producer
-    whose edges are a different relation (e.g. ``mis`` isnad transmission) is
-    deliberately skipped here (see da#133). Gracefully skips when no such file
-    exists.
+    Globs every ``network_edges_*`` file and keeps only the rows that DECLARE the
+    STUDIED_UNDER relation (:func:`_row_relation`, da#133). A NETWORK_EDGE producer
+    whose edges are a different relation (e.g. ``mis`` isnad transmission, declared
+    TRANSMITTED_TO) is skipped row-by-row regardless of filename. Rows in a
+    pre-da#133 file that carry no relation fall back to the filename allowlist.
+    Gracefully skips when no ``network_edges_*`` file exists.
     """
-    edge_files = [
-        p for p in _parquet_files(staging_dir, "network_edges_") if _is_studied_under_file(p)
-    ]
+    edge_files = _parquet_files(staging_dir, "network_edges_")
     if not edge_files:
         logger.info("studied_under_skipped", reason="file_not_found", staging_dir=str(staging_dir))
         return EdgeLoadResult("STUDIED_UNDER", 0, 0, 0)
@@ -567,7 +588,14 @@ def _load_studied_under(
     skipped = 0
 
     for path in edge_files:
+        # Relation a relation-less (pre-da#133) row in this file defaults to.
+        legacy_default = EDGE_RELATION_STUDIED_UNDER if _is_studied_under_file(path) else None
         for row in _read_parquet_rows(path):
+            if _row_relation(row, legacy_default=legacy_default) != EDGE_RELATION_STUDIED_UNDER:
+                # Not a studentship edge (e.g. an isnad-transmission row) — leave it
+                # off STUDIED_UNDER. Not counted as skipped: skipped tracks edges we
+                # meant to load but could not resolve, not other relations.
+                continue
             from_id = _studied_under_endpoint(
                 row.get("from_narrator_name"), row.get("from_external_id")
             )
