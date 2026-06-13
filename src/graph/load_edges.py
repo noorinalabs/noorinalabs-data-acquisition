@@ -22,6 +22,7 @@ from src.parse.identity import (
     make_canonical_id,
     narrator_node_id,
 )
+from src.parse.schemas import EDGE_RELATION_STUDIED_UNDER
 from src.utils.arabic import normalize_arabic
 from src.utils.logging import get_logger
 from src.utils.neo4j_client import Neo4jClient
@@ -130,20 +131,45 @@ def _build_chain_pairs(
     return pairs
 
 
+def _resolved_mentions_files(staging_dir: Path, curated_dir: Path | None) -> list[Path]:
+    """Locate the mention files the chain edges (NARRATED / TRANSMITTED_TO) read.
+
+    The chain edges key on ``canonical_narrator_id`` — and the only mentions that
+    carry it are the RESOLVED ones, which ``resolve.run_all`` writes to the
+    **curated** (output) dir as ``narrator_mentions_resolved.parquet``, NOT to
+    staging (``src/resolve/ner.py`` / ``disambiguate.py``). Prefer that curated
+    file; fall back to a resolved file that happens to sit in staging, then to
+    the raw per-source ``narrator_mentions_*`` (pre-resolve — no canonical id, so
+    it yields no edges, but it keeps strict-mode file-presence checks satisfied).
+
+    Wiring curated_dir here is what fixes the orchestrated load emitting zero
+    NARRATED/TRANSMITTED_TO edges on real data (da#141 / main#601 criterion #1):
+    before this, both loaders globbed staging only and silently fell back to the
+    raw mentions.
+    """
+    if curated_dir is not None:
+        files = _parquet_files(curated_dir, "narrator_mentions_resolved")
+        if files:
+            return files
+    files = _parquet_files(staging_dir, "narrator_mentions_resolved")
+    if files:
+        return files
+    return _parquet_files(staging_dir, "narrator_mentions_")
+
+
 def _load_transmitted_to(
     client: Neo4jClient,
     staging_dir: Path,
     *,
+    curated_dir: Path | None = None,
     strict: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> EdgeLoadResult:
     """Load TRANSMITTED_TO edges from narrator_mentions_resolved.parquet."""
-    files = _parquet_files(staging_dir, "narrator_mentions_resolved")
-    if not files:
-        files = _parquet_files(staging_dir, "narrator_mentions_")
+    files = _resolved_mentions_files(staging_dir, curated_dir)
     if not files:
         if strict:
-            msg = f"No narrator_mentions files in {staging_dir}"
+            msg = f"No narrator_mentions files in {curated_dir or staging_dir}"
             raise FileNotFoundError(msg)
         logger.warning("transmitted_to_files_missing", dir=str(staging_dir))
         return EdgeLoadResult("TRANSMITTED_TO", 0, 0, 0)
@@ -221,16 +247,15 @@ def _load_narrated(
     client: Neo4jClient,
     staging_dir: Path,
     *,
+    curated_dir: Path | None = None,
     strict: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> EdgeLoadResult:
     """Load NARRATED edges — first narrator (position 0) in each chain -> hadith."""
-    files = _parquet_files(staging_dir, "narrator_mentions_resolved")
-    if not files:
-        files = _parquet_files(staging_dir, "narrator_mentions_")
+    files = _resolved_mentions_files(staging_dir, curated_dir)
     if not files:
         if strict:
-            msg = f"No narrator_mentions files in {staging_dir}"
+            msg = f"No narrator_mentions files in {curated_dir or staging_dir}"
             raise FileNotFoundError(msg)
         logger.warning("narrated_files_missing", dir=str(staging_dir))
         return EdgeLoadResult("NARRATED", 0, 0, 0)
@@ -485,11 +510,17 @@ def _load_parallel_of(
 # NETWORK_EDGE_SCHEMA is reused by producers whose edges mean DIFFERENT relations.
 # muhaddithat + itqan emit teacher↔student (studentship) pairs that ARE
 # STUDIED_UNDER. Others — e.g. `mis`, whose rows are *isnad transmission* pairs (a
-# different relation type AND the opposite direction) — must NOT be globbed in
-# here, or their edges would load as wrong-type, wrong-direction STUDIED_UNDER.
-# This filename allowlist is the cheap, safe interim; the durable fix is an
-# explicit edge-relation field on NETWORK_EDGE_SCHEMA so the loader keys on the
-# data, not on a slug — tracked in da#133.
+# different relation type AND the opposite direction) — must NOT load as
+# STUDIED_UNDER, or their edges would land as wrong-type, wrong-direction edges.
+#
+# The durable routing (da#133) is the per-row ``relation`` field on
+# NETWORK_EDGE_SCHEMA: a row is loaded here iff it DECLARES STUDIED_UNDER. The
+# filename allowlist below is no longer the primary gate — it survives only as the
+# back-compat inference for a pre-da#133 file whose rows carry no ``relation`` at
+# all (a legacy studentship file → STUDIED_UNDER; anything else → skipped). Once a
+# file carries an explicit ``relation`` the allowlist is never consulted, so a new
+# studentship source needs no allowlist edit and a transmission file named like a
+# studentship one (or vice-versa) is still routed correctly by its data.
 _STUDIED_UNDER_SOURCES: frozenset[str] = frozenset({"muhaddithat", "itqan"})
 
 
@@ -497,10 +528,25 @@ def _is_studied_under_file(path: Path) -> bool:
     """True if a ``network_edges_<slug>.parquet`` belongs to a studentship source.
 
     Matches the exact slug or a chunked ``<slug>_NNN`` variant, so a future
-    sharded write still resolves but a different corpus (``mis``) never does.
+    sharded write still resolves but a different corpus (``mis``) never does. Used
+    only as the back-compat default for relation-less (pre-da#133) rows.
     """
     slug = path.stem.removeprefix("network_edges_")
     return any(slug == src or slug.startswith(f"{src}_") for src in _STUDIED_UNDER_SOURCES)
+
+
+def _row_relation(row: dict[str, Any], *, legacy_default: str | None) -> str | None:
+    """Relation a NETWORK_EDGE row declares.
+
+    Honors an explicit ``relation`` value (da#133). A row carrying none — a
+    pre-da#133 parquet — falls back to *legacy_default*: the relation the file's
+    name implied under the old filename allowlist (``None`` when the name matched
+    no studentship source, so such legacy rows are skipped rather than mislabeled).
+    """
+    rel = row.get("relation")
+    if isinstance(rel, str) and rel.strip():
+        return rel
+    return legacy_default
 
 
 _STUDIED_UNDER_QUERY = """\
@@ -547,17 +593,16 @@ def _load_studied_under(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> EdgeLoadResult:
-    """Load STUDIED_UNDER edges from the studentship ``network_edges_*.parquet``.
+    """Load STUDIED_UNDER edges from the ``network_edges_*.parquet`` files.
 
-    Globs ``network_edges_*`` but keeps only the studentship producers
-    (:data:`_STUDIED_UNDER_SOURCES` — muhaddithat, itqan); a NETWORK_EDGE producer
-    whose edges are a different relation (e.g. ``mis`` isnad transmission) is
-    deliberately skipped here (see da#133). Gracefully skips when no such file
-    exists.
+    Globs every ``network_edges_*`` file and keeps only the rows that DECLARE the
+    STUDIED_UNDER relation (:func:`_row_relation`, da#133). A NETWORK_EDGE producer
+    whose edges are a different relation (e.g. ``mis`` isnad transmission, declared
+    TRANSMITTED_TO) is skipped row-by-row regardless of filename. Rows in a
+    pre-da#133 file that carry no relation fall back to the filename allowlist.
+    Gracefully skips when no ``network_edges_*`` file exists.
     """
-    edge_files = [
-        p for p in _parquet_files(staging_dir, "network_edges_") if _is_studied_under_file(p)
-    ]
+    edge_files = _parquet_files(staging_dir, "network_edges_")
     if not edge_files:
         logger.info("studied_under_skipped", reason="file_not_found", staging_dir=str(staging_dir))
         return EdgeLoadResult("STUDIED_UNDER", 0, 0, 0)
@@ -567,7 +612,14 @@ def _load_studied_under(
     skipped = 0
 
     for path in edge_files:
+        # Relation a relation-less (pre-da#133) row in this file defaults to.
+        legacy_default = EDGE_RELATION_STUDIED_UNDER if _is_studied_under_file(path) else None
         for row in _read_parquet_rows(path):
+            if _row_relation(row, legacy_default=legacy_default) != EDGE_RELATION_STUDIED_UNDER:
+                # Not a studentship edge (e.g. an isnad-transmission row) — leave it
+                # off STUDIED_UNDER. Not counted as skipped: skipped tracks edges we
+                # meant to load but could not resolve, not other relations.
+                continue
             from_id = _studied_under_endpoint(
                 row.get("from_narrator_name"), row.get("from_external_id")
             )
@@ -690,7 +742,7 @@ def _load_graded_by(
 def load_all_edges(
     client: Neo4jClient,
     staging_dir: Path,
-    curated_dir: Path,  # noqa: ARG001
+    curated_dir: Path,
     *,
     strict: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
@@ -704,8 +756,10 @@ def load_all_edges(
     staging_dir:
         Directory containing staging Parquet files.
     curated_dir:
-        Directory containing curated reference data (unused for edges
-        currently but kept for API symmetry with ``load_all_nodes``).
+        Directory containing curated artifacts — notably
+        ``narrator_mentions_resolved.parquet`` (the canonical-id-bearing mentions
+        that ``resolve.run_all`` writes here, not to staging). The chain edges
+        (NARRATED / TRANSMITTED_TO) read it from here.
     strict:
         If ``True``, raise on missing required files. If ``False``,
         skip gracefully.
@@ -714,8 +768,16 @@ def load_all_edges(
     """
     results: list[EdgeLoadResult] = []
 
-    results.append(_load_transmitted_to(client, staging_dir, strict=strict, batch_size=batch_size))
-    results.append(_load_narrated(client, staging_dir, strict=strict, batch_size=batch_size))
+    results.append(
+        _load_transmitted_to(
+            client, staging_dir, curated_dir=curated_dir, strict=strict, batch_size=batch_size
+        )
+    )
+    results.append(
+        _load_narrated(
+            client, staging_dir, curated_dir=curated_dir, strict=strict, batch_size=batch_size
+        )
+    )
     results.append(_load_appears_in(client, staging_dir, strict=strict, batch_size=batch_size))
     results.append(_load_parallel_of(client, staging_dir, strict=strict, batch_size=batch_size))
     results.append(_load_studied_under(client, staging_dir, batch_size=batch_size))

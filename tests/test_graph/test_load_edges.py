@@ -192,6 +192,67 @@ class TestLoadNarrated:
         assert narrated_result.created == 1
 
 
+class TestChainEdgesReadResolvedFromCurated:
+    """Regression for da#141 / main#601 criterion #1 — NARRATED/TRANSMITTED_TO = 0.
+
+    ``resolve.run_all`` writes ``narrator_mentions_resolved.parquet`` (the only
+    mentions carrying ``canonical_narrator_id``, which both chain edges key on)
+    to the **curated** dir, not staging. ``load_all_edges`` used to glob staging
+    only, so on a real orchestrated load the chain edges silently fell back to
+    the raw, canonical-id-less staging mentions and created ZERO edges — exactly
+    the staging gap #601 found. These assert the loaders read the resolved file
+    from ``curated_dir`` even when staging holds no resolved mentions at all.
+    """
+
+    def _resolved_chain_rows(self) -> list[dict[str, object]]:
+        return [
+            {
+                "mention_id": "m1",
+                "hadith_id": "h1",
+                "position_in_chain": 0,
+                "canonical_narrator_id": "nar:1",
+            },
+            {
+                "mention_id": "m2",
+                "hadith_id": "h1",
+                "position_in_chain": 1,
+                "canonical_narrator_id": "nar:2",
+            },
+        ]
+
+    def test_transmitted_to_reads_resolved_from_curated(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        mock_client.set_read_results(
+            [{"from_id": "nar:1", "to_id": "nar:2", "from_exists": True, "to_exists": True}]
+        )
+        # Resolved mentions live in CURATED (the resolve-output dir); staging has none.
+        write_narrator_mentions_resolved(curated_dir, self._resolved_chain_rows())
+
+        results = load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
+        tt_result = next(r for r in results if r.edge_type == "TRANSMITTED_TO")
+        assert tt_result.created == 1, "TRANSMITTED_TO must read resolved mentions from curated_dir"
+
+    def test_narrated_reads_resolved_from_curated(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        mock_client.set_read_results(
+            [
+                {
+                    "narrator_id": "nar:1",
+                    "hadith_id": "hdt:h1",
+                    "narrator_exists": True,
+                    "hadith_exists": True,
+                }
+            ]
+        )
+        write_narrator_mentions_resolved(curated_dir, self._resolved_chain_rows())
+
+        results = load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
+        narrated_result = next(r for r in results if r.edge_type == "NARRATED")
+        assert narrated_result.created == 1, "NARRATED must read resolved mentions from curated_dir"
+
+
 class TestLoadAppearsIn:
     def test_hadith_to_collection_edges(
         self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
@@ -474,3 +535,97 @@ class TestLoadStudiedUnderGlob:
             "from_id": make_canonical_id(normalize_arabic("أ")),
             "to_id": make_canonical_id(normalize_arabic("ب")),
         } in batch
+
+
+class TestStudiedUnderRelationRouting:
+    """da#133: the loader routes by the declared ``relation`` field, not the
+    filename. The filename allowlist only survives as the default for legacy
+    relation-less rows (covered by :class:`TestLoadStudiedUnderGlob`)."""
+
+    def test_relation_field_includes_non_allowlisted_source(self, staging_dir: Path) -> None:
+        """A NETWORK_EDGE file whose slug is NOT in the studentship allowlist still
+        loads when its rows DECLARE STUDIED_UNDER — proving routing keys on the
+        field, not the filename, so a new studentship source needs no allowlist
+        edit."""
+        _write_network_edges(
+            staging_dir,
+            "newsource",  # deliberately not muhaddithat/itqan
+            [
+                {
+                    "from_narrator_name": "أ",
+                    "to_narrator_name": "ب",
+                    "source": "newsource",
+                    "from_external_id": "1",
+                    "to_external_id": "2",
+                    "relation": "STUDIED_UNDER",
+                }
+            ],
+        )
+        client = MockNeo4jClient()
+        client.set_read_results([{"from_exists": True, "to_exists": True}])
+        result = _load_studied_under(client, staging_dir)
+        assert result.created == 1
+
+    def test_transmitted_to_relation_excluded_despite_studentship_filename(
+        self, staging_dir: Path
+    ) -> None:
+        """A row that DECLARES TRANSMITTED_TO is kept off STUDIED_UNDER even when it
+        lives in an allowlisted (``muhaddithat``) file — the explicit relation
+        overrides the filename so an isnad-transmission row can never be
+        mislabeled."""
+        _write_network_edges(
+            staging_dir,
+            "muhaddithat",
+            [
+                {
+                    "from_narrator_name": "X",
+                    "to_narrator_name": "Y",
+                    "source": "muhaddithat",
+                    "from_external_id": "1",
+                    "to_external_id": "2",
+                    "relation": "TRANSMITTED_TO",
+                }
+            ],
+        )
+        client = MockNeo4jClient()
+        result = _load_studied_under(client, staging_dir)
+        assert result.created == 0  # the transmission row is not loaded as STUDIED_UNDER
+
+    def test_explicit_relation_routes_mixed_file(self, staging_dir: Path) -> None:
+        """Within one file, only the STUDIED_UNDER-declaring row loads; the
+        TRANSMITTED_TO-declaring row is skipped."""
+        _write_network_edges(
+            staging_dir,
+            "mis",  # not allowlisted; both rows carry explicit relations
+            [
+                {
+                    "from_narrator_name": "أ",
+                    "to_narrator_name": "ب",
+                    "source": "mis",
+                    "from_external_id": "1",
+                    "to_external_id": "2",
+                    "relation": "STUDIED_UNDER",
+                },
+                {
+                    "from_narrator_name": "X",
+                    "to_narrator_name": "Y",
+                    "source": "mis",
+                    "from_external_id": "3",
+                    "to_external_id": "4",
+                    "relation": "TRANSMITTED_TO",
+                },
+            ],
+        )
+        client = MockNeo4jClient()
+        client.set_read_results([{"from_exists": True, "to_exists": True}])
+        result = _load_studied_under(client, staging_dir)
+        assert result.created == 1
+        batch = [b for q, b in client.calls if "MERGE" in q and isinstance(b, list)][-1]
+        assert {
+            "from_id": make_canonical_id(normalize_arabic("أ")),
+            "to_id": make_canonical_id(normalize_arabic("ب")),
+        } in batch
+        assert {
+            "from_id": make_canonical_id(normalize_arabic("X")),
+            "to_id": make_canonical_id(normalize_arabic("Y")),
+        } not in batch

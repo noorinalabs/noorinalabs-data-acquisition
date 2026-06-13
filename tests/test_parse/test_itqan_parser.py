@@ -221,6 +221,8 @@ class TestEdgeExtraction:
         assert {r["source"] for r in rows} == {"itqan"}
         # Provenance: both endpoints carry the source profile id.
         assert all(r["from_external_id"] and r["to_external_id"] for r in rows)
+        # Studentship edges declare STUDIED_UNDER for relation-keyed loading (da#133).
+        assert {r["relation"] for r in rows} == {"STUDIED_UNDER"}
 
 
 class TestAliasExtraction:
