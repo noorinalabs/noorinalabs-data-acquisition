@@ -131,20 +131,45 @@ def _build_chain_pairs(
     return pairs
 
 
+def _resolved_mentions_files(staging_dir: Path, curated_dir: Path | None) -> list[Path]:
+    """Locate the mention files the chain edges (NARRATED / TRANSMITTED_TO) read.
+
+    The chain edges key on ``canonical_narrator_id`` — and the only mentions that
+    carry it are the RESOLVED ones, which ``resolve.run_all`` writes to the
+    **curated** (output) dir as ``narrator_mentions_resolved.parquet``, NOT to
+    staging (``src/resolve/ner.py`` / ``disambiguate.py``). Prefer that curated
+    file; fall back to a resolved file that happens to sit in staging, then to
+    the raw per-source ``narrator_mentions_*`` (pre-resolve — no canonical id, so
+    it yields no edges, but it keeps strict-mode file-presence checks satisfied).
+
+    Wiring curated_dir here is what fixes the orchestrated load emitting zero
+    NARRATED/TRANSMITTED_TO edges on real data (da#141 / main#601 criterion #1):
+    before this, both loaders globbed staging only and silently fell back to the
+    raw mentions.
+    """
+    if curated_dir is not None:
+        files = _parquet_files(curated_dir, "narrator_mentions_resolved")
+        if files:
+            return files
+    files = _parquet_files(staging_dir, "narrator_mentions_resolved")
+    if files:
+        return files
+    return _parquet_files(staging_dir, "narrator_mentions_")
+
+
 def _load_transmitted_to(
     client: Neo4jClient,
     staging_dir: Path,
     *,
+    curated_dir: Path | None = None,
     strict: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> EdgeLoadResult:
     """Load TRANSMITTED_TO edges from narrator_mentions_resolved.parquet."""
-    files = _parquet_files(staging_dir, "narrator_mentions_resolved")
-    if not files:
-        files = _parquet_files(staging_dir, "narrator_mentions_")
+    files = _resolved_mentions_files(staging_dir, curated_dir)
     if not files:
         if strict:
-            msg = f"No narrator_mentions files in {staging_dir}"
+            msg = f"No narrator_mentions files in {curated_dir or staging_dir}"
             raise FileNotFoundError(msg)
         logger.warning("transmitted_to_files_missing", dir=str(staging_dir))
         return EdgeLoadResult("TRANSMITTED_TO", 0, 0, 0)
@@ -222,16 +247,15 @@ def _load_narrated(
     client: Neo4jClient,
     staging_dir: Path,
     *,
+    curated_dir: Path | None = None,
     strict: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> EdgeLoadResult:
     """Load NARRATED edges — first narrator (position 0) in each chain -> hadith."""
-    files = _parquet_files(staging_dir, "narrator_mentions_resolved")
-    if not files:
-        files = _parquet_files(staging_dir, "narrator_mentions_")
+    files = _resolved_mentions_files(staging_dir, curated_dir)
     if not files:
         if strict:
-            msg = f"No narrator_mentions files in {staging_dir}"
+            msg = f"No narrator_mentions files in {curated_dir or staging_dir}"
             raise FileNotFoundError(msg)
         logger.warning("narrated_files_missing", dir=str(staging_dir))
         return EdgeLoadResult("NARRATED", 0, 0, 0)
@@ -718,7 +742,7 @@ def _load_graded_by(
 def load_all_edges(
     client: Neo4jClient,
     staging_dir: Path,
-    curated_dir: Path,  # noqa: ARG001
+    curated_dir: Path,
     *,
     strict: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
@@ -732,8 +756,10 @@ def load_all_edges(
     staging_dir:
         Directory containing staging Parquet files.
     curated_dir:
-        Directory containing curated reference data (unused for edges
-        currently but kept for API symmetry with ``load_all_nodes``).
+        Directory containing curated artifacts — notably
+        ``narrator_mentions_resolved.parquet`` (the canonical-id-bearing mentions
+        that ``resolve.run_all`` writes here, not to staging). The chain edges
+        (NARRATED / TRANSMITTED_TO) read it from here.
     strict:
         If ``True``, raise on missing required files. If ``False``,
         skip gracefully.
@@ -742,8 +768,16 @@ def load_all_edges(
     """
     results: list[EdgeLoadResult] = []
 
-    results.append(_load_transmitted_to(client, staging_dir, strict=strict, batch_size=batch_size))
-    results.append(_load_narrated(client, staging_dir, strict=strict, batch_size=batch_size))
+    results.append(
+        _load_transmitted_to(
+            client, staging_dir, curated_dir=curated_dir, strict=strict, batch_size=batch_size
+        )
+    )
+    results.append(
+        _load_narrated(
+            client, staging_dir, curated_dir=curated_dir, strict=strict, batch_size=batch_size
+        )
+    )
     results.append(_load_appears_in(client, staging_dir, strict=strict, batch_size=batch_size))
     results.append(_load_parallel_of(client, staging_dir, strict=strict, batch_size=batch_size))
     results.append(_load_studied_under(client, staging_dir, batch_size=batch_size))
