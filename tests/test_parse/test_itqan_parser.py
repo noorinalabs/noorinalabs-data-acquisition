@@ -12,14 +12,27 @@ import pytest
 from src.parse import itqan
 from src.parse.itqan import (
     _GRADE_TO_TRUST,
+    _build_aliases,
+    _build_edges,
     _clean,
     _extract_death_year,
     _generation,
+    _id_list,
+    _iter_profiles,
     _parse_profile,
 )
-from src.parse.schemas import NARRATOR_BIO_SCHEMA
+from src.parse.schemas import (
+    NARRATOR_ALIAS_SCHEMA,
+    NARRATOR_BIO_SCHEMA,
+    NETWORK_EDGE_SCHEMA,
+)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "itqan_rijal_sample.json"
+
+
+def _output(outputs: list[Path], stem: str) -> Path:
+    """Pick the staging file with the given stem from a parser's output list."""
+    return next(p for p in outputs if p.name == f"{stem}.parquet")
 
 
 @pytest.fixture
@@ -120,9 +133,14 @@ class TestRunOverFixture:
         staging = tmp_path / "staging"
         staging.mkdir()
         out = itqan.run(raw_dir, staging)
-        assert out.name == "narrators_bio_itqan.parquet"
+        # run() now emits bios + edges + aliases.
+        assert {p.name for p in out} == {
+            "narrators_bio_itqan.parquet",
+            "network_edges_itqan.parquet",
+            "narrator_aliases_itqan.parquet",
+        }
 
-        table = pq.read_table(out)
+        table = pq.read_table(_output(out, "narrators_bio_itqan"))
         assert table.schema.equals(NARRATOR_BIO_SCHEMA)
 
         with FIXTURE.open(encoding="utf-8") as f:
@@ -146,7 +164,114 @@ class TestRunOverFixture:
         staging = tmp_path / "staging"
         staging.mkdir()
         out = itqan.run(raw_dir, staging)
-        table = pq.read_table(out)
+        table = pq.read_table(_output(out, "narrators_bio_itqan"))
         with FIXTURE.open(encoding="utf-8") as f:
             expected = len(json.load(f))
         assert table.num_rows == expected
+
+
+class TestEdgeExtraction:
+    def test_id_list_coerces_ints_and_strs(self) -> None:
+        assert _id_list([2325, 7019]) == ["2325", "7019"]
+        assert _id_list(["1", "2"]) == ["1", "2"]
+        assert _id_list(None) == []
+        assert _id_list([]) == []
+
+    def test_build_edges_orients_student_to_teacher(self) -> None:
+        # P=1 has teacher 2 and student 3 -> edges (1->2) and (3->1).
+        profiles = [
+            ("1", {"full_name": "الف", "teachers": [2], "students": [3]}),
+            ("2", {"full_name": "باء"}),
+            ("3", {"full_name": "جيم"}),
+        ]
+        id_to_name = {"1": "الف", "2": "باء", "3": "جيم"}
+        edges = _build_edges(profiles, id_to_name)
+        pairs = {(e["from_external_id"], e["to_external_id"]) for e in edges}
+        assert pairs == {("1", "2"), ("3", "1")}
+        by_pair = {(e["from_external_id"], e["to_external_id"]): e for e in edges}
+        # from = student, to = teacher; names resolved from the id map.
+        assert by_pair[("1", "2")]["from_narrator_name"] == "الف"
+        assert by_pair[("1", "2")]["to_narrator_name"] == "باء"
+        # rijal edges are not hadith-scoped.
+        assert all(e["hadith_id"] is None for e in edges)
+        assert all(e["source"] == "itqan" for e in edges)
+
+    def test_build_edges_dedups_reciprocal_perspectives(self) -> None:
+        # 1 lists 2 as teacher AND 2 lists 1 as student -> the SAME edge (1->2).
+        profiles = [
+            ("1", {"full_name": "الف", "teachers": [2]}),
+            ("2", {"full_name": "باء", "students": [1]}),
+        ]
+        edges = _build_edges(profiles, {"1": "الف", "2": "باء"})
+        assert len(edges) == 1
+        assert (edges[0]["from_external_id"], edges[0]["to_external_id"]) == ("1", "2")
+
+    def test_build_edges_skips_self_loops(self) -> None:
+        edges = _build_edges([("1", {"full_name": "الف", "teachers": [1]})], {"1": "الف"})
+        assert edges == []
+
+    def test_run_emits_schema_valid_nonempty_edges(self, raw_dir: Path, tmp_path: Path) -> None:
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        out = itqan.run(raw_dir, staging)
+        table = pq.read_table(_output(out, "network_edges_itqan"))
+        assert table.schema.equals(NETWORK_EDGE_SCHEMA)
+        assert table.num_rows > 0
+        rows = table.to_pylist()
+        assert {r["source"] for r in rows} == {"itqan"}
+        # Provenance: both endpoints carry the source profile id.
+        assert all(r["from_external_id"] and r["to_external_id"] for r in rows)
+
+
+class TestAliasExtraction:
+    def test_build_aliases_drops_primary_spelling_and_dups(self) -> None:
+        profile = {
+            "full_name": "سعيد بن سماك",
+            "namings": [
+                "سعيد بن سماك",  # == primary -> dropped
+                "ابن سماك",
+                "ابن سماك",  # duplicate -> collapsed
+                "-",  # placeholder -> dropped
+            ],
+        }
+        rows = _build_aliases([("320", profile)])
+        variants = [r["alias"] for r in rows]
+        assert variants == ["ابن سماك"]
+        assert rows[0]["bio_id"] == "itqan:320"
+        assert rows[0]["source"] == "itqan"
+        assert rows[0]["alias_normalized"]
+
+    def test_build_aliases_keys_to_canonical_name(self) -> None:
+        # canonical_name_ar_normalized must equal the bio's name_ar_normalized so
+        # bio_promote can recompute the same nar: id.
+        from src.utils.arabic import normalize_arabic
+
+        profile = {"full_name": "محمد", "namings": ["أبو القاسم"]}
+        rows = _build_aliases([("5", profile)])
+        assert rows[0]["canonical_name_ar_normalized"] == normalize_arabic("محمد")
+
+    def test_build_aliases_skips_profile_without_name(self) -> None:
+        assert _build_aliases([("9", {"full_name": "-", "namings": ["x"]})]) == []
+
+    def test_run_emits_schema_valid_nonempty_aliases(self, raw_dir: Path, tmp_path: Path) -> None:
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        out = itqan.run(raw_dir, staging)
+        table = pq.read_table(_output(out, "narrator_aliases_itqan"))
+        assert table.schema.equals(NARRATOR_ALIAS_SCHEMA)
+        assert table.num_rows > 0
+        rows = table.to_pylist()
+        assert {r["source"] for r in rows} == {"itqan"}
+        assert all(r["bio_id"].startswith("itqan:") for r in rows)
+
+
+class TestIterProfiles:
+    def test_first_occurrence_wins_across_buckets(self, raw_dir: Path) -> None:
+        # Duplicate the fixture as a second bucket; profile ids must not double.
+        shutil.copy(FIXTURE, raw_dir / "itqan" / "profiles_dup.json")
+        buckets = sorted((raw_dir / "itqan").glob("profiles_*.json"))
+        profiles = _iter_profiles(buckets)
+        with FIXTURE.open(encoding="utf-8") as f:
+            expected = len(json.load(f))
+        assert len(profiles) == expected
+        assert len({pid for pid, _ in profiles}) == expected

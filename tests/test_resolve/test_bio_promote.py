@@ -9,7 +9,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.parse.identity import make_canonical_id
-from src.parse.schemas import NARRATOR_BIO_SCHEMA
+from src.parse.schemas import NARRATOR_ALIAS_SCHEMA, NARRATOR_BIO_SCHEMA
 from src.resolve.bio_promote import promote_bios_to_canonical
 from src.utils.arabic import normalize_arabic
 
@@ -24,6 +24,15 @@ def _write_bios(staging: Path, suffix: str, rows: list[dict[str, Any]]) -> Path:
     arrays = {f.name: [r[f.name] for r in full] for f in NARRATOR_BIO_SCHEMA}
     table = pa.table(arrays, schema=NARRATOR_BIO_SCHEMA)
     path = staging / f"narrators_bio_{suffix}.parquet"
+    pq.write_table(table, path)
+    return path
+
+
+def _write_aliases(staging: Path, suffix: str, rows: list[dict[str, Any]]) -> Path:
+    """Write a narrator_aliases_<suffix>.parquet."""
+    arrays = {f.name: [r[f.name] for r in rows] for f in NARRATOR_ALIAS_SCHEMA}
+    table = pa.table(arrays, schema=NARRATOR_ALIAS_SCHEMA)
+    path = staging / f"narrator_aliases_{suffix}.parquet"
     pq.write_table(table, path)
     return path
 
@@ -61,6 +70,37 @@ def test_promotes_bios_to_canonical_with_nar_ids(tmp_path: Path) -> None:
     assert rec["external_id"] == "320"
     assert rec["source_ids"] == ["itqan:320"]
     assert rec["mention_count"] == 0
+
+
+def test_bio_promote_tags_sect_and_corpus(tmp_path: Path) -> None:
+    """da#103: promoted bios carry source_corpus/_corpora + derived sect_affiliation."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+    name = "فاطمة بنت محمد"
+    _write_bios(
+        staging,
+        "muhaddithat",
+        [
+            {
+                "bio_id": "muhaddithat:1",
+                "source": "muhaddithat",
+                "name_ar": name,
+                "name_ar_normalized": normalize_arabic(name),
+            }
+        ],
+    )
+
+    path = promote_bios_to_canonical(staging, out_dir)
+    assert path is not None
+    rec = pq.read_table(path).to_pylist()[0]
+    assert rec["source_corpora"] == ["muhaddithat"]
+    assert rec["source_corpus"] == "muhaddithat"
+    # muhaddithat is cross-tradition (spans both sects, no per-narrator sect in
+    # the source) → a muhaddithat-only narrator is neutral, not a sunni guess
+    # (da#90).
+    assert rec["sect_affiliation"] == "neutral"
 
 
 def test_same_name_dedups_to_one_canonical(tmp_path: Path) -> None:
@@ -152,3 +192,118 @@ def test_no_bio_files_returns_none(tmp_path: Path) -> None:
     out_dir = tmp_path / "curated"
     out_dir.mkdir()
     assert promote_bios_to_canonical(staging, out_dir) is None
+
+
+def test_aliases_attach_to_matching_canonical(tmp_path: Path) -> None:
+    # da#94: name variants emitted by the Itqan parser land on the SAME canonical
+    # narrator the bio produced (keyed by canonical_name_ar_normalized).
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+    name = "سعيد بن سماك"
+    norm = normalize_arabic(name)
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:320",
+                "source": "itqan",
+                "name_ar": name,
+                "name_ar_normalized": norm,
+            }
+        ],
+    )
+    _write_aliases(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:320",
+                "source": "itqan",
+                "canonical_name_ar_normalized": norm,
+                "alias": "ابن سماك",
+                "alias_normalized": normalize_arabic("ابن سماك"),
+            },
+            # A variant whose normalized form equals the primary name is skipped.
+            {
+                "bio_id": "itqan:320",
+                "source": "itqan",
+                "canonical_name_ar_normalized": norm,
+                "alias": name,
+                "alias_normalized": norm,
+            },
+        ],
+    )
+    path = promote_bios_to_canonical(staging, out_dir)
+    assert path is not None
+    rec = next(
+        r for r in pq.read_table(path).to_pylist() if r["canonical_id"] == make_canonical_id(norm)
+    )
+    assert rec["aliases"] == [normalize_arabic("ابن سماك")]
+
+
+def test_alias_without_matching_bio_is_dropped(tmp_path: Path) -> None:
+    # An alias never *creates* a narrator — only a promoted bio anchors one.
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+    _write_bios(
+        staging,
+        "itqan",
+        [{"bio_id": "itqan:1", "source": "itqan", "name_ar": "ج", "name_ar_normalized": "ج"}],
+    )
+    _write_aliases(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:999",
+                "source": "itqan",
+                "canonical_name_ar_normalized": "لا أحد",
+                "alias": "x",
+                "alias_normalized": "x",
+            }
+        ],
+    )
+    path = promote_bios_to_canonical(staging, out_dir)
+    assert path is not None
+    recs = pq.read_table(path).to_pylist()
+    assert len(recs) == 1  # only the bio-anchored narrator
+    assert recs[0]["aliases"] == []
+
+
+def test_alias_source_filter_respected(tmp_path: Path) -> None:
+    # With sources={"itqan"}, a non-itqan alias file must not be merged.
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+    name = "محمد"
+    norm = normalize_arabic(name)
+    _write_bios(
+        staging,
+        "itqan",
+        [{"bio_id": "itqan:7", "source": "itqan", "name_ar": name, "name_ar_normalized": norm}],
+    )
+    _write_aliases(
+        staging,
+        "other",
+        [
+            {
+                "bio_id": "other:7",
+                "source": "other",
+                "canonical_name_ar_normalized": norm,
+                "alias": "أبو القاسم",
+                "alias_normalized": normalize_arabic("أبو القاسم"),
+            }
+        ],
+    )
+    path = promote_bios_to_canonical(staging, out_dir, sources={"itqan"})
+    assert path is not None
+    rec = next(
+        r for r in pq.read_table(path).to_pylist() if r["canonical_id"] == make_canonical_id(norm)
+    )
+    assert rec["aliases"] == []

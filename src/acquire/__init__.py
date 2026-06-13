@@ -3,58 +3,30 @@
 This package contains source-specific downloaders that fetch raw data from
 CSV files, JSON APIs, Kaggle datasets, and Git repositories into ``data/raw/``.
 Shared HTTP/download/clone utilities live in ``base.py``.
+
+The set of sources and their run order is the single registry in
+:mod:`src.adapters` (epic da#81); :func:`run_all` just iterates it, so this module
+and :mod:`src.parse` can no longer drift on which sources exist.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from types import ModuleType
 
-from src.acquire import (
-    fawaz,
-    itqan,
-    lk_corpus,
-    muhaddithat,
-    open_hadith,
-    sunnah_api,
-    sunnah_scraper,
-    thaqalayn,
-)
-from src.acquire.sanadset import download_sanadset
+from src.adapters import SOURCE_REGISTRY
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
-
-# Each entry is (name, module_or_none).
-# Most modules expose ``run(raw_dir)``; sanadset (None) is handled separately.
-SOURCES: list[tuple[str, ModuleType | None]] = [
-    ("lk", lk_corpus),
-    ("sanadset", None),
-    ("thaqalayn", thaqalayn),
-    ("fawaz", fawaz),
-    ("sunnah", sunnah_api),
-    ("sunnah_scraped", sunnah_scraper),
-    ("open_hadith", open_hadith),
-    ("muhaddithat", muhaddithat),
-    ("itqan", itqan),
-]
-
-
-def _acquire_one(name: str, module: ModuleType | None, raw_dir: Path) -> Path | None:
-    """Run a single downloader, returning its output path."""
-    if name == "sanadset":
-        return download_sanadset(raw_dir / "sanadset")
-    assert module is not None
-    return module.run(raw_dir)  # type: ignore[no-any-return]
 
 
 def run_all(raw_dir: Path) -> dict[str, Path | None]:
     """Run all downloaders. Continue on failure. Return dict of source -> path."""
     results: dict[str, Path | None] = {}
-    for name, module in SOURCES:
+    for adapter in SOURCE_REGISTRY:
+        name = adapter.slug
         try:
             logger.info("acquiring", source=name)
-            path = _acquire_one(name, module, raw_dir)
+            path = adapter.acquire(raw_dir)
             results[name] = path
             logger.info("acquired", source=name, path=str(path) if path else "skipped")
         except Exception as exc:  # noqa: BLE001

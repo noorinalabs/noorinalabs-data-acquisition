@@ -120,9 +120,29 @@ class TestProvenanceValidatorCatchesGaps:
         assert any("source" in p and "empty" in p for p in problems)
 
     def test_null_provenance_flagged(self) -> None:
-        table = pa.table({"sect": ["sunni", None], "source_corpus": ["sunnah", "sunnah"]})
+        # A null in a column the schema declares NON-nullable is flagged (the
+        # parser-staging contract: sect/source_corpus are mandatory tags).
+        schema = pa.schema(
+            [
+                pa.field("sect", pa.string(), nullable=False),
+                pa.field("source_corpus", pa.string(), nullable=False),
+            ]
+        )
+        table = pa.table(
+            {"sect": ["sunni", None], "source_corpus": ["sunnah", "sunnah"]}, schema=schema
+        )
         problems = provenance_violations(table)
         assert any("sect" in p and "null" in p for p in problems)
+
+    def test_null_allowed_in_nullable_column(self) -> None:
+        # A resolve-derived NULLABLE provenance column (e.g. narrators_canonical
+        # ``source_corpus``, da#103) permits null — "no attributable corpus" — but
+        # empty-string / wrong-domain are still caught on the values that ARE present.
+        schema = pa.schema([pa.field("source_corpus", pa.string(), nullable=True)])
+        clean = pa.table({"source_corpus": ["sunnah", None]}, schema=schema)
+        assert provenance_violations(clean) == []
+        bad = pa.table({"source_corpus": ["sunna", None]}, schema=schema)
+        assert any("source_corpus" in p and "outside" in p for p in provenance_violations(bad))
 
 
 class TestWriteParquetEnforces:

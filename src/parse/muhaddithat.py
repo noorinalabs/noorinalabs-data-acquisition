@@ -107,8 +107,16 @@ def _parse_narrator_bios(narrators_path: Path) -> tuple[pa.Table, dict[str, str]
         gender = safe_str(gender_values[i])
         bio_text = safe_str(bio_values[i])
 
-        if display_name:
-            id_to_name[ext_id] = display_name
+        # Edges must reference the SAME name the canonical identity is minted
+        # from. ``bio_promote`` keys a narrator on ``make_canonical_id`` over the
+        # *normalized Arabic* name, and the ``STUDIED_UNDER`` loader resolves an
+        # edge endpoint the same way (``normalize_arabic`` → ``make_canonical_id``).
+        # So feed the Arabic name into the edge map; the Latin display name would
+        # mint a different id and every endpoint would miss (da#90). Fall back to
+        # the display name only when no Arabic name is available.
+        edge_name = name_ar or display_name
+        if edge_name:
+            id_to_name[ext_id] = edge_name
 
         rows.append(
             {

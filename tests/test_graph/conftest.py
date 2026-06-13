@@ -75,8 +75,12 @@ def curated_dir(tmp_path: Path) -> Path:
     return d
 
 
-def write_narrators_canonical(staging: Path, rows: list[dict[str, Any]]) -> Path:
-    """Write a narrators_canonical.parquet file."""
+def write_narrators_canonical(curated: Path, rows: list[dict[str, Any]]) -> Path:
+    """Write a narrators_canonical.parquet file into the curated (resolve-output) dir.
+
+    The graph loader reads the canonical narrator master from ``curated_dir``
+    (da#112 artifact-location contract), so tests must place it there.
+    """
     arrays = {
         "canonical_id": pa.array([r.get("canonical_id", "") for r in rows], type=pa.string()),
         "name_ar": pa.array([r.get("name_ar") for r in rows], type=pa.string()),
@@ -93,9 +97,14 @@ def write_narrators_canonical(staging: Path, rows: list[dict[str, Any]]) -> Path
         "source_ids": pa.array([r.get("source_ids", []) for r in rows], type=pa.list_(pa.string())),
         "external_id": pa.array([r.get("external_id") for r in rows], type=pa.string()),
         "mention_count": pa.array([r.get("mention_count") for r in rows], type=pa.int32()),
+        "source_corpus": pa.array([r.get("source_corpus") for r in rows], type=pa.string()),
+        "source_corpora": pa.array(
+            [r.get("source_corpora", []) for r in rows], type=pa.list_(pa.string())
+        ),
+        "sect_affiliation": pa.array([r.get("sect_affiliation") for r in rows], type=pa.string()),
     }
     table = pa.table(arrays, schema=NARRATORS_CANONICAL_SCHEMA)
-    path = staging / "narrators_canonical.parquet"
+    path = curated / "narrators_canonical.parquet"
     pq.write_table(table, path)
     return path
 

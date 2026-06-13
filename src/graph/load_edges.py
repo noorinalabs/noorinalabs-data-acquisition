@@ -19,8 +19,10 @@ from src.parse.identity import (
     collection_node_id,
     grading_node_id,
     hadith_node_id,
+    make_canonical_id,
     narrator_node_id,
 )
+from src.utils.arabic import normalize_arabic
 from src.utils.logging import get_logger
 from src.utils.neo4j_client import Neo4jClient
 
@@ -477,8 +479,29 @@ def _load_parallel_of(
 
 
 # ---------------------------------------------------------------------------
-# 5. STUDIED_UNDER — from network_edges_muhaddithat.parquet
+# 5. STUDIED_UNDER — from the studentship network_edges_*.parquet (muhaddithat, itqan)
 # ---------------------------------------------------------------------------
+
+# NETWORK_EDGE_SCHEMA is reused by producers whose edges mean DIFFERENT relations.
+# muhaddithat + itqan emit teacher↔student (studentship) pairs that ARE
+# STUDIED_UNDER. Others — e.g. `mis`, whose rows are *isnad transmission* pairs (a
+# different relation type AND the opposite direction) — must NOT be globbed in
+# here, or their edges would load as wrong-type, wrong-direction STUDIED_UNDER.
+# This filename allowlist is the cheap, safe interim; the durable fix is an
+# explicit edge-relation field on NETWORK_EDGE_SCHEMA so the loader keys on the
+# data, not on a slug — tracked in da#133.
+_STUDIED_UNDER_SOURCES: frozenset[str] = frozenset({"muhaddithat", "itqan"})
+
+
+def _is_studied_under_file(path: Path) -> bool:
+    """True if a ``network_edges_<slug>.parquet`` belongs to a studentship source.
+
+    Matches the exact slug or a chunked ``<slug>_NNN`` variant, so a future
+    sharded write still resolves but a different corpus (``mis``) never does.
+    """
+    slug = path.stem.removeprefix("network_edges_")
+    return any(slug == src or slug.startswith(f"{src}_") for src in _STUDIED_UNDER_SOURCES)
+
 
 _STUDIED_UNDER_QUERY = """\
 UNWIND $batch AS row
@@ -498,35 +521,66 @@ RETURN row.from_id AS from_id,
 """
 
 
+def _studied_under_endpoint(name: Any, external_id: Any) -> str | None:
+    """Resolve a NETWORK_EDGE endpoint to a canonical Narrator node id.
+
+    Canonical Narrator nodes are keyed ``nar:<uuid5(normalized-name)>``
+    (``identity.make_canonical_id``) — by the narrator's *name*, not by the
+    source's external id. An edge endpoint must therefore be resolved the same
+    way the bio that created the node was: through the name. We key on the
+    narrator name (the value that actually matches a node) and only fall back to
+    prefixing a pre-canonical id when the name is absent. Resolving by
+    ``narrator_node_id(external_id)`` — as an earlier revision did — produced
+    ``nar:<source-id>`` ids that match no canonical node, so every edge was
+    silently dropped as a missing endpoint.
+    """
+    if isinstance(name, str) and name.strip():
+        return make_canonical_id(normalize_arabic(name))
+    if isinstance(external_id, str) and external_id.strip():
+        return narrator_node_id(external_id)
+    return None
+
+
 def _load_studied_under(
     client: Neo4jClient,
     staging_dir: Path,
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> EdgeLoadResult:
-    """Load STUDIED_UNDER edges from network_edges_muhaddithat.parquet.
+    """Load STUDIED_UNDER edges from the studentship ``network_edges_*.parquet``.
 
-    Gracefully skips if file does not exist.
+    Globs ``network_edges_*`` but keeps only the studentship producers
+    (:data:`_STUDIED_UNDER_SOURCES` — muhaddithat, itqan); a NETWORK_EDGE producer
+    whose edges are a different relation (e.g. ``mis`` isnad transmission) is
+    deliberately skipped here (see da#133). Gracefully skips when no such file
+    exists.
     """
-    path = staging_dir / "network_edges_muhaddithat.parquet"
-    if not path.exists():
-        logger.info("studied_under_skipped", reason="file_not_found", path=str(path))
+    edge_files = [
+        p for p in _parquet_files(staging_dir, "network_edges_") if _is_studied_under_file(p)
+    ]
+    if not edge_files:
+        logger.info("studied_under_skipped", reason="file_not_found", staging_dir=str(staging_dir))
         return EdgeLoadResult("STUDIED_UNDER", 0, 0, 0)
 
-    rows = _read_parquet_rows(path)
     batch: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
     skipped = 0
 
-    for row in rows:
-        from_id = row.get("from_external_id") or row.get("from_narrator_name")
-        to_id = row.get("to_external_id") or row.get("to_narrator_name")
-        if not from_id or not to_id:
-            skipped += 1
-            continue
-        # Ensure narrator prefix
-        full_from = narrator_node_id(from_id)
-        full_to = narrator_node_id(to_id)
-        batch.append({"from_id": full_from, "to_id": full_to})
+    for path in edge_files:
+        for row in _read_parquet_rows(path):
+            from_id = _studied_under_endpoint(
+                row.get("from_narrator_name"), row.get("from_external_id")
+            )
+            to_id = _studied_under_endpoint(row.get("to_narrator_name"), row.get("to_external_id"))
+            if not from_id or not to_id:
+                skipped += 1
+                continue
+            # Dedup the same student->teacher pair across source files.
+            key = (from_id, to_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            batch.append({"from_id": from_id, "to_id": to_id})
 
     if not batch:
         logger.info("studied_under_no_edges")

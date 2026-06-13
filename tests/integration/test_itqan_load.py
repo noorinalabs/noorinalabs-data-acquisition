@@ -21,6 +21,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import pytest
 
+from src.graph.load_edges import _load_studied_under
 from src.graph.load_nodes import load_all_nodes
 from src.parse import itqan
 from src.resolve.bio_promote import promote_bios_to_canonical
@@ -41,8 +42,9 @@ class TestItqanNarratorLoadLive:
 
         # parse -> narrators_bio_itqan.parquet
         itqan.run(tmp_path / "raw", staging)
-        # promote -> narrators_canonical.parquet IN staging (where the loader reads it)
-        canonical = promote_bios_to_canonical(staging, staging, sources={"itqan"})
+        # promote -> narrators_canonical.parquet IN curated (where the loader reads
+        # it — da#112 artifact-location contract)
+        canonical = promote_bios_to_canonical(staging, curated, sources={"itqan"})
         assert canonical is not None
         expected = pq.read_table(canonical).num_rows
         assert expected >= 20  # the 24-profile fixture, minus any name collisions
@@ -88,10 +90,52 @@ class TestItqanNarratorLoadLive:
         curated.mkdir()
 
         itqan.run(tmp_path / "raw", staging)
-        promote_bios_to_canonical(staging, staging, sources={"itqan"})
+        promote_bios_to_canonical(staging, curated, sources={"itqan"})
 
         load_all_nodes(neo4j_client, staging, curated, strict=False)
         first = neo4j_client.execute_read("MATCH (n:Narrator) RETURN count(n) AS n")[0]["n"]
         load_all_nodes(neo4j_client, staging, curated, strict=False)
         second = neo4j_client.execute_read("MATCH (n:Narrator) RETURN count(n) AS n")[0]["n"]
         assert first == second  # MERGE on canonical_id — no duplicate nodes
+
+    def test_itqan_chains_load_as_studied_under_edges(self, neo4j_client, tmp_path: Path) -> None:
+        # da#93: teacher/student id lists -> STUDIED_UNDER edges that actually
+        # connect two canonical Narrator nodes in the live graph.
+        raw = tmp_path / "raw" / "itqan"
+        raw.mkdir(parents=True)
+        shutil.copy(FIXTURE, raw / "profiles_sample.json")
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        curated = tmp_path / "curated"
+        curated.mkdir()
+
+        itqan.run(tmp_path / "raw", staging)
+        promote_bios_to_canonical(staging, curated, sources={"itqan"})
+        load_all_nodes(neo4j_client, staging, curated, strict=False)
+
+        result = _load_studied_under(neo4j_client, staging)
+        assert result.created > 0, "at least one Itqan chain must connect two loaded narrators"
+
+        edges = neo4j_client.execute_read(
+            "MATCH (:Narrator)-[r:STUDIED_UNDER]->(:Narrator) RETURN count(r) AS n"
+        )[0]["n"]
+        assert edges == result.created
+
+    def test_itqan_name_variants_load_as_node_aliases(self, neo4j_client, tmp_path: Path) -> None:
+        # da#94: namings -> aliases attached to the canonical Narrator node.
+        raw = tmp_path / "raw" / "itqan"
+        raw.mkdir(parents=True)
+        shutil.copy(FIXTURE, raw / "profiles_sample.json")
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        curated = tmp_path / "curated"
+        curated.mkdir()
+
+        itqan.run(tmp_path / "raw", staging)
+        promote_bios_to_canonical(staging, curated, sources={"itqan"})
+        load_all_nodes(neo4j_client, staging, curated, strict=False)
+
+        with_aliases = neo4j_client.execute_read(
+            "MATCH (n:Narrator) WHERE size(n.aliases) > 0 RETURN count(n) AS n"
+        )[0]["n"]
+        assert with_aliases > 0, "Itqan name variants must land as node aliases"

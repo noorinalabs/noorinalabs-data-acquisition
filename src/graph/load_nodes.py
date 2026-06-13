@@ -4,6 +4,25 @@ Batch UNWIND+MERGE loaders for Narrator, Hadith, Collection, Chain,
 Grading, HistoricalEvent, and Location nodes.  Each loader reads from
 staging/curated Parquet or YAML, validates rows, and merges into Neo4j
 with explicit property SET (no ``SET n += row``) for Phase 4 safety.
+
+Artifact-location contract (resolve -> load)
+--------------------------------------------
+Inputs split by *kind*, not by which loader consumes them:
+
+* **staging dir** — raw, per-source parse outputs and resolve intermediates:
+  ``hadiths_*``, ``collections_*``, ``narrator_mentions_*`` (Chain source),
+  ``parallel_links``. These are the parse/resolve *working* artifacts.
+* **curated dir** — the curated, resolved master tables and hand-maintained
+  reference data: ``narrators_canonical.parquet`` (the canonical narrator
+  master produced by the resolve stage), plus ``historical_events.yaml`` and
+  ``locations.yaml``.
+
+``narrators_canonical.parquet`` is the canonical narrator master *written by
+the resolve stage* — ``disambiguate.run`` and ``bio_promote`` both emit it into
+the resolve ``output_dir``, which ``src/cli.py`` maps to ``DATA_CURATED_DIR``.
+The loader therefore reads it from ``curated_dir`` so writer and reader agree on
+one location (da#112). It is NOT a raw staging intermediate like
+``narrator_mentions_*`` (those stay in staging, read by the Chain loader).
 """
 
 from __future__ import annotations
@@ -81,7 +100,10 @@ SET n.name_ar           = row.name_ar,
     n.aliases           = row.aliases,
     n.external_id       = row.external_id,
     n.source_ids        = row.source_ids,
-    n.mention_count     = row.mention_count
+    n.mention_count     = row.mention_count,
+    n.source_corpus     = row.source_corpus,
+    n.source_corpora    = row.source_corpora,
+    n.sect_affiliation  = row.sect_affiliation
 """
 
 
@@ -93,8 +115,14 @@ def _load_narrators(
     strict: bool = True,
     skip_files: list[str] | None = None,
 ) -> LoadResult:
-    """Load Narrator nodes from narrators_canonical.parquet."""
-    path = staging_dir / "narrators_canonical.parquet"
+    """Load Narrator nodes from narrators_canonical.parquet.
+
+    Reads from ``curated_dir`` — the canonical narrator master is a resolve-stage
+    *output* (written by ``disambiguate.run`` / ``bio_promote`` into the resolve
+    ``output_dir``, which the CLI maps to ``DATA_CURATED_DIR``), not a raw
+    staging intermediate. See the module-level artifact-location contract (da#112).
+    """
+    path = curated_dir / "narrators_canonical.parquet"
     if _should_skip_file(path, staging_dir, skip_files):
         logger.info("narrators_skipped_incremental")
         return LoadResult("Narrator", 0, 0, 0)
@@ -134,6 +162,13 @@ def _load_narrators(
                 # ``MATCH (n:Narrator) WHERE any(s IN n.source_ids WHERE s STARTS WITH 'itqan:')``.
                 "source_ids": _val(row, "source_ids", []),
                 "mention_count": _val(row, "mention_count"),
+                # Sect/corpus provenance (da#103). ``source_corpus`` defaults to ""
+                # so the property is always present even for legacy canonical files
+                # written before these columns existed; ``sect_affiliation`` defaults
+                # to ``unknown`` for the same reason.
+                "source_corpus": _val(row, "source_corpus", ""),
+                "source_corpora": _val(row, "source_corpora", []),
+                "sect_affiliation": _val(row, "sect_affiliation", "unknown"),
             }
         )
 

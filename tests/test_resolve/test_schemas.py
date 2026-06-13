@@ -60,9 +60,15 @@ class TestSampleData:
             "source_ids": pa.array([["bio-1"]], type=pa.list_(pa.string())),
             "external_id": pa.array([None], type=pa.string()),
             "mention_count": pa.array([5], type=pa.int32()),
+            "source_corpus": pa.array(["sunnah"], type=pa.string()),
+            "source_corpora": pa.array([["sunnah", "thaqalayn"]], type=pa.list_(pa.string())),
+            "sect_affiliation": pa.array(["neutral"], type=pa.string()),
         }
         table = pa.table(data, schema=NARRATORS_CANONICAL_SCHEMA)
         assert table.num_rows == 1
+        assert {"source_corpus", "source_corpora", "sect_affiliation"} <= set(
+            NARRATORS_CANONICAL_SCHEMA.names
+        )
 
     def test_ambiguous_narrators(self) -> None:
         data = {

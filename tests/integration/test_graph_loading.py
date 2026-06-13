@@ -38,6 +38,10 @@ SAMPLE_NARRATORS = [
         "source_ids": ["src:1"],
         "external_id": "ext:001",
         "mention_count": 5,
+        # da#103: transmits in both Sunni and Shia chains → neutral affiliation.
+        "source_corpus": "sunnah",
+        "source_corpora": ["sunnah", "thaqalayn"],
+        "sect_affiliation": "neutral",
     },
     {
         "canonical_id": "nar:002",
@@ -209,8 +213,12 @@ SAMPLE_COLLECTIONS = [
 ]
 
 
-def _write_narrators_parquet(staging: Path, rows: list[dict[str, Any]]) -> Path:
-    """Write narrators_canonical.parquet."""
+def _write_narrators_parquet(curated: Path, rows: list[dict[str, Any]]) -> Path:
+    """Write narrators_canonical.parquet into the curated (resolve-output) dir.
+
+    The loader reads the canonical narrator master from the curated dir
+    (da#112 artifact-location contract).
+    """
     arrays = {
         "canonical_id": pa.array([r["canonical_id"] for r in rows], type=pa.string()),
         "name_ar": pa.array([r.get("name_ar") for r in rows], type=pa.string()),
@@ -227,9 +235,14 @@ def _write_narrators_parquet(staging: Path, rows: list[dict[str, Any]]) -> Path:
         "source_ids": pa.array([r.get("source_ids", []) for r in rows], type=pa.list_(pa.string())),
         "external_id": pa.array([r.get("external_id") for r in rows], type=pa.string()),
         "mention_count": pa.array([r.get("mention_count") for r in rows], type=pa.int32()),
+        "source_corpus": pa.array([r.get("source_corpus") for r in rows], type=pa.string()),
+        "source_corpora": pa.array(
+            [r.get("source_corpora", []) for r in rows], type=pa.list_(pa.string())
+        ),
+        "sect_affiliation": pa.array([r.get("sect_affiliation") for r in rows], type=pa.string()),
     }
     table = pa.table(arrays, schema=NARRATORS_CANONICAL_SCHEMA)
-    path = staging / "narrators_canonical.parquet"
+    path = curated / "narrators_canonical.parquet"
     pq.write_table(table, path)
     return path
 
@@ -293,7 +306,7 @@ def _write_staging_data(tmp_path: Path) -> tuple[Path, Path]:
     curated = tmp_path / "curated"
     curated.mkdir()
 
-    _write_narrators_parquet(staging, SAMPLE_NARRATORS)
+    _write_narrators_parquet(curated, SAMPLE_NARRATORS)
     _write_hadiths_parquet(staging, SAMPLE_HADITHS)
     _write_collections_parquet(staging, SAMPLE_COLLECTIONS)
 
@@ -407,6 +420,10 @@ class TestNodeLoading:
         assert props["name_en"] == "Abu Hurayrah"
         assert props["death_year_ah"] == 59
         assert props["generation"] == "sahabi"
+        # da#103 live acceptance: Narrator nodes carry sect/corpus provenance.
+        assert props["source_corpus"] == "sunnah"
+        assert sorted(props["source_corpora"]) == ["sunnah", "thaqalayn"]
+        assert props["sect_affiliation"] == "neutral"
 
     def test_idempotent_reload(self, neo4j_client: Neo4jClient, tmp_path: Path) -> None:
         """Loading twice should not duplicate nodes (MERGE semantics)."""

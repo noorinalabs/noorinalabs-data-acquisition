@@ -115,6 +115,9 @@ muhaddithat
 thaqalayn
 riyadussalihin
 firstlight
+Shatha
+fawazahmed
+mhashim
 
 # --- Itqan rijal narrator source + jarh-wa-ta'dil vocabulary (da#92a — docs/itqan-narrators.md) ---
 itqan

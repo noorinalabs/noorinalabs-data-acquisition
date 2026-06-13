@@ -106,8 +106,10 @@ class TestCrossSourceResolutionLive:
         assert canonical_tbl.num_rows == _EXPECTED_CANONICAL
         assert canonical_tbl.num_rows < _NAIVE_UNION
 
-        # Load the canonical narrators into the live graph.
-        shutil.copy(canonical_path, staging / "narrators_canonical.parquet")
+        # Load the canonical narrators into the live graph. The loader reads
+        # narrators_canonical.parquet from the curated (resolve-output) dir
+        # (da#112 contract), so stage the resolve output into curated.
+        shutil.copy(canonical_path, curated / "narrators_canonical.parquet")
         results = load_all_nodes(neo4j_client, staging, curated, strict=False)
         narrator_result = next(r for r in results if r.node_type == "Narrator")
         assert narrator_result.created == _EXPECTED_CANONICAL
@@ -268,8 +270,9 @@ class TestCrossSourceResolutionLive:
             assert "itqan:malik" not in records[cid]["source_ids"]
 
         # End-to-end: the merged canonical loads as exactly four Narrator nodes,
-        # all nar:-prefixed, into the live graph.
-        shutil.copy(canonical_path, staging / "narrators_canonical.parquet")
+        # all nar:-prefixed, into the live graph. The loader reads the canonical
+        # master from the curated (resolve-output) dir (da#112 contract).
+        shutil.copy(canonical_path, curated / "narrators_canonical.parquet")
         results = load_all_nodes(neo4j_client, staging, curated, strict=False)
         narrator_result = next(r for r in results if r.node_type == "Narrator")
         assert narrator_result.created == 4
