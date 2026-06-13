@@ -6,7 +6,7 @@ graph — `Narrator` + `NARRATED` + `STUDIED_UNDER` + `APPEARS_IN` +
 
 It is the narrator-graph successor to the da#73 [first-light slice](first-light-slice.md),
 which proved only the hadith + `APPEARS_IN` path on one collection. The gap
-#601 found was: staging held 47 Hadith + 47 `APPEARS_IN` and a **zero narrator
+`#601` found was: staging held 47 Hadith + 47 `APPEARS_IN` and a **zero narrator
 graph** (0 `Narrator`, 0 `NARRATED`, 0 `STUDIED_UNDER`) — the W4-retro
 "data-first core shipped" was local/CI/harness only, never reflected on staging.
 
