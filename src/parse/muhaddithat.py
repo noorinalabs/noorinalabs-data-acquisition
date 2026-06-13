@@ -19,7 +19,11 @@ from src.parse.base import (
     safe_str,
     write_parquet,
 )
-from src.parse.schemas import NARRATOR_BIO_SCHEMA, NETWORK_EDGE_SCHEMA
+from src.parse.schemas import (
+    EDGE_RELATION_STUDIED_UNDER,
+    NARRATOR_BIO_SCHEMA,
+    NETWORK_EDGE_SCHEMA,
+)
 from src.utils.arabic import normalize_arabic
 from src.utils.logging import get_logger
 
@@ -156,10 +160,12 @@ def _parse_network_edges(
     hadiths_path: Path,
     id_to_name: dict[str, str],
 ) -> pa.Table:
-    """Parse hadith CSV to extract isnad network edges.
+    """Parse hadith CSV to extract studentship network edges.
 
-    Each hadith row contains a sequence of narrator IDs. Consecutive pairs
-    form directed TRANSMITTED_TO edges: narrator[i] -> narrator[i+1].
+    Each hadith row contains a sequence of narrator IDs. Consecutive pairs form
+    directed STUDIED_UNDER edges (narrator[i] -> narrator[i+1]); each row declares
+    that relation so the graph loader routes it without guessing from the filename
+    (da#133).
     """
     table = _read_csv(hadiths_path)
     headers = [h.lower().strip() for h in table.column_names]
@@ -221,6 +227,7 @@ def _parse_network_edges(
                     "source": SOURCE,
                     "from_external_id": from_id,
                     "to_external_id": to_id,
+                    "relation": EDGE_RELATION_STUDIED_UNDER,
                 }
             )
 

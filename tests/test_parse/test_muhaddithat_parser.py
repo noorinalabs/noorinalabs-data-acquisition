@@ -62,6 +62,9 @@ class TestMuhaddithatParser:
         table = pq.read_table(edge_path)
         assert table.schema == NETWORK_EDGE_SCHEMA
         assert table.num_rows > 0
+        # Studentship edges declare STUDIED_UNDER so the loader routes them by the
+        # field, not the filename (da#133).
+        assert set(table.column("relation").to_pylist()) == {"STUDIED_UNDER"}
 
     def test_edge_count(self, tmp_path: Path) -> None:
         raw_dir = tmp_path / "raw"

@@ -474,3 +474,97 @@ class TestLoadStudiedUnderGlob:
             "from_id": make_canonical_id(normalize_arabic("أ")),
             "to_id": make_canonical_id(normalize_arabic("ب")),
         } in batch
+
+
+class TestStudiedUnderRelationRouting:
+    """da#133: the loader routes by the declared ``relation`` field, not the
+    filename. The filename allowlist only survives as the default for legacy
+    relation-less rows (covered by :class:`TestLoadStudiedUnderGlob`)."""
+
+    def test_relation_field_includes_non_allowlisted_source(self, staging_dir: Path) -> None:
+        """A NETWORK_EDGE file whose slug is NOT in the studentship allowlist still
+        loads when its rows DECLARE STUDIED_UNDER — proving routing keys on the
+        field, not the filename, so a new studentship source needs no allowlist
+        edit."""
+        _write_network_edges(
+            staging_dir,
+            "newsource",  # deliberately not muhaddithat/itqan
+            [
+                {
+                    "from_narrator_name": "أ",
+                    "to_narrator_name": "ب",
+                    "source": "newsource",
+                    "from_external_id": "1",
+                    "to_external_id": "2",
+                    "relation": "STUDIED_UNDER",
+                }
+            ],
+        )
+        client = MockNeo4jClient()
+        client.set_read_results([{"from_exists": True, "to_exists": True}])
+        result = _load_studied_under(client, staging_dir)
+        assert result.created == 1
+
+    def test_transmitted_to_relation_excluded_despite_studentship_filename(
+        self, staging_dir: Path
+    ) -> None:
+        """A row that DECLARES TRANSMITTED_TO is kept off STUDIED_UNDER even when it
+        lives in an allowlisted (``muhaddithat``) file — the explicit relation
+        overrides the filename so an isnad-transmission row can never be
+        mislabeled."""
+        _write_network_edges(
+            staging_dir,
+            "muhaddithat",
+            [
+                {
+                    "from_narrator_name": "X",
+                    "to_narrator_name": "Y",
+                    "source": "muhaddithat",
+                    "from_external_id": "1",
+                    "to_external_id": "2",
+                    "relation": "TRANSMITTED_TO",
+                }
+            ],
+        )
+        client = MockNeo4jClient()
+        result = _load_studied_under(client, staging_dir)
+        assert result.created == 0  # the transmission row is not loaded as STUDIED_UNDER
+
+    def test_explicit_relation_routes_mixed_file(self, staging_dir: Path) -> None:
+        """Within one file, only the STUDIED_UNDER-declaring row loads; the
+        TRANSMITTED_TO-declaring row is skipped."""
+        _write_network_edges(
+            staging_dir,
+            "mis",  # not allowlisted; both rows carry explicit relations
+            [
+                {
+                    "from_narrator_name": "أ",
+                    "to_narrator_name": "ب",
+                    "source": "mis",
+                    "from_external_id": "1",
+                    "to_external_id": "2",
+                    "relation": "STUDIED_UNDER",
+                },
+                {
+                    "from_narrator_name": "X",
+                    "to_narrator_name": "Y",
+                    "source": "mis",
+                    "from_external_id": "3",
+                    "to_external_id": "4",
+                    "relation": "TRANSMITTED_TO",
+                },
+            ],
+        )
+        client = MockNeo4jClient()
+        client.set_read_results([{"from_exists": True, "to_exists": True}])
+        result = _load_studied_under(client, staging_dir)
+        assert result.created == 1
+        batch = [b for q, b in client.calls if "MERGE" in q and isinstance(b, list)][-1]
+        assert {
+            "from_id": make_canonical_id(normalize_arabic("أ")),
+            "to_id": make_canonical_id(normalize_arabic("ب")),
+        } in batch
+        assert {
+            "from_id": make_canonical_id(normalize_arabic("X")),
+            "to_id": make_canonical_id(normalize_arabic("Y")),
+        } not in batch

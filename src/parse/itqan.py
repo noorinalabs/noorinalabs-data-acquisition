@@ -41,6 +41,7 @@ import pyarrow as pa
 
 from src.parse.base import safe_str, write_parquet
 from src.parse.schemas import (
+    EDGE_RELATION_STUDIED_UNDER,
     NARRATOR_ALIAS_SCHEMA,
     NARRATOR_BIO_SCHEMA,
     NETWORK_EDGE_SCHEMA,
@@ -239,6 +240,7 @@ def _build_edges(
                 "source": SOURCE,
                 "from_external_id": student_id,
                 "to_external_id": teacher_id,
+                "relation": EDGE_RELATION_STUDIED_UNDER,
             }
         )
 
