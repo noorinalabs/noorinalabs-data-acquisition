@@ -19,7 +19,10 @@ acquire -> parse -> resolve.run_all -> graph.load_all -> verify
 ## The produce step (reproducible)
 
 The default source set is **bounded but REAL** (not toy fixtures), so the whole
-produce → load → verify path runs locally in ~10 min:
+produce → load → verify path runs locally end-to-end (the fuzzy-cluster step
+over the full ~47k `lk` narrators is the long pole — several minutes, longer
+under CPU contention; it is the da#118 recall pass and does not affect load
+correctness):
 
 | Source        | Sect       | What it contributes |
 |---------------|------------|---------------------|
