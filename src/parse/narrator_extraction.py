@@ -20,8 +20,10 @@ _EN_DELIMITERS: re.Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 
-# Trailing punctuation to strip from extracted names.
-_TRAILING_PUNCT_RE: re.Pattern[str] = re.compile(r"[.,;:!?()]+$")
+# Trailing punctuation to strip from extracted names. Includes the Arabic comma
+# (، U+060C) and semicolon (؛ U+061B), which routinely terminate a narrator span
+# in voweled isnads (da#146) and would otherwise pollute the exact-match key.
+_TRAILING_PUNCT_RE: re.Pattern[str] = re.compile(r"[.,;:!?()،؛\s]+$")
 
 
 @dataclass(frozen=True)

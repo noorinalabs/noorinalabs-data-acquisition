@@ -20,17 +20,28 @@ Two output files (both tagged ``sect=sunni`` / ``source_corpus=mis``):
 
 Input shape
 -----------
-Two Mendeley workbooks (``.xlsx``; ``.csv`` exports are also accepted for tests):
+Mendeley workbooks (``.xlsx``; ``.csv`` exports are also accepted for tests). The
+current dataset (DOI ``10.17632/gzprcr93zn.2``) ships a **three-file graph
+export** — the parser uses two of them:
 
-* **CoreInfo** — one row per hadith: a hadith number, an (optional) book number,
-  the matn text, and an (optional) narrator-sequence string.
-* **DetailsInfo (Sanad/Narrators)** — the per-position detail the chains are
-  walked from. Two layouts are supported:
-    - *sequence layout* (primary): ``(hadith, isnad/sanad, position, narrator)``
-      — grouped by ``(hadith, isnad)`` and walked into consecutive-pair edges, so
-      each sanad of a hadith becomes its own chain;
-    - *edge layout*: explicit ``(from_narrator, to_narrator[, hadith][, isnad])``
-      rows — each row is already one edge.
+* **HadithContent** (``1_Hadith_SahihMuslim_HadithContent.xlsx``) — one row per
+  hadith: ``HadithNo``, ``BookNo``, the matn (``HadithText_Mushakkal`` /
+  ``…_GhairMushakkal``), and per-hadith ``SanadCount``. This is the "core" file.
+* **Isnad=Edges** (``3_Hadith_SahihMuslim_Isnad=Edges for Graph.xlsx``, sheet
+  ``2-Relationship``) — one row per **edge**: a ``(BookNo, HadithNo, SanadNo)``
+  key plus ``sourceNarrator{ID,NameEn}`` → ``targetNarrator{ID,NameEn}``. Each
+  row is already one directed transmission edge; ``SanadNo`` discriminates the
+  parallel asanid, so the multi-isnad multiplicity survives row-for-row.
+* The third file (``2_…Narrators=Nodes for Graph.xlsx``) is a narrator *node*
+  list (id ↔ name) and is **not** consumed for staging — the edge file carries
+  the narrator names inline. The detail-file selector deliberately resolves to
+  the *Edges* workbook even though the *Nodes* filename also contains
+  "narrator".
+
+An older two-file layout (``CoreInfo`` + ``DetailsInfo_Sanad_Narrators`` in
+either a per-position *sequence* layout or an explicit *edge* layout) is still
+accepted — its filename tokens and column candidates are retained below so both
+the legacy and current dataset shapes parse.
 
 Column names are matched case/spacing/underscore-insensitively (the upstream
 spreadsheets are not perfectly normalized), with documented candidate sets.
@@ -62,7 +73,19 @@ COLLECTION_SLUG = "sahih_muslim"
 # --- column-name candidate sets (matched on the alnum-normalized header) -------
 _HADITH_NO_KEYS = ("hadithno", "hadithnumber", "hadithid", "hadith", "serialno", "sno", "no", "id")
 _BOOK_KEYS = ("bookno", "booknumber", "book", "bookname", "kitab")
-_MATN_KEYS = ("matn", "matntext", "matnarabic", "hadithtext", "text", "arabictext", "matnar")
+_MATN_KEYS = (
+    # current dataset (vocalized preferred, then un-vocalized)
+    "hadithtextmushakkal",
+    "hadithtextghairmushakkal",
+    # legacy / generic
+    "matn",
+    "matntext",
+    "matnarabic",
+    "hadithtext",
+    "text",
+    "arabictext",
+    "matnar",
+)
 _ISNAD_TEXT_KEYS = ("narratorsequence", "isnadtext", "sanadtext", "chain", "narrators")
 
 _SANAD_KEYS = (
@@ -100,6 +123,10 @@ _NARRATOR_NAME_KEYS = (
 )
 _NARRATOR_ID_KEYS = ("narratorid", "narratorno", "nid", "rawiid", "rawino", "rawi")
 _FROM_KEYS = (
+    # current dataset: explicit source/target narrator NAME columns
+    "sourcenarratornameen",
+    "sourcenarratorname",
+    # legacy / generic
     "fromnarrator",
     "sourcenarrator",
     "from",
@@ -108,14 +135,34 @@ _FROM_KEYS = (
     "teacher",
     "fromname",
 )
-_TO_KEYS = ("tonarrator", "targetnarrator", "to", "target", "successor", "student", "toname")
+_TO_KEYS = (
+    "targetnarratornameen",
+    "targetnarratorname",
+    "tonarrator",
+    "targetnarrator",
+    "to",
+    "target",
+    "successor",
+    "student",
+    "toname",
+)
+# External narrator-id columns for the explicit edge layout — kept distinct from
+# the name keys so the canonical ``from``/``to`` stays a name while the stable
+# numeric id flows into ``{from,to}_external_id`` for downstream disambiguation.
+_FROM_ID_KEYS = ("sourcenarratorid", "fromnarratorid", "fromid", "sourceid")
+_TO_ID_KEYS = ("targetnarratorid", "tonarratorid", "toid", "targetid")
 
 # Filename tokens (matched case-insensitively, in priority order) that identify
 # each workbook. CoreInfo never contains a DetailsInfo token and vice versa, so
 # the two selections never collide.
 _DATA_SUFFIXES = (".xlsx", ".xls", ".csv")
-_CORE_TOKENS = ("coreinfo", "core")
-_DETAIL_TOKENS = ("detailsinfo", "sanad", "narrator", "details")
+# Current dataset: core = "…HadithContent…"; detail = "…Isnad=Edges…". Legacy:
+# core = "…CoreInfo…"; detail = "…DetailsInfo_Sanad_Narrators…". The detail
+# tokens put "edges"/"isnad" ahead of "narrator" so the current file set resolves
+# to the *Edges* workbook and never to the *Narrators=Nodes* node list (which
+# also contains "narrator").
+_CORE_TOKENS = ("coreinfo", "hadithcontent", "content", "core")
+_DETAIL_TOKENS = ("isnadedges", "edges", "isnad", "detailsinfo", "sanad", "narrator", "details")
 
 
 def _norm_header(value: Any) -> str:
@@ -356,6 +403,8 @@ def _parse_edges_explicit(
     """
     hadith_col = _pick(keys, _HADITH_NO_KEYS)
     sanad_col = _pick(keys, _SANAD_KEYS)
+    from_id_col = _pick(keys, _FROM_ID_KEYS)
+    to_id_col = _pick(keys, _TO_ID_KEYS)
 
     edges: list[dict[str, str | None]] = []
     seen_isnads: dict[str, set[str]] = defaultdict(set)
@@ -367,7 +416,14 @@ def _parse_edges_explicit(
         if hadith_no:
             sanad_no = (safe_str(row.get(sanad_col)) if sanad_col else None) or str(idx)
             seen_isnads[hadith_no].add(sanad_no)
-        _emit_edge(edges, safe_str(row.get(from_col)), safe_str(row.get(to_col)), hadith_id)
+        _emit_edge(
+            edges,
+            safe_str(row.get(from_col)),
+            safe_str(row.get(to_col)),
+            hadith_id,
+            from_id=safe_str(row.get(from_id_col)) if from_id_col else None,
+            to_id=safe_str(row.get(to_id_col)) if to_id_col else None,
+        )
 
     isnad_counts = {hadith_no: len(sanads) for hadith_no, sanads in seen_isnads.items()}
     return edges, isnad_counts

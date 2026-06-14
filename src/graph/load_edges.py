@@ -120,10 +120,27 @@ def _build_chain_pairs(
     resolved = [m for m in sorted_mentions if m.get("canonical_narrator_id")]
     pairs: list[dict[str, Any]] = []
     for i in range(len(resolved) - 1):
+        from_id = resolved[i]["canonical_narrator_id"]
+        to_id = resolved[i + 1]["canonical_narrator_id"]
+        # Drop self-loops: two ADJACENT mentions that resolve to the same
+        # canonical narrator (a repeated narrator in the raw chain, or two
+        # mentions the disambiguator collapsed onto one node) would otherwise
+        # MERGE a TRANSMITTED_TO edge from a narrator to itself (da#148 — 8 live
+        # self-loops). The network-edge producers already guard this
+        # (``muhaddithat._parse_network_edges`` skips ``from_id == to_id``,
+        # ``mis`` skips ``from_name == to_name``); applying it on the
+        # chain-derived path keeps a re-load self-loop-free everywhere.
+        if from_id == to_id:
+            logger.debug(
+                "transmitted_to_self_loop_skipped",
+                narrator_id=from_id,
+                hadith_id=resolved[i].get("hadith_id", ""),
+            )
+            continue
         pairs.append(
             {
-                "from_id": resolved[i]["canonical_narrator_id"],
-                "to_id": resolved[i + 1]["canonical_narrator_id"],
+                "from_id": from_id,
+                "to_id": to_id,
                 "position": resolved[i].get("position_in_chain", i),
                 "hadith_id": resolved[i].get("hadith_id", ""),
             }

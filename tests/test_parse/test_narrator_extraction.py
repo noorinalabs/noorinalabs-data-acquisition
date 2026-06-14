@@ -59,6 +59,51 @@ class TestArabicExtraction:
         assert len(spans) >= 1
 
 
+class TestDa146VoweledSegmentation:
+    """Regression tests for da#146: fully-voweled (diacritized) Arabic isnads.
+
+    Real lk-corpus chains are fully voweled (``حَدَّثَنَا ...``). Before da#146 the
+    diacritic-free transmission patterns never matched, so the whole chain
+    collapsed into a single un-segmented "narrator" mention. These tests pin the
+    fixed behaviour: a voweled chain splits into one mention per narrator.
+    """
+
+    # Sahih al-Bukhari hadith 1 isnad — five named narrators in the chain.
+    _BUKHARI_H1_ISNAD = (
+        "حَدَّثَنَا الْحُمَيْدِيُّ عَبْدُاللَّهِ بْنُ الزُّبَيْرِ، قَالَ حَدَّثَنَا "
+        "سُفْيَانُ، قَالَ حَدَّثَنَا يَحْيَى بْنُ سَعِيدٍ الأَنْصَارِيُّ، قَالَ "
+        "أَخْبَرَنِي مُحَمَّدُ بْنُ إِبْرَاهِيمَ التَّيْمِيُّ، أَنَّهُ سَمِعَ "
+        "عَلْقَمَةَ بْنَ وَقَّاصٍ اللَّيْثِيَّ"
+    )
+
+    def test_voweled_chain_does_not_collapse_to_blob(self) -> None:
+        """The whole voweled chain must not become one giant mention."""
+        spans = extract_narrator_mentions(self._BUKHARI_H1_ISNAD, "ar")
+        assert len(spans) >= 4
+        # No single span should swallow the entire chain.
+        assert all(len(s.name) < len(self._BUKHARI_H1_ISNAD) // 2 for s in spans)
+
+    def test_positions_sequential_and_unique(self) -> None:
+        spans = extract_narrator_mentions(self._BUKHARI_H1_ISNAD, "ar")
+        positions = [s.position for s in spans]
+        assert positions == list(range(len(spans)))
+
+    def test_first_narrator_segmented(self) -> None:
+        """The first narrator after ``حدثنا`` is isolated (al-Humaydi)."""
+        spans = extract_narrator_mentions(self._BUKHARI_H1_ISNAD, "ar")
+        # Normalized form of الحميدي عبدالله بن الزبير, comma stripped.
+        assert spans[0].name.startswith("الحميدي")
+        assert "،" not in spans[0].name
+        assert spans[0].transmission_method == "haddathana"
+
+    def test_singular_variant_segments(self) -> None:
+        """``أخبرني`` / ``سمع`` (singular/3rd-person) also split the chain."""
+        spans = extract_narrator_mentions(self._BUKHARI_H1_ISNAD, "ar")
+        methods = {s.transmission_method for s in spans}
+        assert "akhbarani" in methods
+        assert "samia" in methods
+
+
 class TestEdgeCases:
     def test_empty_string(self) -> None:
         assert extract_narrator_mentions("", "en") == []
