@@ -17,6 +17,7 @@ __all__ = [
     "clean_whitespace",
     "is_arabic",
     "extract_transmission_phrases",
+    "contains_transmission_marker",
     "transliterate",
 ]
 
@@ -78,26 +79,75 @@ _TRANSMISSION_TERMS: dict[str, str] = {
     "كتب إلي": "kataba_ilayya",
 }
 
+# Short transmission particles that must be anchored on a word boundary. Unlike
+# the long forms (حدثنا/أخبرنا/…), these one-to-three-letter particles occur as
+# substrings *inside* real narrator names — عن in عَنْبَسَة / مَعْن / يَعْنِي,
+# قال in مَقَالَة — so an un-anchored match over-segments a genuine name into a
+# spurious mention (da#155 / da#154). The long forms are distinctive enough that
+# substring collisions don't occur in practice, so they stay un-anchored.
+_SHORT_PARTICLES: frozenset[str] = frozenset({"عن", "قال", "سمع"})
 
-def _compile_diacritic_tolerant(term: str) -> re.Pattern[str]:
+# Arabic letters + combining marks + tatweel, as a regex class body (no
+# brackets). Used to build the word-boundary lookarounds below: a particle is a
+# standalone transmission term only when it is NOT flanked by another Arabic
+# letter or diacritic. Punctuation (، ؛ …) and whitespace fall outside this
+# class, so they correctly count as boundaries. Excludes Arabic-Indic digits.
+_AR_LETTER_OR_MARK: str = "\u0621-\u063a\u0640-\u065f\u0670-\u06d3"
+
+# Fixed-width (single-char) lookbehind/lookahead asserting a non-letter boundary.
+_LB: str = rf"(?<![{_AR_LETTER_OR_MARK}])"
+_LA: str = rf"(?![{_AR_LETTER_OR_MARK}])"
+
+# Normalization equivalence classes mirroring :func:`normalize_arabic`. A term
+# written with one orthographic variant (e.g. أخبرنا with hamza-alif U+0623)
+# must also match the bare-alif form found throughout the real corpus (اخبرنا
+# U+0627) — the production isnads mix both, and matching only the hamza form
+# left whole sub-chains un-split into blobs (da#158).
+_ALIF_CLASS: str = "اأإآٱ"  # ا أ إ آ ٱ
+_HAMZA_CLASS: str = "ءؤئ"  # ء ؤ ئ
+_TAA_CLASS: str = "ةه"  # ة ه
+_NORM_EQUIV: dict[str, str] = {}
+for _cls in (_ALIF_CLASS, _HAMZA_CLASS, _TAA_CLASS):
+    for _ch in _cls:
+        _NORM_EQUIV[_ch] = _cls
+
+
+def _variant_class(ch: str) -> str:
+    """Return a regex fragment matching *ch* and its normalization-equivalents."""
+    equiv = _NORM_EQUIV.get(ch)
+    if equiv is not None:
+        return "[" + equiv + "]"
+    return re.escape(ch)
+
+
+def _compile_diacritic_tolerant(term: str, *, anchor: bool) -> re.Pattern[str]:
     """Compile *term* into a regex that tolerates interleaved diacritics.
 
-    Each base letter is followed by an optional diacritics/tatweel run, and
-    inter-word whitespace is matched flexibly. The compiled pattern matches the
-    fully-voweled form found in real isnads while preserving match positions in
-    the original (un-normalized) text.
+    Each base letter is expanded to a normalization-equivalence class (so alif
+    and hamza/taa variants all match) followed by an optional diacritics/tatweel
+    run, and inter-word whitespace is matched flexibly. The compiled pattern
+    matches the fully-voweled, orthographically-variant forms found in real
+    isnads while preserving match positions in the original (un-normalized) text.
+
+    When *anchor* is true the pattern is wrapped in non-letter-boundary
+    lookarounds so a short particle (عن/قال/سمع) only matches as a standalone
+    transmission term, never as a substring of a longer name (da#155).
     """
     parts: list[str] = []
     for ch in term:
         if ch.isspace():
             parts.append(r"\s+")
         else:
-            parts.append(re.escape(ch) + _OPT_DIAC)
-    return re.compile("".join(parts))
+            parts.append(_variant_class(ch) + _OPT_DIAC)
+    body = "".join(parts)
+    if anchor:
+        body = _LB + body + _LA
+    return re.compile(body)
 
 
 TRANSMISSION_PATTERNS: dict[re.Pattern[str], str] = {
-    _compile_diacritic_tolerant(term): label for term, label in _TRANSMISSION_TERMS.items()
+    _compile_diacritic_tolerant(term, anchor=term in _SHORT_PARTICLES): label
+    for term, label in _TRANSMISSION_TERMS.items()
 }
 
 # ---------------------------------------------------------------------------
@@ -420,3 +470,28 @@ def transliterate(text: str) -> str:
         else:
             out.append(latin)
     return " ".join(out).strip()
+
+
+# Independent, normalization-anchored detector for whether a string carries a
+# transmission marker at all. It runs on :func:`normalize_arabic` output and
+# anchors *every* term on a non-letter boundary, so it neither misses an
+# orthographic variant nor false-matches a marker buried inside a longer name.
+# Built off the canonical normalizer (not the hand-built char-classes used by
+# TRANSMISSION_PATTERNS) so it stays a valid fail-loud signal even if those
+# pattern classes ever drift — see src.parse.narrator_extraction._extract_arabic.
+_NORM_MARKER_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(_LB + re.escape(normalize_arabic(term)) + _LA) for term in _TRANSMISSION_TERMS
+)
+
+
+def contains_transmission_marker(text: str) -> bool:
+    """Return True if *text* contains a transmission term as a bounded word.
+
+    Used by the Arabic narrator extractor to *fail loud* — a chain that carries a
+    transmission marker but yields no segmentable phrases means the segmenter
+    failed, and the whole chain must never be minted as a single "narrator" blob
+    (da#158). Matching is diacritic/variant-insensitive (via normalization) and
+    word-boundary anchored (so ``عن`` in ``عنبسة`` does not count).
+    """
+    normalized = normalize_arabic(text)
+    return any(pattern.search(normalized) for pattern in _NORM_MARKER_PATTERNS)

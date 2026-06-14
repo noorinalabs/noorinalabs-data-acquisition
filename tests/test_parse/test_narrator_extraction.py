@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from src.parse.narrator_extraction import NarratorSpan, extract_narrator_mentions
+import pytest
+
+from src.parse.narrator_extraction import (
+    IsnadSegmentationError,
+    NarratorSpan,
+    extract_narrator_mentions,
+)
+from src.utils.arabic import contains_transmission_marker
 
 
 class TestNarratorSpanDataclass:
@@ -119,3 +126,121 @@ class TestEdgeCases:
         # Even without keywords, the full text may be returned as a single span
         # depending on splitting behavior — just verify no crash
         assert isinstance(spans, list)
+
+
+class TestDa158ProductionBlobSegmentation:
+    """Regression tests for da#158: ~80% of loaded Narrator nodes were raw isnad
+    blobs because the segmenter failed on production-realistic voweled Arabic.
+
+    The keystone failure was orthographic: real chains mix hamza-alif (أخبرنا)
+    and bare-alif (اخبرنا) transmission verbs, and the bare-alif forms were not
+    matched — so a sub-chain starting with one stayed merged into the previous
+    span as a blob. These fixtures are real-shaped (mixed orthography, voweled),
+    not toy h-1 data (production-fixture standards, main#671).
+    """
+
+    # The exact staging blob cited in da#158 (note bare-alif اخبرنا, U+0627).
+    _STAGING_BLOB = (
+        "حدثنا علي بن عبد الله، اخبرنا سفيان، حدثنا شبيب بن غرقده، قال سمعت الحى، يحدثون عن عروه،"
+    )
+
+    # Fully-voweled Bukhari-style chain mixing hamza-alif and bare-alif verbs.
+    _VOWELED_MIXED = "حَدَّثَنَا عَلِيُّ بْنُ عَبْدِ اللَّهِ، اخْبَرَنَا سُفْيَانُ، عَنْ عُرْوَةَ بْنِ الزُّبَيْرِ"
+
+    def test_bare_alif_chain_fully_segmented(self) -> None:
+        """The bare-alif اخبرنا must split the chain, not merge into a blob."""
+        spans = extract_narrator_mentions(self._STAGING_BLOB, "ar")
+        # علي / سفيان / شبيب / ... — at least four distinct narrators.
+        assert len(spans) >= 4
+        assert spans[1].name == "سفيان"
+        assert spans[1].transmission_method == "akhbarana"
+
+    def test_no_span_is_a_blob(self) -> None:
+        """Corpus-level sanity invariant: NO produced mention may contain a
+        transmission verb (da#158 asked for ~0%)."""
+        for fixture in (self._STAGING_BLOB, self._VOWELED_MIXED):
+            for span in extract_narrator_mentions(fixture, "ar"):
+                assert not contains_transmission_marker(span.name), span.name
+
+    def test_voweled_mixed_orthography_segments(self) -> None:
+        spans = extract_narrator_mentions(self._VOWELED_MIXED, "ar")
+        methods = {s.transmission_method for s in spans}
+        assert {"haddathana", "akhbarana", "an"} <= methods
+
+    def test_positions_sequential_zero_based(self) -> None:
+        spans = extract_narrator_mentions(self._STAGING_BLOB, "ar")
+        assert [s.position for s in spans] == list(range(len(spans)))
+
+
+class TestDa158FailLoud:
+    """The segmenter must FAIL LOUD rather than mint a whole-chain blob (da#158)."""
+
+    _CHAIN = "حدثنا علي بن عبد الله، اخبرنا سفيان، عن عروه"
+
+    def test_marker_without_phrases_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """If phrase detection regresses to empty but a marker is present, the
+        extractor raises instead of returning the whole chain as one span."""
+        monkeypatch.setattr(
+            "src.parse.narrator_extraction.extract_transmission_phrases",
+            lambda _text: [],
+        )
+        with pytest.raises(IsnadSegmentationError):
+            extract_narrator_mentions(self._CHAIN, "ar")
+
+    def test_bare_name_without_marker_does_not_raise(self) -> None:
+        """A genuine single narrator name (no transmission marker) is fine."""
+        spans = extract_narrator_mentions("عبد الله بن مسلمة القعنبي", "ar")
+        assert len(spans) == 1
+        assert spans[0].transmission_method is None
+
+
+class TestDa155ShortParticleBoundary:
+    """da#155: عن/قال/سمع must not over-segment real names that contain them."""
+
+    @pytest.mark.parametrize(
+        "name",
+        ["عنبسة", "معن", "يعني", "مقالة", "عبد الله بن عنبسة"],
+    )
+    def test_name_with_particle_substring_not_split(self, name: str) -> None:
+        spans = extract_narrator_mentions(name, "ar")
+        # Stays a single narrator — the particle substring does not split it.
+        assert len(spans) == 1
+        # No spurious fragment (e.g. "بسة" from عنبسة).
+        assert "بسة" not in [s.name for s in spans]
+
+    def test_real_particle_in_chain_still_splits(self) -> None:
+        """A standalone عن between two names splits; the عن inside عنبسة does not."""
+        spans = extract_narrator_mentions("حدثنا عنبسة عن عبد الله بن عنبسة", "ar")
+        assert len(spans) == 2
+        assert spans[1].transmission_method == "an"
+        assert "عنبس" in spans[1].name  # the trailing عنبسة survived intact
+
+
+class TestDa154NameBoundary:
+    """da#154: deterministic name-boundary refinement — drop trailing matn /
+    connectives; keep multi-token (kunya/laqab) names joined."""
+
+    def test_english_trailing_report_verb_trimmed(self) -> None:
+        spans = extract_narrator_mentions("Anas b. Malik reported", "en")
+        assert [s.name for s in spans] == ["Anas b. Malik"]
+
+    def test_english_trailing_matn_clause_trimmed(self) -> None:
+        spans = extract_narrator_mentions("Aishah that the Prophet said", "en")
+        assert [s.name for s in spans] == ["Aishah"]
+
+    def test_english_kunya_stays_joined(self) -> None:
+        spans = extract_narrator_mentions("Narrated Abu Hurayra", "en")
+        assert [s.name for s in spans] == ["Abu Hurayra"]
+
+    def test_arabic_trailing_connective_trimmed(self) -> None:
+        # ...التيمي أنه سمع... — أنه must not ride along on the name span.
+        chain = "أخبرني محمد بن إبراهيم التيمي، أنه سمع علقمة"
+        spans = extract_narrator_mentions(chain, "ar")
+        names = [s.name for s in spans]
+        assert "محمد بن ابراهيم التيمي" in names
+        assert all("انه" not in n.split() for n in names)
+
+    def test_arabic_laqab_stays_joined(self) -> None:
+        # Multi-token name with a laqab (al-Ansari) stays a single span.
+        spans = extract_narrator_mentions("حدثنا يحيى بن سعيد الأنصاري", "ar")
+        assert spans[0].name == "يحيى بن سعيد الانصاري"
