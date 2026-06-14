@@ -1,0 +1,25 @@
+{
+  "_README": "Labeled gold set for the da#138 fuzzy-cluster PRECISION harness. Each entry is one canonical narrator record (as the exact-name pass would emit it) with a hand-assigned `gold_person`: records sharing a `gold_person` are the SAME real narrator and SHOULD cluster; distinct `gold_person` values must stay apart. The set deliberately mixes legitimate cross-source variants (recall) with the precision traps that over-merging fuzzy clustering falls into (death-year-distinguished homonyms; the da#138 nasab-reversal pair whose token_set_ratio is a perfect 100). No two DISTINCT-person records share a normalized name — byte-identical names already collapse in the exact-name pass before fuzzy clustering runs, so they are not a fuzzy false-merge. `name_ar` is normalized by the harness via normalize_arabic, exactly as the real producers key make_canonical_id.",
+  "records": [
+    {"name_ar": "محمد بن اسماعيل البخاري", "gold_person": "bukhari", "death_year_ah": 256, "mention_count": 10, "source_corpora": ["itqan"]},
+    {"name_ar": "محمد بن اسماعيل", "gold_person": "bukhari", "death_year_ah": 256, "mention_count": 3, "source_corpora": ["sanadset"]},
+
+    {"name_ar": "احمد بن حنبل الشيباني", "gold_person": "ahmad", "death_year_ah": 241, "mention_count": 8, "source_corpora": ["itqan"]},
+    {"name_ar": "احمد بن حنبل", "gold_person": "ahmad", "death_year_ah": 241, "mention_count": 2, "source_corpora": ["sanadset"]},
+
+    {"name_ar": "مالك بن انس الاصبحي", "gold_person": "malik", "death_year_ah": 179, "mention_count": 6, "source_corpora": ["itqan"]},
+    {"name_ar": "مالك بن انس", "gold_person": "malik", "death_year_ah": 179, "mention_count": 4, "source_corpora": ["thaqalayn"]},
+
+    {"name_ar": "ابو حفص العدوي القرشي", "gold_person": "umar", "aliases": ["عمر بن الخطاب"], "mention_count": 5, "source_corpora": ["itqan"]},
+    {"name_ar": "عمر بن الخطاب", "gold_person": "umar", "mention_count": 7, "source_corpora": ["sanadset"]},
+
+    {"name_ar": "سفيان الثوري", "gold_person": "thawri", "death_year_ah": 161, "mention_count": 4, "source_corpora": ["itqan"]},
+    {"name_ar": "سفيان بن عيينة", "gold_person": "uyayna", "death_year_ah": 198, "mention_count": 3, "source_corpora": ["sanadset"]},
+
+    {"name_ar": "يحيى بن سعيد القطان", "gold_person": "yahya_qattan", "death_year_ah": 198, "mention_count": 3, "source_corpora": ["itqan"]},
+    {"name_ar": "يحيى بن سعيد الانصاري", "gold_person": "yahya_ansari", "death_year_ah": 143, "mention_count": 2, "source_corpora": ["sanadset"]},
+
+    {"name_ar": "محمد بن عبد الله", "gold_person": "muhammad_b_abdullah", "mention_count": 2, "source_corpora": ["itqan"]},
+    {"name_ar": "عبد الله بن محمد", "gold_person": "abdullah_b_muhammad", "mention_count": 2, "source_corpora": ["thaqalayn"]}
+  ]
+}

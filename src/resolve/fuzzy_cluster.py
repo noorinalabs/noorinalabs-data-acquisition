@@ -33,6 +33,17 @@ Precision guards (against over-merging distinct same-named narrators)
   disagree by more than :data:`_DEATH_YEAR_TOLERANCE`, the merge is blocked even
   on a perfect name match — two scholars a century apart are not one person.
 * A **gender guard**: two records with explicit, differing ``gender`` never merge.
+* A **token-order guard** (da#138): ``token_set_ratio`` is order-*insensitive*, so
+  a pure nasab reversal of two **different** people — ``محمد بن عبد الله``
+  (Muḥammad son of ʿAbdullāh) ↔ ``عبد الله بن محمد`` (ʿAbdullāh son of Muḥammad) —
+  scores a perfect 100 and, with no death-year/gender to corroborate, would
+  falsely merge. The guard requires the shared significant tokens to appear in the
+  **same relative order** in the two matched spellings. A genuine variant only
+  *adds or drops* tokens (kunya/nisba/nasab expansion), which preserves the order
+  of the shared tokens, so recall is untouched; only a reordering is rejected.
+  This precision defect — and the validation harness that quantified its
+  false-merge rate — is the da#138 tech-debt work; raising the numeric threshold
+  cannot fix a perfect-100 reversal score and would only cost recall.
 
 Identity & ordering invariants
 -------------------------------
@@ -162,22 +173,45 @@ def _significant_tokens(keys: list[str]) -> set[str]:
     return tokens
 
 
-def _name_similarity(keys_a: list[str], keys_b: list[str]) -> float:
-    """Best token_set_ratio across the cross product of two records' match keys.
+def _significant_token_sequence(key: str) -> list[str]:
+    """Significant (non-connector) tokens of a single name string, in name order.
 
-    Taking the max over names + aliases means a record matches if *any* of its
-    spellings (including a da#94 variant) is a strong token-set match for any of
-    the other's — exactly the cross-source-variant recall this pass targets.
+    The ordered counterpart of :func:`_significant_tokens` — the token-order guard
+    compares relative order, so it needs the sequence, not the set.
     """
-    best = 0.0
+    return [tok for tok in key.split() if len(tok) >= 2 and tok not in _CONNECTOR_TOKENS]
+
+
+def _token_order_consistent(a: str, b: str) -> bool:
+    """True when the tokens shared by names ``a`` and ``b`` keep the same order.
+
+    A genuine variant only adds/removes tokens, so the shared tokens stay in the
+    same relative order; a nasab reversal of two different people permutes them.
+    Fewer than two shared significant tokens is left to :data:`_MIN_SHARED_TOKENS`
+    — this guard only adjudicates the high-overlap case a reversal can exploit.
+    """
+    seq_a = _significant_token_sequence(a)
+    seq_b = _significant_token_sequence(b)
+    shared = set(seq_a) & set(seq_b)
+    if len(shared) < 2:
+        return True
+    return [t for t in seq_a if t in shared] == [t for t in seq_b if t in shared]
+
+
+def _name_match(keys_a: list[str], keys_b: list[str], *, threshold: float) -> bool:
+    """True when some key pair is a strong AND token-order-consistent match.
+
+    A pair counts only if its ``token_set_ratio`` clears ``threshold`` *and* it
+    survives the da#138 token-order guard. Taking the best over the cross product
+    of each record's match keys (its name + da#94 aliases) keeps the alias-driven
+    recall — a record matches if *any* of its spellings is both a strong and
+    order-consistent match for any of the other's.
+    """
     for a in keys_a:
         for b in keys_b:
-            score = fuzz.token_set_ratio(a, b)
-            if score > best:
-                best = score
-                if best >= 100.0:
-                    return best
-    return best
+            if fuzz.token_set_ratio(a, b) >= threshold and _token_order_consistent(a, b):
+                return True
+    return False
 
 
 def _death_years_conflict(a: dict[str, Any], b: dict[str, Any]) -> bool:
@@ -204,15 +238,17 @@ def _can_merge(a: dict[str, Any], b: dict[str, Any], *, threshold: float) -> boo
 
     A merge requires ALL of: no death-year conflict, no gender conflict, at least
     :data:`_MIN_SHARED_TOKENS` shared significant name tokens (so a bare
-    single-token subset never clusters), and a name similarity at/above
-    ``threshold``. Pairwise and symmetric — the cluster post-validation relies on
-    that to refuse any cluster harbouring a guard-conflicting pair.
+    single-token subset never clusters), and a matched key pair that clears
+    ``threshold`` *and* is token-order-consistent (so a nasab reversal of two
+    different people does not merge — da#138). Pairwise and symmetric — the cluster
+    post-validation relies on that to refuse any cluster harbouring a
+    guard-conflicting pair.
     """
     if _death_years_conflict(a, b) or _genders_conflict(a, b):
         return False
     if _shared_significant_token_count(a, b) < _MIN_SHARED_TOKENS:
         return False
-    return _name_similarity(_match_keys(a), _match_keys(b)) >= threshold
+    return _name_match(_match_keys(a), _match_keys(b), threshold=threshold)
 
 
 # ---------------------------------------------------------------------------
