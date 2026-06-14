@@ -6,6 +6,7 @@ import pytest
 
 from src.utils.arabic import (
     clean_whitespace,
+    contains_transmission_marker,
     extract_transmission_phrases,
     is_arabic,
     normalize_alif,
@@ -332,3 +333,86 @@ class TestTransliterate:
 
     def test_already_latin_passthrough(self) -> None:
         assert transliterate("Anas") == "Anas"
+
+
+# ---------------------------------------------------------------------------
+# Orthographic-variant tolerance (da#158) — patterns must match bare-alif forms
+# ---------------------------------------------------------------------------
+
+
+class TestTransmissionVariantTolerance:
+    """The real corpus mixes hamza-alif (أخبرنا) and bare-alif (اخبرنا) forms.
+
+    The transmission patterns are written with the classical hamza forms but
+    must also match the bare-alif spellings, otherwise sub-chains starting with
+    a bare-alif verb stay merged into the previous span as a blob (da#158).
+    """
+
+    def test_bare_alif_akhbarana_matches(self) -> None:
+        # اخبرنا (bare alif U+0627), not أخبرنا (hamza-alif U+0623).
+        labels = [label for _, _, label in extract_transmission_phrases("اخبرنا سفيان")]
+        assert "akhbarana" in labels
+
+    def test_bare_alif_anbaana_matches(self) -> None:
+        labels = [label for _, _, label in extract_transmission_phrases("انبانا فلان")]
+        assert "anba_ana" in labels
+
+    def test_voweled_bare_alif_matches(self) -> None:
+        # Voweled bare-alif form: اِخْبَرَنَا-style with diacritics on bare alif.
+        text = "اخْبَرَنَا سُفْيَانُ"
+        labels = [label for _, _, label in extract_transmission_phrases(text)]
+        assert "akhbarana" in labels
+
+
+# ---------------------------------------------------------------------------
+# Short-particle word-boundary anchoring (da#155)
+# ---------------------------------------------------------------------------
+
+
+class TestShortParticleBoundary:
+    """عن / قال / سمع must only match as standalone particles, never mid-word."""
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "عنبسة",  # عن at offset 0, followed by a letter
+            "معن",  # عن after a letter
+            "يعني",  # عن inside the word
+            "مقالة",  # قال inside the word
+        ],
+    )
+    def test_no_mid_word_particle_match(self, name: str) -> None:
+        assert extract_transmission_phrases(name) == []
+
+    def test_standalone_particle_still_matches(self) -> None:
+        labels = [label for _, _, label in extract_transmission_phrases("فلان عن فلان")]
+        assert "an" in labels
+
+    def test_only_real_particle_matches_in_mixed(self) -> None:
+        # The real عن (between the two names) matches; the عن inside عنبسة does not.
+        results = extract_transmission_phrases("عنبسة عن عبد الله")
+        assert [label for _, _, label in results] == ["an"]
+
+
+# ---------------------------------------------------------------------------
+# contains_transmission_marker — fail-loud signal (da#158)
+# ---------------------------------------------------------------------------
+
+
+class TestContainsTransmissionMarker:
+    def test_detects_voweled_long_form(self) -> None:
+        assert contains_transmission_marker("حَدَّثَنَا سُفْيَانُ") is True
+
+    def test_detects_bare_alif_variant(self) -> None:
+        assert contains_transmission_marker("اخبرنا سفيان") is True
+
+    def test_ignores_particle_inside_name(self) -> None:
+        # عنبسة / مقالة contain عن / قال as substrings but carry no real marker.
+        assert contains_transmission_marker("عنبسة") is False
+        assert contains_transmission_marker("مقالة") is False
+
+    def test_plain_name_has_no_marker(self) -> None:
+        assert contains_transmission_marker("عبد الله بن مسلمة") is False
+
+    def test_empty(self) -> None:
+        assert contains_transmission_marker("") is False
