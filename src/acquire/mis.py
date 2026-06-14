@@ -8,19 +8,24 @@ multi-isnad source for the platform: where most corpora give one chain per
 hadith, MIS preserves the parallel asanid (the ``ح`` / *tahwil* split) that make
 Sahih Muslim valuable for chain modelling.
 
-The dataset ships as two Excel workbooks under the Mendeley file set:
+The current dataset (v2) ships as **three** Excel workbooks under the Mendeley
+file set — a graph export (content + nodes + edges):
 
-* ``Hadith_SahihMuslim_CoreInfo.xlsx``               — one row per hadith
-  (book, hadith number, matn, narrator sequence, isnad count).
-* ``Hadith_SahihMuslim_DetailsInfo_Sanad_Narrators.xlsx`` — one row per
-  (hadith, sanad, narrator) position — the data the parser walks into per-sanad
-  chains.
+* ``1_Hadith_SahihMuslim_HadithContent.xlsx``         — one row per hadith
+  (``BookNo``, ``HadithNo``, matn, ``SanadCount``). The parser's "core" file.
+* ``2_Hadith_SahihMuslim_Narrators=Nodes for Graph.xlsx`` — narrator *node*
+  list (id ↔ name, generation, gender). Downloaded but not consumed for staging.
+* ``3_Hadith_SahihMuslim_Isnad=Edges for Graph.xlsx`` — one row per directed
+  transmission *edge* (``source*`` → ``target*`` narrator, keyed by
+  ``(BookNo, HadithNo, SanadNo)``). The parser's "detail" file.
 
-Reachability: ``data.mendeley.com`` serves the file set over HTTPS with **no
-auth / no API key** — the same keyless-public mechanism this repo already proves
-for ``sanadset`` (Mendeley ``5xth87zwb5``). The file ids are resolved at runtime
-from the dataset files API rather than hardcoded, so a new dataset version is
-picked up without a code change.
+We download every ``.xlsx`` in the file set, so all three arrive; the parser
+selects the content + edges workbooks by filename token. Reachability:
+``data.mendeley.com`` serves the file set over HTTPS with **no auth / no API
+key** — the same keyless-public mechanism this repo already proves for
+``sanadset`` (Mendeley ``5xth87zwb5``). The file ids are resolved at runtime from
+the dataset files API rather than hardcoded, so a new dataset version is picked
+up without a code change.
 
 Licensing: Mendeley Data's default license for this dataset is **CC BY 4.0**
 (attribution) — redistribution-safe with credit to the depositors.
