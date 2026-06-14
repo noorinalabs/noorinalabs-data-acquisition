@@ -48,15 +48,55 @@ _ARABIC_CHAR_RE: re.Pattern[str] = re.compile(r"[\u0600-\u06FF]")
 # Transmission phrase patterns
 # ---------------------------------------------------------------------------
 
+# Optional run of Arabic diacritics (tashkeel U+064B–U+065F, superscript alef
+# U+0670) and tatweel/kashida (U+0640). Real isnad text is fully voweled
+# (e.g. ``حَدَّثَنَا``), so a bare keyword like ``حدثنا`` will never match unless
+# we tolerate diacritics interleaved *between* the base letters. Without this
+# the extractor found zero transmission phrases on every voweled chain and fell
+# back to emitting the whole isnad as a single un-segmented "narrator" (da#146).
+_OPT_DIAC: str = r"[\u064b-\u065f\u0670\u0640]*"
+
+# Base transmission terms keyed to their canonical label. Written with the
+# classical hamza-bearing forms (أ/إ) so they match raw, un-normalized isnad
+# text; positions returned therefore index into the caller's original string.
+# Singular (-ني) and 3rd-person (سمع) variants are included alongside the plural
+# (-نا) forms because real chains alternate between them ("حدثني" / "أخبرني" /
+# "سمع فلانٌ") — omitting them under-segments the chain (da#146).
+_TRANSMISSION_TERMS: dict[str, str] = {
+    "حدثنا": "haddathana",
+    "حدثني": "haddathani",
+    "أخبرنا": "akhbarana",
+    "أخبرني": "akhbarani",
+    "أنبأنا": "anba_ana",
+    "أنبأني": "anba_ani",
+    "سمعت": "samitu",
+    "سمع": "samia",
+    "عن": "an",
+    "قال": "qala",
+    "ناولني": "nawalani",
+    "كتب إلي": "kataba_ilayya",
+}
+
+
+def _compile_diacritic_tolerant(term: str) -> re.Pattern[str]:
+    """Compile *term* into a regex that tolerates interleaved diacritics.
+
+    Each base letter is followed by an optional diacritics/tatweel run, and
+    inter-word whitespace is matched flexibly. The compiled pattern matches the
+    fully-voweled form found in real isnads while preserving match positions in
+    the original (un-normalized) text.
+    """
+    parts: list[str] = []
+    for ch in term:
+        if ch.isspace():
+            parts.append(r"\s+")
+        else:
+            parts.append(re.escape(ch) + _OPT_DIAC)
+    return re.compile("".join(parts))
+
+
 TRANSMISSION_PATTERNS: dict[re.Pattern[str], str] = {
-    re.compile(r"حدثنا"): "haddathana",
-    re.compile(r"أخبرنا"): "akhbarana",
-    re.compile(r"سمعت"): "samitu",
-    re.compile(r"عن"): "an",
-    re.compile(r"قال"): "qala",
-    re.compile(r"أنبأنا"): "anba_ana",
-    re.compile(r"ناولني"): "nawalani",
-    re.compile(r"كتب\s+إلي"): "kataba_ilayya",
+    _compile_diacritic_tolerant(term): label for term, label in _TRANSMISSION_TERMS.items()
 }
 
 # ---------------------------------------------------------------------------
@@ -118,12 +158,27 @@ def extract_transmission_phrases(text: str) -> list[tuple[int, int, str]]:
     """Find transmission formula positions in *text*.
 
     Returns a list of ``(start, end, label)`` tuples for each non-overlapping
-    match found via :data:`TRANSMISSION_PATTERNS`.
+    match found via :data:`TRANSMISSION_PATTERNS`, in ascending start order.
+
+    Overlapping matches are resolved by preferring the longer (more specific)
+    term: e.g. where both ``سمعت`` (samitu) and the bare ``سمع`` (samia) match at
+    the same position, only ``سمعت`` is kept. This keeps segment boundaries in
+    :func:`src.parse.narrator_extraction._extract_arabic` clean when overlapping
+    variants are present in the pattern set.
     """
-    results: list[tuple[int, int, str]] = []
+    matches: list[tuple[int, int, str]] = []
     for pattern, label in TRANSMISSION_PATTERNS.items():
         for match in pattern.finditer(text):
-            results.append((match.start(), match.end(), label))
-    # Sort by start position for deterministic output
-    results.sort(key=lambda t: t[0])
+            matches.append((match.start(), match.end(), label))
+
+    # Sort by start asc, then by span length desc so that at any shared start the
+    # longer match is considered first and shorter overlapping ones are dropped.
+    matches.sort(key=lambda t: (t[0], -(t[1] - t[0])))
+
+    results: list[tuple[int, int, str]] = []
+    last_end = -1
+    for start, end, label in matches:
+        if start >= last_end:
+            results.append((start, end, label))
+            last_end = end
     return results
