@@ -13,6 +13,7 @@ from src.utils.arabic import (
     normalize_hamza,
     normalize_taa_marbuta,
     strip_diacritics,
+    transliterate,
 )
 
 # ---------------------------------------------------------------------------
@@ -246,3 +247,88 @@ class TestExtractTransmissionPhrases:
         labels = {label for _, _, label in results}
         assert "haddathani" in labels
         assert "akhbarani" in labels
+
+
+# ---------------------------------------------------------------------------
+# transliterate
+# ---------------------------------------------------------------------------
+
+
+class TestTransliterate:
+    @pytest.mark.parametrize(
+        ("name_ar", "expected"),
+        [
+            ("محمد", "Muhammad"),
+            ("أحمد", "Ahmad"),
+            ("علي", "Ali"),
+            ("عائشة", "Aisha"),
+            ("فاطمة", "Fatima"),
+            ("البخاري", "al-Bukhari"),
+            ("الزهري", "al-Zuhri"),
+        ],
+        ids=[
+            "muhammad",
+            "ahmad",
+            "ali",
+            "aisha",
+            "fatima",
+            "al-bukhari",
+            "al-zuhri",
+        ],
+    )
+    def test_lexicon_single_token(self, name_ar: str, expected: str) -> None:
+        assert transliterate(name_ar) == expected
+
+    def test_theophoric_two_tokens(self) -> None:
+        assert transliterate("عبد الله") == "Abd Allah"
+
+    def test_theophoric_single_token(self) -> None:
+        """A run-together ``عبدالله`` renders the same as the spaced form."""
+        assert transliterate("عبدالله") == "Abd Allah"
+
+    def test_kunya(self) -> None:
+        assert transliterate("أبو هريرة") == "Abu Hurayra"
+
+    def test_nasab_particle_lowercase_mid_name(self) -> None:
+        """``بن``/``ابن`` read lowercase between names."""
+        assert transliterate("محمد بن إسماعيل") == "Muhammad ibn Ismail"
+
+    def test_nasab_particle_capitalized_when_leading(self) -> None:
+        assert transliterate("ابن عباس") == "Ibn Abbas"
+
+    def test_compound_full_name(self) -> None:
+        assert transliterate("عبد الله بن عباس") == "Abd Allah ibn Abbas"
+
+    def test_diacritics_are_ignored(self) -> None:
+        """A voweled spelling normalizes to the same output as the bare form."""
+        assert transliterate("مُحَمَّد") == transliterate("محمد") == "Muhammad"
+
+    def test_diacritic_only_token_dropped(self) -> None:
+        assert transliterate("ًٌٍ") == ""
+
+    @pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+    def test_blank_input(self, blank: str) -> None:
+        assert transliterate(blank) == ""
+
+    def test_unknown_token_is_nonempty_ascii(self) -> None:
+        """A token outside the lexicon still yields a non-empty ASCII skeleton."""
+        out = transliterate("الخطاب")  # in lexicon -> al-Khattab
+        assert out == "al-Khattab"
+        # A genuinely rare token falls through to the consonant skeleton.
+        rare = transliterate("بستيطير")
+        assert rare
+        assert rare[0].isupper()
+        assert rare.isascii()
+
+    def test_output_is_ascii_for_full_chain(self) -> None:
+        out = transliterate("عبد الرحمن بن عوف الزهري")
+        assert out
+        assert out.isascii()
+        assert out.startswith("Abd al-Rahman ibn Awf")
+
+    def test_deterministic(self) -> None:
+        name = "محمد بن إسماعيل البخاري"
+        assert transliterate(name) == transliterate(name)
+
+    def test_already_latin_passthrough(self) -> None:
+        assert transliterate("Anas") == "Anas"

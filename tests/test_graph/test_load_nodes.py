@@ -167,6 +167,142 @@ class TestLoadNarrators:
         assert loaded_ids == {"nar:from-curated"}
 
 
+class TestNarratorNameEnFallback:
+    """da#159: every loaded Narrator gets a non-empty English display name.
+
+    Almost no canonical records carry a sourced ``name_en`` (113 / 47,199), so
+    the loader synthesizes a deterministic transliteration of ``name_ar`` when
+    one is absent — fixing hollow English search/display on ``/graph`` and
+    narrator pages.
+    """
+
+    @staticmethod
+    def _narrator_batch(client: MockNeo4jClient) -> list[dict[str, object]]:
+        _query, batch = next(
+            (q, b) for q, b in client.calls if isinstance(b, list) and "MERGE (n:Narrator" in q
+        )
+        assert isinstance(batch, list)
+        return batch
+
+    def test_missing_name_en_filled_from_transliteration(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        write_narrators_canonical(
+            curated_dir,
+            [{"canonical_id": "nar:m", "name_ar": "محمد", "name_en": None}],
+        )
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        row = self._narrator_batch(mock_client)[0]
+        assert row["name_en"] == "Muhammad"
+
+    def test_empty_string_name_en_filled(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        write_narrators_canonical(
+            curated_dir,
+            [{"canonical_id": "nar:ah", "name_ar": "أبو هريرة", "name_en": ""}],
+        )
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        row = self._narrator_batch(mock_client)[0]
+        assert row["name_en"] == "Abu Hurayra"
+
+    def test_sourced_name_en_preserved(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """A real sourced English name is used verbatim, never overwritten."""
+        write_narrators_canonical(
+            curated_dir,
+            [
+                {
+                    "canonical_id": "nar:prophet",
+                    "name_ar": "محمد",
+                    "name_en": "Prophet Muhammad",
+                }
+            ],
+        )
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        row = self._narrator_batch(mock_client)[0]
+        assert row["name_en"] == "Prophet Muhammad"
+
+    def test_falls_back_to_normalized_when_name_ar_missing(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        write_narrators_canonical(
+            curated_dir,
+            [
+                {
+                    "canonical_id": "nar:nn",
+                    "name_ar": None,
+                    "name_ar_normalized": "علي",
+                    "name_en": None,
+                }
+            ],
+        )
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        row = self._narrator_batch(mock_client)[0]
+        assert row["name_en"] == "Ali"
+
+    def test_no_arabic_anywhere_stays_empty(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        write_narrators_canonical(
+            curated_dir,
+            [{"canonical_id": "nar:bare", "name_ar": None, "name_en": None}],
+        )
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        row = self._narrator_batch(mock_client)[0]
+        assert row["name_en"] == ""
+
+    def test_coverage_rises_to_full_on_production_shaped_batch(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """Production-shaped: many name_ar-only records, one sourced English name.
+
+        Mirrors the staging reality (coverage 113/47,199) at small scale: only a
+        single record arrives with a sourced ``name_en``; the rest are Arabic-only
+        and must come out of the loader with a non-empty, ASCII English name.
+        """
+        arabic_only = [
+            "محمد",
+            "علي",
+            "عبد الله",
+            "أبو هريرة",
+            "عائشة",
+            "محمد بن إسماعيل",
+            "عمر بن الخطاب",
+            "الزهري",
+            "سفيان الثوري",
+            "أنس بن مالك",
+        ]
+        rows = [
+            {"canonical_id": f"nar:{i}", "name_ar": ar, "name_en": None}
+            for i, ar in enumerate(arabic_only)
+        ]
+        rows.append(
+            {"canonical_id": "nar:sourced", "name_ar": "محمد", "name_en": "Prophet Muhammad"}
+        )
+        write_narrators_canonical(curated_dir, rows)
+
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        batch = self._narrator_batch(mock_client)
+        assert len(batch) == len(rows)
+
+        non_empty = [r for r in batch if str(r["name_en"]).strip()]
+        # Coverage is total (was ~0% pre-fix for the Arabic-only majority).
+        assert len(non_empty) == len(rows)
+        # Names are sane: ASCII and capitalized (the definite article ``al-``
+        # legitimately leads lowercase, e.g. "al-Zuhri").
+        for r in batch:
+            name_en = str(r["name_en"])
+            assert name_en.isascii()
+            assert name_en[0].isupper() or name_en.startswith("al-")
+        # Sourced name preserved; transliterations applied to the rest.
+        by_id = {r["id"]: r["name_en"] for r in batch}
+        assert by_id["nar:sourced"] == "Prophet Muhammad"
+        assert by_id["nar:2"] == "Abd Allah"
+        assert by_id["nar:3"] == "Abu Hurayra"
+
+
 class TestLoadHadiths:
     def test_valid_hadiths(
         self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path

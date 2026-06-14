@@ -40,6 +40,7 @@ from src.parse.identity import (
     grading_node_id,
     hadith_node_id,
 )
+from src.utils.arabic import transliterate
 from src.utils.grade import normalize_grade
 from src.utils.logging import get_logger
 from src.utils.neo4j_client import Neo4jClient
@@ -81,6 +82,31 @@ def _val(row: dict[str, Any], key: str, default: Any = None) -> Any:
     """Get a value from *row*, returning *default* for ``None``."""
     v = row.get(key)
     return default if v is None else v
+
+
+def _narrator_name_en(row: dict[str, Any]) -> str:
+    """Resolve a narrator's English display name, with a transliteration fallback.
+
+    Almost no narrator records carry a sourced ``name_en`` (113 / 47,199 at
+    P5W3 — da#159), leaving English search and display hollow. When a sourced
+    English name is present we use it verbatim; otherwise we synthesize a
+    deterministic Latin transliteration of ``name_ar`` (falling back to
+    ``name_ar_normalized``) so every Narrator node has a non-empty, searchable
+    English form.
+
+    The fallback is applied at *load* time rather than persisted into
+    ``narrators_canonical.parquet`` on purpose: the parquet ``name_en`` stays a
+    pure provenance field (sourced-or-empty), which keeps ``bio_promote``'s
+    only-when-missing back-fill idempotent and clobber-free, while the Neo4j
+    node — what ``/graph``, search and narrator pages actually read — always has
+    a display name. Legacy canonical files written before any English-name work
+    are covered too, with no resolve re-run required.
+    """
+    sourced = _val(row, "name_en", "")
+    if isinstance(sourced, str) and sourced.strip():
+        return sourced
+    name_ar = _val(row, "name_ar", "") or _val(row, "name_ar_normalized", "")
+    return transliterate(name_ar) if name_ar else ""
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +175,7 @@ def _load_narrators(
             {
                 "id": cid,
                 "name_ar": _val(row, "name_ar", ""),
-                "name_en": _val(row, "name_en", ""),
+                "name_en": _narrator_name_en(row),
                 "name_ar_normalized": _val(row, "name_ar_normalized"),
                 "birth_year_ah": _val(row, "birth_year_ah"),
                 "death_year_ah": _val(row, "death_year_ah"),
