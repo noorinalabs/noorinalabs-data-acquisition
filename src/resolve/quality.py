@@ -35,6 +35,17 @@ class ClusterQuality:
     predicted_pairs: int
     gold_pairs: int
 
+    @property
+    def false_merge_rate(self) -> float:
+        """Fraction of predicted same-narrator pairs that are wrong (over-merges).
+
+        The complement of precision (``1 - precision``) — the direct measure of
+        clustering *over-merging*, surfaced by name so the da#138 precision harness
+        and any future CI report share one definition. ``0.0`` when no pairs were
+        predicted (nothing was merged, so nothing was mis-merged).
+        """
+        return 1.0 - self.precision if self.predicted_pairs else 0.0
+
     def summary(self) -> str:
         """One-line human-readable summary."""
         return (
