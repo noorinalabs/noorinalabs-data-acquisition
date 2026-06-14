@@ -91,6 +91,20 @@ class TestBuildChainPairs:
         assert pairs[1]["from_id"] == "nar:2"
         assert pairs[1]["to_id"] == "nar:3"
 
+    def test_adjacent_duplicate_narrator_skipped(self) -> None:
+        # Two adjacent mentions resolving to the same narrator must not produce a
+        # self-loop TRANSMITTED_TO edge (da#148 — 8 live self-loops).
+        mentions = [
+            {"canonical_narrator_id": "nar:1", "position_in_chain": 0, "hadith_id": "h1"},
+            {"canonical_narrator_id": "nar:1", "position_in_chain": 1, "hadith_id": "h1"},
+            {"canonical_narrator_id": "nar:2", "position_in_chain": 2, "hadith_id": "h1"},
+        ]
+        pairs = _build_chain_pairs(mentions)
+        # nar:1->nar:1 dropped; only nar:1->nar:2 survives.
+        assert len(pairs) == 1
+        assert pairs[0] == {"from_id": "nar:1", "to_id": "nar:2", "position": 1, "hadith_id": "h1"}
+        assert all(p["from_id"] != p["to_id"] for p in pairs)
+
 
 class TestLoadTransmittedTo:
     def test_creates_edges_from_resolved_mentions(

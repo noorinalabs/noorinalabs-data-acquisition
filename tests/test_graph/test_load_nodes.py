@@ -334,6 +334,32 @@ class TestLoadGradings:
         assert grading_result.node_type == "Grading"
         assert grading_result.created + grading_result.merged == 2
 
+    def test_grading_carries_normalized_display_grade(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """Raw Arabic grade is preserved and a normalized display grade added (da#148)."""
+        write_hadiths(
+            staging_dir,
+            [
+                {"source_id": "h-1", "grade": "صحيح"},  # raw Arabic
+                {"source_id": "h-2", "grade": "Da'if"},
+            ],
+        )
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        grading_batches = [
+            batch
+            for _query, batch in mock_client.calls
+            if isinstance(batch, list)
+            and batch
+            and "id" in batch[0]
+            and batch[0]["id"].startswith("grd:")
+        ]
+        assert len(grading_batches) >= 1
+        by_hadith = {r["hadith_id"]: r for r in grading_batches[0]}
+        assert by_hadith["hdt:h-1"]["grade"] == "صحيح"  # raw preserved
+        assert by_hadith["hdt:h-1"]["grade_normalized"] == "sahih"
+        assert by_hadith["hdt:h-2"]["grade_normalized"] == "daif"
+
 
 class TestLoadHistoricalEvents:
     def test_valid_events(
