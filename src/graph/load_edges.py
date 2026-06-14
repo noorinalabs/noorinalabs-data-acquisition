@@ -22,7 +22,7 @@ from src.parse.identity import (
     make_canonical_id,
     narrator_node_id,
 )
-from src.parse.schemas import EDGE_RELATION_STUDIED_UNDER
+from src.parse.schemas import EDGE_RELATION_STUDIED_UNDER, VALID_EDGE_RELATIONS
 from src.utils.arabic import normalize_arabic
 from src.utils.logging import get_logger
 from src.utils.neo4j_client import Neo4jClient
@@ -530,40 +530,40 @@ def _load_parallel_of(
 # different relation type AND the opposite direction) — must NOT load as
 # STUDIED_UNDER, or their edges would land as wrong-type, wrong-direction edges.
 #
-# The durable routing (da#133) is the per-row ``relation`` field on
-# NETWORK_EDGE_SCHEMA: a row is loaded here iff it DECLARES STUDIED_UNDER. The
-# filename allowlist below is no longer the primary gate — it survives only as the
-# back-compat inference for a pre-da#133 file whose rows carry no ``relation`` at
-# all (a legacy studentship file → STUDIED_UNDER; anything else → skipped). Once a
-# file carries an explicit ``relation`` the allowlist is never consulted, so a new
-# studentship source needs no allowlist edit and a transmission file named like a
-# studentship one (or vice-versa) is still routed correctly by its data.
-_STUDIED_UNDER_SOURCES: frozenset[str] = frozenset({"muhaddithat", "itqan"})
+# Routing is by the per-row ``relation`` field on NETWORK_EDGE_SCHEMA (da#133): a
+# row is loaded here iff it DECLARES STUDIED_UNDER. da#157 removes the old filename
+# allowlist that silently defaulted a relation-LESS row to STUDIED_UNDER — that
+# default was a footgun: the next isnad-transmission producer that forgot to set
+# ``relation`` would have its edges mis-routed onto the studentship relation. The
+# loader now REFUSES (raises on) any row that declares no — or an unrecognized —
+# relation (:func:`_row_relation`). Every producer must set ``relation`` explicitly.
 
 
-def _is_studied_under_file(path: Path) -> bool:
-    """True if a ``network_edges_<slug>.parquet`` belongs to a studentship source.
+def _row_relation(row: dict[str, Any], *, source: str) -> str:
+    """Relation a NETWORK_EDGE row declares — REQUIRED (da#133 / da#157).
 
-    Matches the exact slug or a chunked ``<slug>_NNN`` variant, so a future
-    sharded write still resolves but a different corpus (``mis``) never does. Used
-    only as the back-compat default for relation-less (pre-da#133) rows.
-    """
-    slug = path.stem.removeprefix("network_edges_")
-    return any(slug == src or slug.startswith(f"{src}_") for src in _STUDIED_UNDER_SOURCES)
-
-
-def _row_relation(row: dict[str, Any], *, legacy_default: str | None) -> str | None:
-    """Relation a NETWORK_EDGE row declares.
-
-    Honors an explicit ``relation`` value (da#133). A row carrying none — a
-    pre-da#133 parquet — falls back to *legacy_default*: the relation the file's
-    name implied under the old filename allowlist (``None`` when the name matched
-    no studentship source, so such legacy rows are skipped rather than mislabeled).
+    Returns the row's explicit ``relation``. Refuses a row that declares none, or
+    one whose value is not a recognized relation, by raising ``ValueError`` —
+    there is no default. This is the da#157 fail-safe: a relation-less edge is a
+    producer defect that must never be silently routed onto the STUDIED_UNDER
+    (studentship) allowlist. *source* names the offending file for the error.
     """
     rel = row.get("relation")
-    if isinstance(rel, str) and rel.strip():
-        return rel
-    return legacy_default
+    if not isinstance(rel, str) or not rel.strip():
+        msg = (
+            f"network edge in {source!r} declares no `relation` — refused "
+            f"(da#157: an undeclared relation is never defaulted to STUDIED_UNDER). "
+            f"The producer must set `relation` to one of {sorted(VALID_EDGE_RELATIONS)}."
+        )
+        raise ValueError(msg)
+    rel = rel.strip()
+    if rel not in VALID_EDGE_RELATIONS:
+        msg = (
+            f"network edge in {source!r} declares unknown relation {rel!r}; "
+            f"expected one of {sorted(VALID_EDGE_RELATIONS)}."
+        )
+        raise ValueError(msg)
+    return rel
 
 
 _STUDIED_UNDER_QUERY = """\
@@ -615,9 +615,10 @@ def _load_studied_under(
     Globs every ``network_edges_*`` file and keeps only the rows that DECLARE the
     STUDIED_UNDER relation (:func:`_row_relation`, da#133). A NETWORK_EDGE producer
     whose edges are a different relation (e.g. ``mis`` isnad transmission, declared
-    TRANSMITTED_TO) is skipped row-by-row regardless of filename. Rows in a
-    pre-da#133 file that carry no relation fall back to the filename allowlist.
-    Gracefully skips when no ``network_edges_*`` file exists.
+    TRANSMITTED_TO) is skipped row-by-row regardless of filename. A row that
+    declares NO relation (or an unrecognized one) raises ``ValueError`` — it is
+    never silently defaulted to STUDIED_UNDER (da#157). Gracefully skips when no
+    ``network_edges_*`` file exists.
     """
     edge_files = _parquet_files(staging_dir, "network_edges_")
     if not edge_files:
@@ -629,13 +630,13 @@ def _load_studied_under(
     skipped = 0
 
     for path in edge_files:
-        # Relation a relation-less (pre-da#133) row in this file defaults to.
-        legacy_default = EDGE_RELATION_STUDIED_UNDER if _is_studied_under_file(path) else None
         for row in _read_parquet_rows(path):
-            if _row_relation(row, legacy_default=legacy_default) != EDGE_RELATION_STUDIED_UNDER:
-                # Not a studentship edge (e.g. an isnad-transmission row) — leave it
-                # off STUDIED_UNDER. Not counted as skipped: skipped tracks edges we
-                # meant to load but could not resolve, not other relations.
+            if _row_relation(row, source=path.name) != EDGE_RELATION_STUDIED_UNDER:
+                # A validly-declared non-studentship edge (e.g. an isnad-transmission
+                # row → TRANSMITTED_TO) — leave it off STUDIED_UNDER. _row_relation has
+                # already REFUSED any row that declares no relation (da#157), so nothing
+                # is silently routed here. Not counted as skipped: skipped tracks edges
+                # we meant to load but could not resolve, not other relations.
                 continue
             from_id = _studied_under_endpoint(
                 row.get("from_narrator_name"), row.get("from_external_id")
