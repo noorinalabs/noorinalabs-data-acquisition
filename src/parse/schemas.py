@@ -18,19 +18,19 @@ __all__ = [
     "NETWORK_EDGE_SCHEMA",
     "EDGE_RELATION_STUDIED_UNDER",
     "EDGE_RELATION_TRANSMITTED_TO",
-    "DEFAULT_EDGE_RELATION",
+    "VALID_EDGE_RELATIONS",
 ]
 
 # ``NETWORK_EDGE_SCHEMA.relation`` values (da#133). The graph loader routes a
 # network edge to a Neo4j relationship type by this DECLARED relation rather than
 # guessing it from the producing file's name: a studentship producer (muhaddithat,
 # itqan) emits ``STUDIED_UNDER``; an isnad-transmission producer (mis) emits
-# ``TRANSMITTED_TO``. ``DEFAULT_EDGE_RELATION`` is the back-compat value the loader
-# assumes for a row that carries no relation — a pre-da#133 parquet — which is
-# exactly what those legacy (studentship-only) files meant.
+# ``TRANSMITTED_TO``. There is deliberately NO default relation (da#157): a row
+# that declares none is REFUSED by the loader, never silently routed onto the
+# studentship allowlist. Every producer MUST set ``relation`` explicitly.
 EDGE_RELATION_STUDIED_UNDER = "STUDIED_UNDER"
 EDGE_RELATION_TRANSMITTED_TO = "TRANSMITTED_TO"
-DEFAULT_EDGE_RELATION = EDGE_RELATION_STUDIED_UNDER
+VALID_EDGE_RELATIONS = frozenset({EDGE_RELATION_STUDIED_UNDER, EDGE_RELATION_TRANSMITTED_TO})
 
 # ``source_id`` grammar and the graph node-id rules derived from it are the
 # canonical identity contract — see :mod:`src.parse.identity` (``<corpus>:
@@ -111,9 +111,11 @@ COLLECTION_SCHEMA = pa.schema(
 
 # ``relation`` declares which graph relationship the row's narrator pair forms
 # (:data:`EDGE_RELATION_STUDIED_UNDER` vs :data:`EDGE_RELATION_TRANSMITTED_TO`) so
-# the loader keys on the data, not on the filename (da#133). It is nullable for
-# back-compat: a pre-da#133 file carries no relation and the loader falls back to
-# :data:`DEFAULT_EDGE_RELATION`. Current producers always populate it.
+# the loader keys on the data, not on the filename (da#133). Every producer MUST
+# set it: the loader REFUSES a row that declares no relation rather than defaulting
+# it to STUDIED_UNDER (da#157). The field stays physically nullable so a malformed
+# (relation-less) parquet can still be read — and then loudly rejected — rather
+# than failing opaquely at read time.
 NETWORK_EDGE_SCHEMA = pa.schema(
     [
         pa.field("from_narrator_name", pa.string(), nullable=False),
