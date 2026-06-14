@@ -17,6 +17,7 @@ __all__ = [
     "clean_whitespace",
     "is_arabic",
     "extract_transmission_phrases",
+    "transliterate",
 ]
 
 # ---------------------------------------------------------------------------
@@ -182,3 +183,240 @@ def extract_transmission_phrases(text: str) -> list[tuple[int, int, str]]:
             results.append((start, end, label))
             last_end = end
     return results
+
+
+# ---------------------------------------------------------------------------
+# Transliteration (Arabic name -> Latin display form)
+# ---------------------------------------------------------------------------
+#
+# Narrator records carry a required ``name_ar`` but almost never a sourced
+# ``name_en`` (113 / 47,199 at P5W3 — da#159), so English search and display are
+# hollow. This is a deterministic, dependency-free Arabic->Latin transliterator
+# used to synthesize a readable display name whenever a sourced English name is
+# absent.
+#
+# Two layers, in priority order:
+#   1. A token lexicon of the formulaic building blocks of classical narrator
+#      names — kunya/nasab particles (Abu, ibn, bint, Umm), theophorics
+#      (Abd Allah, al-Rahman), the most common given names (Muhammad, Ali,
+#      Husayn, ...) and high-frequency nisbas (al-Bukhari, al-Kufi, ...).
+#      Arabic names are highly repetitive, so a modest lexicon renders the
+#      overwhelming majority of *tokens* correctly.
+#   2. A consonant-skeleton letter map for any token outside the lexicon. The
+#      result is imperfect for rare, un-voweled tokens (Arabic script omits short
+#      vowels) but is always non-empty, ASCII, and deterministic — turning 0%
+#      coverage into ~100% with sane, stable output.
+#
+# Output is intentionally plain ASCII (no ʿayn/macrons) so it is friendly to
+# fulltext search and case-insensitive matching.
+
+# Per-letter consonant/long-vowel map. Carriers that contribute no Latin glyph
+# in plain ASCII (hamza, ayn) map to the empty string. The input is expected to
+# be normalized (diacritics already stripped by :func:`normalize_arabic`).
+_TRANSLIT_LETTERS: dict[str, str] = {
+    "ا": "a",
+    "ب": "b",
+    "ت": "t",
+    "ث": "th",
+    "ج": "j",
+    "ح": "h",
+    "خ": "kh",
+    "د": "d",
+    "ذ": "dh",
+    "ر": "r",
+    "ز": "z",
+    "س": "s",
+    "ش": "sh",
+    "ص": "s",
+    "ض": "d",
+    "ط": "t",
+    "ظ": "z",
+    "ع": "",
+    "غ": "gh",
+    "ف": "f",
+    "ق": "q",
+    "ك": "k",
+    "ل": "l",
+    "م": "m",
+    "ن": "n",
+    "ه": "h",
+    "ة": "a",
+    "و": "w",
+    "ي": "y",
+    "ى": "a",
+    "ء": "",
+}
+
+# Token lexicon, written with natural spellings; keys are normalized at import so
+# a normalized lookup token matches regardless of diacritics / alif-hamza form.
+# Values are pre-cased for their typical role (particles ``ibn``/``bint`` stay
+# lowercase for mid-name use; the article prefix stays ``al-``).
+_RAW_NAME_LEXICON: dict[str, str] = {
+    # Kunya / nasab particles
+    "أبو": "Abu",
+    "أبا": "Aba",
+    "أبي": "Abi",
+    "ابن": "ibn",
+    "بن": "ibn",
+    "بنت": "bint",
+    "أم": "Umm",
+    # Theophorics & honorifics
+    "عبد": "Abd",
+    "الله": "Allah",
+    "عبدالله": "Abd Allah",
+    "عبدالرحمن": "Abd al-Rahman",
+    "الرحمن": "al-Rahman",
+    "الرحيم": "al-Rahim",
+    "الصديق": "al-Siddiq",
+    "الفاروق": "al-Faruq",
+    # Common given names
+    "محمد": "Muhammad",
+    "أحمد": "Ahmad",
+    "علي": "Ali",
+    "حسن": "Hasan",
+    "الحسن": "al-Hasan",
+    "حسين": "Husayn",
+    "الحسين": "al-Husayn",
+    "عمر": "Umar",
+    "عثمان": "Uthman",
+    "إبراهيم": "Ibrahim",
+    "إسماعيل": "Ismail",
+    "إسحاق": "Ishaq",
+    "يعقوب": "Yaqub",
+    "يوسف": "Yusuf",
+    "موسى": "Musa",
+    "عيسى": "Isa",
+    "داود": "Dawud",
+    "سليمان": "Sulayman",
+    "يحيى": "Yahya",
+    "خالد": "Khalid",
+    "جعفر": "Jafar",
+    "صالح": "Salih",
+    "حماد": "Hammad",
+    "حمزة": "Hamza",
+    "زيد": "Zayd",
+    "سعيد": "Said",
+    "سعد": "Sad",
+    "سفيان": "Sufyan",
+    "سلمان": "Salman",
+    "طلحة": "Talha",
+    "عمرو": "Amr",
+    "عباس": "Abbas",
+    "العباس": "al-Abbas",
+    "معاوية": "Muawiya",
+    "مالك": "Malik",
+    "أنس": "Anas",
+    "بكر": "Bakr",
+    "هريرة": "Hurayra",
+    "الزبير": "al-Zubayr",
+    "عوف": "Awf",
+    "الخطاب": "al-Khattab",
+    "شعبة": "Shuba",
+    "قتادة": "Qatada",
+    "نافع": "Nafi",
+    "مجاهد": "Mujahid",
+    "عطاء": "Ata",
+    "هشام": "Hisham",
+    "عروة": "Urwa",
+    "معمر": "Mamar",
+    "وكيع": "Waki",
+    "الوليد": "al-Walid",
+    "يزيد": "Yazid",
+    "جابر": "Jabir",
+    "ثابت": "Thabit",
+    "حذيفة": "Hudhayfa",
+    "عمار": "Ammar",
+    "بلال": "Bilal",
+    # Women narrators
+    "عائشة": "Aisha",
+    "فاطمة": "Fatima",
+    "خديجة": "Khadija",
+    "سلمى": "Salma",
+    # High-frequency nisbas
+    "البخاري": "al-Bukhari",
+    "المدني": "al-Madani",
+    "الكوفي": "al-Kufi",
+    "البصري": "al-Basri",
+    "الدمشقي": "al-Dimashqi",
+    "الأنصاري": "al-Ansari",
+    "القرشي": "al-Qurashi",
+    "التميمي": "al-Tamimi",
+    "الثقفي": "al-Thaqafi",
+    "الهمداني": "al-Hamdani",
+    "الزهري": "al-Zuhri",
+    "الثوري": "al-Thawri",
+    "الأعمش": "al-Amash",
+    "الشعبي": "al-Shabi",
+    "الأوزاعي": "al-Awzai",
+    "الليث": "al-Layth",
+    "الأشعري": "al-Ashari",
+    "السلمي": "al-Sulami",
+}
+
+_NAME_LEXICON: dict[str, str] = {normalize_arabic(k): v for k, v in _RAW_NAME_LEXICON.items()}
+
+# Particles that read lowercase in the middle of a name but are capitalized when
+# they lead it (e.g. "Muhammad ibn Ali" vs "Ibn Sirin").
+_LOWERCASE_PARTICLES: frozenset[str] = frozenset({"ibn", "bint"})
+
+
+def _capitalize(token: str) -> str:
+    """Uppercase the first alphabetic character of *token*, leaving the rest."""
+    for i, ch in enumerate(token):
+        if ch.isalpha():
+            return token[:i] + ch.upper() + token[i + 1 :]
+    return token
+
+
+def _map_letters(token_norm: str) -> str:
+    """Map a normalized Arabic token to its consonant/vowel skeleton."""
+    return "".join(_TRANSLIT_LETTERS.get(ch, "") for ch in token_norm)
+
+
+def _transliterate_token(token: str) -> str:
+    """Transliterate a single whitespace-delimited token to a Latin form.
+
+    Lexicon hit wins; otherwise the definite article ``al-`` is split off and the
+    remainder is rendered with the consonant-skeleton map. Tokens with no Arabic
+    content are returned trimmed (already-Latin input passes through).
+    """
+    norm = normalize_arabic(token)
+    if not norm:
+        return ""
+    if norm in _NAME_LEXICON:
+        return _NAME_LEXICON[norm]
+    if not is_arabic(norm):
+        return token.strip()
+    # Definite article prefix (alif-lam) -> "al-" + capitalized remainder.
+    if norm.startswith("ال") and len(norm) > 2:
+        body = _map_letters(norm[2:])
+        return "al-" + _capitalize(body) if body else "al-"
+    return _capitalize(_map_letters(norm))
+
+
+def transliterate(text: str) -> str:
+    """Transliterate an Arabic name to a readable, ASCII Latin display form.
+
+    Deterministic and dependency-free. Returns ``""`` for empty/blank input.
+    Intended as a *fallback* display name when a record has no sourced
+    ``name_en`` — see :mod:`src.graph.load_nodes` (da#159). The output is not a
+    scholarly romanization; it favours readable, stable, search-friendly forms.
+    """
+    if not text or not text.strip():
+        return ""
+    text = _TATWEEL_RE.sub("", text)
+    out: list[str] = []
+    for token in _MULTI_WS_RE.sub(" ", text).strip().split(" "):
+        stripped = token.strip("،.,;:()[]{}\"'`-")
+        if not stripped:
+            continue
+        latin = _transliterate_token(stripped)
+        if not latin:
+            continue
+        if latin in _LOWERCASE_PARTICLES and out:
+            out.append(latin)
+        elif latin in _LOWERCASE_PARTICLES:
+            out.append(_capitalize(latin))
+        else:
+            out.append(latin)
+    return " ".join(out).strip()
