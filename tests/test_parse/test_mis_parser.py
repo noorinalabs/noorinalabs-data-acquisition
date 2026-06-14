@@ -177,6 +177,154 @@ class TestMisEdgeLayout:
         ]
 
 
+def _make_current_mendeley_data(raw_dir: Path) -> None:
+    """The **current** Mendeley v2 three-file graph export (da#144).
+
+    Mirrors the real dataset shape:
+      * ``1_…HadithContent.xlsx``        — core hadith rows (HadithContent cols).
+      * ``2_…Narrators=Nodes for Graph.xlsx`` — narrator NODE list (decoy: its
+        filename contains "narrator", so it must NOT be picked as the detail file).
+      * ``3_…Isnad=Edges for Graph.xlsx`` — explicit ``source*``/``target*`` edge
+        rows keyed by ``(BookNo, HadithNo, SanadNo)``.
+
+    Hadith 1 carries TWO sanads (1, 2) that share endpoints but diverge in the
+    middle; hadith 2 a single sanad. The chain-specific edges only survive if the
+    parallel asanid are kept apart.
+    """
+    mis_dir = raw_dir / "mis"
+    mis_dir.mkdir(parents=True)
+
+    _write_xlsx(
+        mis_dir / "1_Hadith_SahihMuslim_HadithContent.xlsx",
+        [
+            "BookNo",
+            "BookTitleEnAr",
+            "HadithNo",
+            "ChapterNo",
+            "UnitNo",
+            "HadithText_Mushakkal",
+            "HadithText_GhairMushakkal",
+            "SanadCount",
+        ],
+        [
+            [2, "Sahih Muslim", 1, 1, 1, "مَتْنٌ مُشَكَّل", "متن", 2],
+            [2, "Sahih Muslim", 2, 1, 2, "مَتْنٌ ثَانٍ", "متن ثان", 1],
+        ],
+    )
+
+    # Decoy node list — filename contains "narrator" but is NOT the edge file.
+    _write_xlsx(
+        mis_dir / "2_Hadith_SahihMuslim_Narrators=Nodes for Graph.xlsx",
+        ["Label", "NarratorID_Mapped", "NarratorNameEn-Mapped"],
+        [["A (0)", 1, "A"], ["B (0)", 2, "B"]],
+    )
+
+    # (BookNo, HadithNo, SanadNo, sourceNarratorID, sourceNarratorNameEn,
+    #  targetNarratorID, targetNarratorNameEn)
+    edge_rows: list[list[object]] = [
+        # hadith 1, sanad 1: A -> B -> C
+        [2, 1, 1, 10, "A", 11, "B"],
+        [2, 1, 1, 11, "B", 12, "C"],
+        # hadith 1, sanad 2: A -> D -> C  (chain-specific A->D, D->C)
+        [2, 1, 2, 10, "A", 13, "D"],
+        [2, 1, 2, 13, "D", 12, "C"],
+        # hadith 2, single sanad: X -> Y
+        [2, 2, 1, 20, "X", 21, "Y"],
+    ]
+    _write_xlsx(
+        mis_dir / "3_Hadith_SahihMuslim_Isnad=Edges for Graph.xlsx",
+        [
+            "BookNo",
+            "HadithNo",
+            "SanadNo",
+            "sourceNarratorID",
+            "sourceNarratorNameEn",
+            "targetNarratorID",
+            "targetNarratorNameEn",
+        ],
+        edge_rows,
+    )
+
+
+class TestMisCurrentMendeleyShape:
+    """da#144 — parse the current three-file Mendeley graph export."""
+
+    def test_selects_content_and_edges_not_nodes(self, tmp_path: Path) -> None:
+        """The detail file resolves to the *Edges* workbook, never the *Nodes* one."""
+        from src.parse.mis import _CORE_TOKENS, _DETAIL_TOKENS, _find_file
+
+        _make_current_mendeley_data(tmp_path / "raw")
+        mis_dir = tmp_path / "raw" / "mis"
+        core = _find_file(mis_dir, _CORE_TOKENS)
+        detail = _find_file(mis_dir, _DETAIL_TOKENS)
+        assert core is not None and "HadithContent" in core.name
+        assert detail is not None and "Edges" in detail.name
+        assert "Nodes" not in detail.name  # the decoy must lose
+
+    def test_hadith_schema_matn_and_tagging(self, tmp_path: Path) -> None:
+        _make_current_mendeley_data(tmp_path / "raw")
+        hadiths_path, _ = run(tmp_path / "raw", tmp_path / "staging")
+
+        table = pq.read_table(hadiths_path)
+        assert table.schema == HADITH_SCHEMA
+        assert table.num_rows == 2
+        assert set(table.column("source_corpus").to_pylist()) == {"mis"}
+        assert set(table.column("sect").to_pylist()) == {"sunni"}
+        # The vocalized HadithText_Mushakkal column feeds matn_ar.
+        assert table.column("matn_ar").to_pylist() == ["مَتْنٌ مُشَكَّل", "مَتْنٌ ثَانٍ"]
+        for sid in table.column("source_id").to_pylist():
+            assert validate_source_id(sid) == [], sid
+            assert sid.startswith("mis:sahih_muslim:")
+        # BookNo flows into the source_id grammar.
+        assert "mis:sahih_muslim:2:1" in table.column("source_id").to_pylist()
+
+    def test_edge_schema_relation_and_external_ids(self, tmp_path: Path) -> None:
+        _make_current_mendeley_data(tmp_path / "raw")
+        _, edges_path = run(tmp_path / "raw", tmp_path / "staging")
+
+        table = pq.read_table(edges_path)
+        assert table.schema == NETWORK_EDGE_SCHEMA
+        assert set(table.column("source").to_pylist()) == {"mis"}
+        # isnad-transmission edges → TRANSMITTED_TO, never STUDIED_UNDER (da#133).
+        assert set(table.column("relation").to_pylist()) == {"TRANSMITTED_TO"}
+        # The source/target narrator IDs flow into the external-id columns.
+        assert all(v is not None for v in table.column("from_external_id").to_pylist())
+        assert all(v is not None for v in table.column("to_external_id").to_pylist())
+        ab = next(
+            r
+            for r in table.to_pylist()
+            if r["from_narrator_name"] == "A" and r["to_narrator_name"] == "B"
+        )
+        assert ab["from_external_id"] == "10"
+        assert ab["to_external_id"] == "11"
+
+    def test_multiplicity_preserved_across_sanads(self, tmp_path: Path) -> None:
+        """Hadith 1's two sanads survive as distinct chains (A->D, D->C exist)."""
+        _make_current_mendeley_data(tmp_path / "raw")
+        _, edges_path = run(tmp_path / "raw", tmp_path / "staging")
+        rows = pq.read_table(edges_path).to_pylist()
+
+        # 2 (sanad 1) + 2 (sanad 2) + 1 (hadith 2) = 5 edges.
+        assert len(rows) == 5
+        h1_id = "mis:sahih_muslim:2:1"
+        h1_pairs = {
+            (r["from_narrator_name"], r["to_narrator_name"])
+            for r in rows
+            if r["hadith_id"] == h1_id
+        }
+        assert h1_pairs == {("A", "B"), ("B", "C"), ("A", "D"), ("D", "C")}
+        # Chain-specific edges that only exist because the asanid were not collapsed.
+        assert ("A", "D") in h1_pairs
+        assert ("D", "C") in h1_pairs
+
+    def test_edges_join_to_hadith_source_id(self, tmp_path: Path) -> None:
+        _make_current_mendeley_data(tmp_path / "raw")
+        hadiths_path, edges_path = run(tmp_path / "raw", tmp_path / "staging")
+        hadith_ids = set(pq.read_table(hadiths_path).column("source_id").to_pylist())
+        edge_hadith_ids = set(pq.read_table(edges_path).column("hadith_id").to_pylist())
+        assert edge_hadith_ids <= hadith_ids
+
+
 class TestMisErrors:
     def test_missing_source_dir_raises(self, tmp_path: Path) -> None:
         (tmp_path / "raw").mkdir()
