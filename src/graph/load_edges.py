@@ -498,7 +498,13 @@ def _load_parallel_of(
         )
 
     if not batch:
-        logger.info("parallel_of_no_edges")
+        # An empty parallel_links.parquet means the dedup / parallel-detection
+        # stage produced nothing — /compare Browse Parallels will be empty. Surface
+        # it as a WARNING rather than a silent INFO (da#160 conformance).
+        logger.warning(
+            "parallel_of_no_edges",
+            msg="parallel_links.parquet has no usable rows — /compare will be empty",
+        )
         return EdgeLoadResult("PARALLEL_OF", 0, skipped, 0)
 
     # Check endpoints
@@ -516,7 +522,21 @@ def _load_parallel_of(
         if valid_batch
         else 0
     )
-    logger.info("parallel_of_loaded", created=created, skipped=skipped, missing_endpoints=missing)
+    # Detected links that resolved to zero loaded edges is a silent-failure mode
+    # (every endpoint missing — e.g. an id-scheme mismatch): warn, do not pass it
+    # by at INFO (da#160).
+    if created == 0:
+        logger.warning(
+            "parallel_of_loaded_zero",
+            candidates=len(batch),
+            skipped=skipped,
+            missing_endpoints=missing,
+            msg="parallel links present but 0 PARALLEL_OF edges loaded",
+        )
+    else:
+        logger.info(
+            "parallel_of_loaded", created=created, skipped=skipped, missing_endpoints=missing
+        )
     return EdgeLoadResult("PARALLEL_OF", created, skipped, missing)
 
 
@@ -809,4 +829,17 @@ def load_all_edges(
         total_missing_endpoints=total_missing,
         edge_types=len(results),
     )
+
+    # Conformance counter: an edge type that loaded zero edges is a product-level
+    # red flag worth surfacing on its own — PARALLEL_OF=0 is exactly the da#160
+    # regression (/compare Browse Parallels permanently empty). Emit a WARNING per
+    # zero-count type so an empty load is never silent in the run logs.
+    zero_types = [r.edge_type for r in results if r.created == 0]
+    if zero_types:
+        logger.warning(
+            "edge_load_conformance",
+            zero_count_edge_types=zero_types,
+            msg="edge type(s) loaded 0 edges",
+        )
+
     return results

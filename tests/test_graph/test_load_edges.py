@@ -7,6 +7,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+import structlog
 
 from src.graph.load_edges import (
     _APPEARS_IN_QUERY,
@@ -765,3 +766,55 @@ class TestStudiedUnderRelationRequired:
         )
         result = _load_studied_under(MockNeo4jClient(), staging_dir)
         assert result.created == 0
+
+
+class TestParallelOfConformance:
+    """PARALLEL_OF load conformance — empty / zero-edge loads must be surfaced,
+    and a production-shaped links file must actually load edges (da#160)."""
+
+    def test_production_shaped_links_load_edges(self, staging_dir: Path, curated_dir: Path) -> None:
+        # A production-shaped batch of detected parallels (many pairs) loads one
+        # PARALLEL_OF edge each when both endpoints exist.
+        links = [
+            {"hadith_id_a": f"sunnah:c{c}:h0", "hadith_id_b": f"sunnah:c{c}:h1"} for c in range(25)
+        ]
+        write_parallel_links(staging_dir, links)
+        client = MockNeo4jClient()
+        client.set_read_results([{"a_exists": True, "b_exists": True}] * len(links))
+
+        results = load_all_edges(client, staging_dir, curated_dir, strict=False)
+        po = next(r for r in results if r.edge_type == "PARALLEL_OF")
+        assert po.created == 25
+        assert po.missing_endpoints == 0
+
+    def test_empty_links_file_warns(self, staging_dir: Path, curated_dir: Path) -> None:
+        # An empty parallel_links.parquet (the da#160 state) must surface a warning,
+        # not pass silently, and the conformance summary must flag PARALLEL_OF.
+        write_parallel_links(staging_dir, [])
+        client = MockNeo4jClient()
+
+        with structlog.testing.capture_logs() as logs:
+            results = load_all_edges(client, staging_dir, curated_dir, strict=False)
+
+        po = next(r for r in results if r.edge_type == "PARALLEL_OF")
+        assert po.created == 0
+        events = {(e["event"], e.get("log_level")) for e in logs}
+        assert ("parallel_of_no_edges", "warning") in events
+        conformance = next(e for e in logs if e["event"] == "edge_load_conformance")
+        assert conformance["log_level"] == "warning"
+        assert "PARALLEL_OF" in conformance["zero_count_edge_types"]
+
+    def test_all_endpoints_missing_warns(self, staging_dir: Path, curated_dir: Path) -> None:
+        # Links present but every endpoint missing (e.g. an id-scheme mismatch) is
+        # the silent-failure mode the counter must catch.
+        write_parallel_links(
+            staging_dir, [{"hadith_id_a": "sunnah:x:1", "hadith_id_b": "sunnah:y:1"}]
+        )
+        client = MockNeo4jClient()
+        client.set_read_results([{"a_exists": False, "b_exists": False}])
+
+        with structlog.testing.capture_logs() as logs:
+            load_all_edges(client, staging_dir, curated_dir, strict=False)
+
+        events = {(e["event"], e.get("log_level")) for e in logs}
+        assert ("parallel_of_loaded_zero", "warning") in events
