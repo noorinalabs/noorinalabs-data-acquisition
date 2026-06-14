@@ -7,6 +7,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+import structlog
 
 from src.graph.load_edges import (
     _APPEARS_IN_QUERY,
@@ -454,6 +455,7 @@ class TestLoadStudiedUnderGlob:
                     "source": "muhaddithat",
                     "from_external_id": "1",
                     "to_external_id": "2",
+                    "relation": "STUDIED_UNDER",
                 }
             ],
         )
@@ -467,6 +469,7 @@ class TestLoadStudiedUnderGlob:
                     "source": "itqan",
                     "from_external_id": "2",
                     "to_external_id": "3",
+                    "relation": "STUDIED_UNDER",
                 }
             ],
         )
@@ -493,6 +496,7 @@ class TestLoadStudiedUnderGlob:
             "source": "x",
             "from_external_id": "1",
             "to_external_id": "2",
+            "relation": "STUDIED_UNDER",
         }
         _write_network_edges(staging_dir, "muhaddithat", [edge])
         _write_network_edges(staging_dir, "itqan", [dict(edge, source="itqan")])
@@ -507,8 +511,9 @@ class TestLoadStudiedUnderGlob:
         assert result.created == 0
 
     def test_excludes_non_studentship_source(self, staging_dir: Path) -> None:
-        """A non-studentship NETWORK_EDGE producer (mis = isnad transmission) is
-        NOT globbed into STUDIED_UNDER — only the muhaddithat edge loads (da#133)."""
+        """A non-studentship NETWORK_EDGE producer (mis = isnad transmission, declaring
+        TRANSMITTED_TO) is NOT globbed into STUDIED_UNDER — only the muhaddithat edge
+        loads (da#133)."""
         _write_network_edges(
             staging_dir,
             "muhaddithat",
@@ -519,6 +524,7 @@ class TestLoadStudiedUnderGlob:
                     "source": "muhaddithat",
                     "from_external_id": "1",
                     "to_external_id": "2",
+                    "relation": "STUDIED_UNDER",
                 }
             ],
         )
@@ -531,6 +537,7 @@ class TestLoadStudiedUnderGlob:
                     "to_narrator_name": "Y",
                     "source": "mis",
                     "hadith_id": "mis:sahih_muslim:1:1",
+                    "relation": "TRANSMITTED_TO",
                 }
             ],
         )
@@ -553,8 +560,8 @@ class TestLoadStudiedUnderGlob:
 
 class TestStudiedUnderRelationRouting:
     """da#133: the loader routes by the declared ``relation`` field, not the
-    filename. The filename allowlist only survives as the default for legacy
-    relation-less rows (covered by :class:`TestLoadStudiedUnderGlob`)."""
+    filename. da#157 removed the relation-less default — every row MUST declare a
+    relation (fail-fast covered by :class:`TestStudiedUnderRelationRequired`)."""
 
     def test_relation_field_includes_non_allowlisted_source(self, staging_dir: Path) -> None:
         """A NETWORK_EDGE file whose slug is NOT in the studentship allowlist still
@@ -643,3 +650,171 @@ class TestStudiedUnderRelationRouting:
             "from_id": make_canonical_id(normalize_arabic("X")),
             "to_id": make_canonical_id(normalize_arabic("Y")),
         } not in batch
+
+
+class TestStudiedUnderRelationRequired:
+    """da#157: a NETWORK_EDGE that declares NO relation is REFUSED (raises), never
+    silently defaulted to STUDIED_UNDER. Removes the footgun where the next
+    isnad-transmission producer that forgot to set ``relation`` would have its edges
+    mis-routed onto the studentship relation."""
+
+    def test_relationless_row_raises_for_allowlisted_filename(self, staging_dir: Path) -> None:
+        """A relation-less row in a ``muhaddithat`` (formerly allowlisted) file no
+        longer silently becomes STUDIED_UNDER — it raises. This is the exact trap
+        da#157 closes."""
+        _write_network_edges(
+            staging_dir,
+            "muhaddithat",
+            [
+                {
+                    "from_narrator_name": "أ",
+                    "to_narrator_name": "ب",
+                    "source": "muhaddithat",
+                    "from_external_id": "1",
+                    "to_external_id": "2",
+                    "relation": None,  # producer forgot to declare the relation
+                }
+            ],
+        )
+        with pytest.raises(ValueError, match=r"declares no `relation`"):
+            _load_studied_under(MockNeo4jClient(), staging_dir)
+
+    def test_relationless_row_raises_for_unknown_source(self, staging_dir: Path) -> None:
+        """A relation-less row in a non-allowlisted file used to be silently dropped;
+        now it raises loudly so the producer defect cannot pass unnoticed."""
+        _write_network_edges(
+            staging_dir,
+            "newsource",
+            [
+                {
+                    "from_narrator_name": "أ",
+                    "to_narrator_name": "ب",
+                    "source": "newsource",
+                    "from_external_id": "1",
+                    "to_external_id": "2",
+                    "relation": None,
+                }
+            ],
+        )
+        with pytest.raises(ValueError, match=r"declares no `relation`"):
+            _load_studied_under(MockNeo4jClient(), staging_dir)
+
+    def test_blank_relation_raises(self, staging_dir: Path) -> None:
+        """A whitespace-only relation is treated as undeclared and refused."""
+        _write_network_edges(
+            staging_dir,
+            "muhaddithat",
+            [
+                {
+                    "from_narrator_name": "أ",
+                    "to_narrator_name": "ب",
+                    "source": "muhaddithat",
+                    "from_external_id": "1",
+                    "to_external_id": "2",
+                    "relation": "   ",
+                }
+            ],
+        )
+        with pytest.raises(ValueError, match=r"declares no `relation`"):
+            _load_studied_under(MockNeo4jClient(), staging_dir)
+
+    def test_unknown_relation_value_raises(self, staging_dir: Path) -> None:
+        """A relation value outside the recognized set is refused rather than
+        silently skipped — guards against typos like ``STUDENT_OF``."""
+        _write_network_edges(
+            staging_dir,
+            "muhaddithat",
+            [
+                {
+                    "from_narrator_name": "أ",
+                    "to_narrator_name": "ب",
+                    "source": "muhaddithat",
+                    "from_external_id": "1",
+                    "to_external_id": "2",
+                    "relation": "STUDENT_OF",
+                }
+            ],
+        )
+        with pytest.raises(ValueError, match=r"unknown relation 'STUDENT_OF'"):
+            _load_studied_under(MockNeo4jClient(), staging_dir)
+
+    def test_transmission_producer_never_mislabeled_studied_under(self, staging_dir: Path) -> None:
+        """A transmission producer (mis) whose every row declares TRANSMITTED_TO
+        contributes ZERO STUDIED_UNDER edges — its isnad edges are never mislabeled
+        as studentship."""
+        _write_network_edges(
+            staging_dir,
+            "mis",
+            [
+                {
+                    "from_narrator_name": "X",
+                    "to_narrator_name": "Y",
+                    "source": "mis",
+                    "from_external_id": "1",
+                    "to_external_id": "2",
+                    "relation": "TRANSMITTED_TO",
+                },
+                {
+                    "from_narrator_name": "Y",
+                    "to_narrator_name": "Z",
+                    "source": "mis",
+                    "from_external_id": "2",
+                    "to_external_id": "3",
+                    "relation": "TRANSMITTED_TO",
+                },
+            ],
+        )
+        result = _load_studied_under(MockNeo4jClient(), staging_dir)
+        assert result.created == 0
+
+
+class TestParallelOfConformance:
+    """PARALLEL_OF load conformance — empty / zero-edge loads must be surfaced,
+    and a production-shaped links file must actually load edges (da#160)."""
+
+    def test_production_shaped_links_load_edges(self, staging_dir: Path, curated_dir: Path) -> None:
+        # A production-shaped batch of detected parallels (many pairs) loads one
+        # PARALLEL_OF edge each when both endpoints exist.
+        links = [
+            {"hadith_id_a": f"sunnah:c{c}:h0", "hadith_id_b": f"sunnah:c{c}:h1"} for c in range(25)
+        ]
+        write_parallel_links(staging_dir, links)
+        client = MockNeo4jClient()
+        client.set_read_results([{"a_exists": True, "b_exists": True}] * len(links))
+
+        results = load_all_edges(client, staging_dir, curated_dir, strict=False)
+        po = next(r for r in results if r.edge_type == "PARALLEL_OF")
+        assert po.created == 25
+        assert po.missing_endpoints == 0
+
+    def test_empty_links_file_warns(self, staging_dir: Path, curated_dir: Path) -> None:
+        # An empty parallel_links.parquet (the da#160 state) must surface a warning,
+        # not pass silently, and the conformance summary must flag PARALLEL_OF.
+        write_parallel_links(staging_dir, [])
+        client = MockNeo4jClient()
+
+        with structlog.testing.capture_logs() as logs:
+            results = load_all_edges(client, staging_dir, curated_dir, strict=False)
+
+        po = next(r for r in results if r.edge_type == "PARALLEL_OF")
+        assert po.created == 0
+        events = {(e["event"], e.get("log_level")) for e in logs}
+        assert ("parallel_of_no_edges", "warning") in events
+        conformance = next(e for e in logs if e["event"] == "edge_load_conformance")
+        assert conformance["log_level"] == "warning"
+        assert "PARALLEL_OF" in conformance["zero_count_edge_types"]
+
+    def test_all_endpoints_missing_warns(self, staging_dir: Path, curated_dir: Path) -> None:
+        # Links present but every endpoint missing (e.g. an id-scheme mismatch) is
+        # the silent-failure mode the counter must catch.
+        write_parallel_links(
+            staging_dir, [{"hadith_id_a": "sunnah:x:1", "hadith_id_b": "sunnah:y:1"}]
+        )
+        client = MockNeo4jClient()
+        client.set_read_results([{"a_exists": False, "b_exists": False}])
+
+        with structlog.testing.capture_logs() as logs:
+            load_all_edges(client, staging_dir, curated_dir, strict=False)
+
+        events = {(e["event"], e.get("log_level")) for e in logs}
+        assert ("parallel_of_loaded_zero", "warning") in events

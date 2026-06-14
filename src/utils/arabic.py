@@ -17,6 +17,8 @@ __all__ = [
     "clean_whitespace",
     "is_arabic",
     "extract_transmission_phrases",
+    "contains_transmission_marker",
+    "transliterate",
 ]
 
 # ---------------------------------------------------------------------------
@@ -77,26 +79,75 @@ _TRANSMISSION_TERMS: dict[str, str] = {
     "كتب إلي": "kataba_ilayya",
 }
 
+# Short transmission particles that must be anchored on a word boundary. Unlike
+# the long forms (حدثنا/أخبرنا/…), these one-to-three-letter particles occur as
+# substrings *inside* real narrator names — عن in عَنْبَسَة / مَعْن / يَعْنِي,
+# قال in مَقَالَة — so an un-anchored match over-segments a genuine name into a
+# spurious mention (da#155 / da#154). The long forms are distinctive enough that
+# substring collisions don't occur in practice, so they stay un-anchored.
+_SHORT_PARTICLES: frozenset[str] = frozenset({"عن", "قال", "سمع"})
 
-def _compile_diacritic_tolerant(term: str) -> re.Pattern[str]:
+# Arabic letters + combining marks + tatweel, as a regex class body (no
+# brackets). Used to build the word-boundary lookarounds below: a particle is a
+# standalone transmission term only when it is NOT flanked by another Arabic
+# letter or diacritic. Punctuation (، ؛ …) and whitespace fall outside this
+# class, so they correctly count as boundaries. Excludes Arabic-Indic digits.
+_AR_LETTER_OR_MARK: str = "\u0621-\u063a\u0640-\u065f\u0670-\u06d3"
+
+# Fixed-width (single-char) lookbehind/lookahead asserting a non-letter boundary.
+_LB: str = rf"(?<![{_AR_LETTER_OR_MARK}])"
+_LA: str = rf"(?![{_AR_LETTER_OR_MARK}])"
+
+# Normalization equivalence classes mirroring :func:`normalize_arabic`. A term
+# written with one orthographic variant (e.g. أخبرنا with hamza-alif U+0623)
+# must also match the bare-alif form found throughout the real corpus (اخبرنا
+# U+0627) — the production isnads mix both, and matching only the hamza form
+# left whole sub-chains un-split into blobs (da#158).
+_ALIF_CLASS: str = "اأإآٱ"  # ا أ إ آ ٱ
+_HAMZA_CLASS: str = "ءؤئ"  # ء ؤ ئ
+_TAA_CLASS: str = "ةه"  # ة ه
+_NORM_EQUIV: dict[str, str] = {}
+for _cls in (_ALIF_CLASS, _HAMZA_CLASS, _TAA_CLASS):
+    for _ch in _cls:
+        _NORM_EQUIV[_ch] = _cls
+
+
+def _variant_class(ch: str) -> str:
+    """Return a regex fragment matching *ch* and its normalization-equivalents."""
+    equiv = _NORM_EQUIV.get(ch)
+    if equiv is not None:
+        return "[" + equiv + "]"
+    return re.escape(ch)
+
+
+def _compile_diacritic_tolerant(term: str, *, anchor: bool) -> re.Pattern[str]:
     """Compile *term* into a regex that tolerates interleaved diacritics.
 
-    Each base letter is followed by an optional diacritics/tatweel run, and
-    inter-word whitespace is matched flexibly. The compiled pattern matches the
-    fully-voweled form found in real isnads while preserving match positions in
-    the original (un-normalized) text.
+    Each base letter is expanded to a normalization-equivalence class (so alif
+    and hamza/taa variants all match) followed by an optional diacritics/tatweel
+    run, and inter-word whitespace is matched flexibly. The compiled pattern
+    matches the fully-voweled, orthographically-variant forms found in real
+    isnads while preserving match positions in the original (un-normalized) text.
+
+    When *anchor* is true the pattern is wrapped in non-letter-boundary
+    lookarounds so a short particle (عن/قال/سمع) only matches as a standalone
+    transmission term, never as a substring of a longer name (da#155).
     """
     parts: list[str] = []
     for ch in term:
         if ch.isspace():
             parts.append(r"\s+")
         else:
-            parts.append(re.escape(ch) + _OPT_DIAC)
-    return re.compile("".join(parts))
+            parts.append(_variant_class(ch) + _OPT_DIAC)
+    body = "".join(parts)
+    if anchor:
+        body = _LB + body + _LA
+    return re.compile(body)
 
 
 TRANSMISSION_PATTERNS: dict[re.Pattern[str], str] = {
-    _compile_diacritic_tolerant(term): label for term, label in _TRANSMISSION_TERMS.items()
+    _compile_diacritic_tolerant(term, anchor=term in _SHORT_PARTICLES): label
+    for term, label in _TRANSMISSION_TERMS.items()
 }
 
 # ---------------------------------------------------------------------------
@@ -182,3 +233,265 @@ def extract_transmission_phrases(text: str) -> list[tuple[int, int, str]]:
             results.append((start, end, label))
             last_end = end
     return results
+
+
+# ---------------------------------------------------------------------------
+# Transliteration (Arabic name -> Latin display form)
+# ---------------------------------------------------------------------------
+#
+# Narrator records carry a required ``name_ar`` but almost never a sourced
+# ``name_en`` (113 / 47,199 at P5W3 — da#159), so English search and display are
+# hollow. This is a deterministic, dependency-free Arabic->Latin transliterator
+# used to synthesize a readable display name whenever a sourced English name is
+# absent.
+#
+# Two layers, in priority order:
+#   1. A token lexicon of the formulaic building blocks of classical narrator
+#      names — kunya/nasab particles (Abu, ibn, bint, Umm), theophorics
+#      (Abd Allah, al-Rahman), the most common given names (Muhammad, Ali,
+#      Husayn, ...) and high-frequency nisbas (al-Bukhari, al-Kufi, ...).
+#      Arabic names are highly repetitive, so a modest lexicon renders the
+#      overwhelming majority of *tokens* correctly.
+#   2. A consonant-skeleton letter map for any token outside the lexicon. The
+#      result is imperfect for rare, un-voweled tokens (Arabic script omits short
+#      vowels) but is always non-empty, ASCII, and deterministic — turning 0%
+#      coverage into ~100% with sane, stable output.
+#
+# Output is intentionally plain ASCII (no ʿayn/macrons) so it is friendly to
+# fulltext search and case-insensitive matching.
+
+# Per-letter consonant/long-vowel map. Carriers that contribute no Latin glyph
+# in plain ASCII (hamza, ayn) map to the empty string. The input is expected to
+# be normalized (diacritics already stripped by :func:`normalize_arabic`).
+_TRANSLIT_LETTERS: dict[str, str] = {
+    "ا": "a",
+    "ب": "b",
+    "ت": "t",
+    "ث": "th",
+    "ج": "j",
+    "ح": "h",
+    "خ": "kh",
+    "د": "d",
+    "ذ": "dh",
+    "ر": "r",
+    "ز": "z",
+    "س": "s",
+    "ش": "sh",
+    "ص": "s",
+    "ض": "d",
+    "ط": "t",
+    "ظ": "z",
+    "ع": "",
+    "غ": "gh",
+    "ف": "f",
+    "ق": "q",
+    "ك": "k",
+    "ل": "l",
+    "م": "m",
+    "ن": "n",
+    "ه": "h",
+    "ة": "a",
+    "و": "w",
+    "ي": "y",
+    "ى": "a",
+    "ء": "",
+}
+
+# Token lexicon, written with natural spellings; keys are normalized at import so
+# a normalized lookup token matches regardless of diacritics / alif-hamza form.
+# Values are pre-cased for their typical role (particles ``ibn``/``bint`` stay
+# lowercase for mid-name use; the article prefix stays ``al-``).
+_RAW_NAME_LEXICON: dict[str, str] = {
+    # Kunya / nasab particles
+    "أبو": "Abu",
+    "أبا": "Aba",
+    "أبي": "Abi",
+    "ابن": "ibn",
+    "بن": "ibn",
+    "بنت": "bint",
+    "أم": "Umm",
+    # Theophorics & honorifics
+    "عبد": "Abd",
+    "الله": "Allah",
+    "عبدالله": "Abd Allah",
+    "عبدالرحمن": "Abd al-Rahman",
+    "الرحمن": "al-Rahman",
+    "الرحيم": "al-Rahim",
+    "الصديق": "al-Siddiq",
+    "الفاروق": "al-Faruq",
+    # Common given names
+    "محمد": "Muhammad",
+    "أحمد": "Ahmad",
+    "علي": "Ali",
+    "حسن": "Hasan",
+    "الحسن": "al-Hasan",
+    "حسين": "Husayn",
+    "الحسين": "al-Husayn",
+    "عمر": "Umar",
+    "عثمان": "Uthman",
+    "إبراهيم": "Ibrahim",
+    "إسماعيل": "Ismail",
+    "إسحاق": "Ishaq",
+    "يعقوب": "Yaqub",
+    "يوسف": "Yusuf",
+    "موسى": "Musa",
+    "عيسى": "Isa",
+    "داود": "Dawud",
+    "سليمان": "Sulayman",
+    "يحيى": "Yahya",
+    "خالد": "Khalid",
+    "جعفر": "Jafar",
+    "صالح": "Salih",
+    "حماد": "Hammad",
+    "حمزة": "Hamza",
+    "زيد": "Zayd",
+    "سعيد": "Said",
+    "سعد": "Sad",
+    "سفيان": "Sufyan",
+    "سلمان": "Salman",
+    "طلحة": "Talha",
+    "عمرو": "Amr",
+    "عباس": "Abbas",
+    "العباس": "al-Abbas",
+    "معاوية": "Muawiya",
+    "مالك": "Malik",
+    "أنس": "Anas",
+    "بكر": "Bakr",
+    "هريرة": "Hurayra",
+    "الزبير": "al-Zubayr",
+    "عوف": "Awf",
+    "الخطاب": "al-Khattab",
+    "شعبة": "Shuba",
+    "قتادة": "Qatada",
+    "نافع": "Nafi",
+    "مجاهد": "Mujahid",
+    "عطاء": "Ata",
+    "هشام": "Hisham",
+    "عروة": "Urwa",
+    "معمر": "Mamar",
+    "وكيع": "Waki",
+    "الوليد": "al-Walid",
+    "يزيد": "Yazid",
+    "جابر": "Jabir",
+    "ثابت": "Thabit",
+    "حذيفة": "Hudhayfa",
+    "عمار": "Ammar",
+    "بلال": "Bilal",
+    # Women narrators
+    "عائشة": "Aisha",
+    "فاطمة": "Fatima",
+    "خديجة": "Khadija",
+    "سلمى": "Salma",
+    # High-frequency nisbas
+    "البخاري": "al-Bukhari",
+    "المدني": "al-Madani",
+    "الكوفي": "al-Kufi",
+    "البصري": "al-Basri",
+    "الدمشقي": "al-Dimashqi",
+    "الأنصاري": "al-Ansari",
+    "القرشي": "al-Qurashi",
+    "التميمي": "al-Tamimi",
+    "الثقفي": "al-Thaqafi",
+    "الهمداني": "al-Hamdani",
+    "الزهري": "al-Zuhri",
+    "الثوري": "al-Thawri",
+    "الأعمش": "al-Amash",
+    "الشعبي": "al-Shabi",
+    "الأوزاعي": "al-Awzai",
+    "الليث": "al-Layth",
+    "الأشعري": "al-Ashari",
+    "السلمي": "al-Sulami",
+}
+
+_NAME_LEXICON: dict[str, str] = {normalize_arabic(k): v for k, v in _RAW_NAME_LEXICON.items()}
+
+# Particles that read lowercase in the middle of a name but are capitalized when
+# they lead it (e.g. "Muhammad ibn Ali" vs "Ibn Sirin").
+_LOWERCASE_PARTICLES: frozenset[str] = frozenset({"ibn", "bint"})
+
+
+def _capitalize(token: str) -> str:
+    """Uppercase the first alphabetic character of *token*, leaving the rest."""
+    for i, ch in enumerate(token):
+        if ch.isalpha():
+            return token[:i] + ch.upper() + token[i + 1 :]
+    return token
+
+
+def _map_letters(token_norm: str) -> str:
+    """Map a normalized Arabic token to its consonant/vowel skeleton."""
+    return "".join(_TRANSLIT_LETTERS.get(ch, "") for ch in token_norm)
+
+
+def _transliterate_token(token: str) -> str:
+    """Transliterate a single whitespace-delimited token to a Latin form.
+
+    Lexicon hit wins; otherwise the definite article ``al-`` is split off and the
+    remainder is rendered with the consonant-skeleton map. Tokens with no Arabic
+    content are returned trimmed (already-Latin input passes through).
+    """
+    norm = normalize_arabic(token)
+    if not norm:
+        return ""
+    if norm in _NAME_LEXICON:
+        return _NAME_LEXICON[norm]
+    if not is_arabic(norm):
+        return token.strip()
+    # Definite article prefix (alif-lam) -> "al-" + capitalized remainder.
+    if norm.startswith("ال") and len(norm) > 2:
+        body = _map_letters(norm[2:])
+        return "al-" + _capitalize(body) if body else "al-"
+    return _capitalize(_map_letters(norm))
+
+
+def transliterate(text: str) -> str:
+    """Transliterate an Arabic name to a readable, ASCII Latin display form.
+
+    Deterministic and dependency-free. Returns ``""`` for empty/blank input.
+    Intended as a *fallback* display name when a record has no sourced
+    ``name_en`` — see :mod:`src.graph.load_nodes` (da#159). The output is not a
+    scholarly romanization; it favours readable, stable, search-friendly forms.
+    """
+    if not text or not text.strip():
+        return ""
+    text = _TATWEEL_RE.sub("", text)
+    out: list[str] = []
+    for token in _MULTI_WS_RE.sub(" ", text).strip().split(" "):
+        stripped = token.strip("،.,;:()[]{}\"'`-")
+        if not stripped:
+            continue
+        latin = _transliterate_token(stripped)
+        if not latin:
+            continue
+        if latin in _LOWERCASE_PARTICLES and out:
+            out.append(latin)
+        elif latin in _LOWERCASE_PARTICLES:
+            out.append(_capitalize(latin))
+        else:
+            out.append(latin)
+    return " ".join(out).strip()
+
+
+# Independent, normalization-anchored detector for whether a string carries a
+# transmission marker at all. It runs on :func:`normalize_arabic` output and
+# anchors *every* term on a non-letter boundary, so it neither misses an
+# orthographic variant nor false-matches a marker buried inside a longer name.
+# Built off the canonical normalizer (not the hand-built char-classes used by
+# TRANSMISSION_PATTERNS) so it stays a valid fail-loud signal even if those
+# pattern classes ever drift — see src.parse.narrator_extraction._extract_arabic.
+_NORM_MARKER_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(_LB + re.escape(normalize_arabic(term)) + _LA) for term in _TRANSMISSION_TERMS
+)
+
+
+def contains_transmission_marker(text: str) -> bool:
+    """Return True if *text* contains a transmission term as a bounded word.
+
+    Used by the Arabic narrator extractor to *fail loud* — a chain that carries a
+    transmission marker but yields no segmentable phrases means the segmenter
+    failed, and the whole chain must never be minted as a single "narrator" blob
+    (da#158). Matching is diacritic/variant-insensitive (via normalization) and
+    word-boundary anchored (so ``عن`` in ``عنبسة`` does not count).
+    """
+    normalized = normalize_arabic(text)
+    return any(pattern.search(normalized) for pattern in _NORM_MARKER_PATTERNS)

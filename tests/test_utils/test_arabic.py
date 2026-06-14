@@ -6,6 +6,7 @@ import pytest
 
 from src.utils.arabic import (
     clean_whitespace,
+    contains_transmission_marker,
     extract_transmission_phrases,
     is_arabic,
     normalize_alif,
@@ -13,6 +14,7 @@ from src.utils.arabic import (
     normalize_hamza,
     normalize_taa_marbuta,
     strip_diacritics,
+    transliterate,
 )
 
 # ---------------------------------------------------------------------------
@@ -246,3 +248,171 @@ class TestExtractTransmissionPhrases:
         labels = {label for _, _, label in results}
         assert "haddathani" in labels
         assert "akhbarani" in labels
+
+
+# ---------------------------------------------------------------------------
+# transliterate
+# ---------------------------------------------------------------------------
+
+
+class TestTransliterate:
+    @pytest.mark.parametrize(
+        ("name_ar", "expected"),
+        [
+            ("محمد", "Muhammad"),
+            ("أحمد", "Ahmad"),
+            ("علي", "Ali"),
+            ("عائشة", "Aisha"),
+            ("فاطمة", "Fatima"),
+            ("البخاري", "al-Bukhari"),
+            ("الزهري", "al-Zuhri"),
+        ],
+        ids=[
+            "muhammad",
+            "ahmad",
+            "ali",
+            "aisha",
+            "fatima",
+            "al-bukhari",
+            "al-zuhri",
+        ],
+    )
+    def test_lexicon_single_token(self, name_ar: str, expected: str) -> None:
+        assert transliterate(name_ar) == expected
+
+    def test_theophoric_two_tokens(self) -> None:
+        assert transliterate("عبد الله") == "Abd Allah"
+
+    def test_theophoric_single_token(self) -> None:
+        """A run-together ``عبدالله`` renders the same as the spaced form."""
+        assert transliterate("عبدالله") == "Abd Allah"
+
+    def test_kunya(self) -> None:
+        assert transliterate("أبو هريرة") == "Abu Hurayra"
+
+    def test_nasab_particle_lowercase_mid_name(self) -> None:
+        """``بن``/``ابن`` read lowercase between names."""
+        assert transliterate("محمد بن إسماعيل") == "Muhammad ibn Ismail"
+
+    def test_nasab_particle_capitalized_when_leading(self) -> None:
+        assert transliterate("ابن عباس") == "Ibn Abbas"
+
+    def test_compound_full_name(self) -> None:
+        assert transliterate("عبد الله بن عباس") == "Abd Allah ibn Abbas"
+
+    def test_diacritics_are_ignored(self) -> None:
+        """A voweled spelling normalizes to the same output as the bare form."""
+        assert transliterate("مُحَمَّد") == transliterate("محمد") == "Muhammad"
+
+    def test_diacritic_only_token_dropped(self) -> None:
+        assert transliterate("ًٌٍ") == ""
+
+    @pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+    def test_blank_input(self, blank: str) -> None:
+        assert transliterate(blank) == ""
+
+    def test_unknown_token_is_nonempty_ascii(self) -> None:
+        """A token outside the lexicon still yields a non-empty ASCII skeleton."""
+        out = transliterate("الخطاب")  # in lexicon -> al-Khattab
+        assert out == "al-Khattab"
+        # A genuinely rare token falls through to the consonant skeleton.
+        rare = transliterate("بستيطير")
+        assert rare
+        assert rare[0].isupper()
+        assert rare.isascii()
+
+    def test_output_is_ascii_for_full_chain(self) -> None:
+        out = transliterate("عبد الرحمن بن عوف الزهري")
+        assert out
+        assert out.isascii()
+        assert out.startswith("Abd al-Rahman ibn Awf")
+
+    def test_deterministic(self) -> None:
+        name = "محمد بن إسماعيل البخاري"
+        assert transliterate(name) == transliterate(name)
+
+    def test_already_latin_passthrough(self) -> None:
+        assert transliterate("Anas") == "Anas"
+
+
+# ---------------------------------------------------------------------------
+# Orthographic-variant tolerance (da#158) — patterns must match bare-alif forms
+# ---------------------------------------------------------------------------
+
+
+class TestTransmissionVariantTolerance:
+    """The real corpus mixes hamza-alif (أخبرنا) and bare-alif (اخبرنا) forms.
+
+    The transmission patterns are written with the classical hamza forms but
+    must also match the bare-alif spellings, otherwise sub-chains starting with
+    a bare-alif verb stay merged into the previous span as a blob (da#158).
+    """
+
+    def test_bare_alif_akhbarana_matches(self) -> None:
+        # اخبرنا (bare alif U+0627), not أخبرنا (hamza-alif U+0623).
+        labels = [label for _, _, label in extract_transmission_phrases("اخبرنا سفيان")]
+        assert "akhbarana" in labels
+
+    def test_bare_alif_anbaana_matches(self) -> None:
+        labels = [label for _, _, label in extract_transmission_phrases("انبانا فلان")]
+        assert "anba_ana" in labels
+
+    def test_voweled_bare_alif_matches(self) -> None:
+        # Voweled bare-alif form: اِخْبَرَنَا-style with diacritics on bare alif.
+        text = "اخْبَرَنَا سُفْيَانُ"
+        labels = [label for _, _, label in extract_transmission_phrases(text)]
+        assert "akhbarana" in labels
+
+
+# ---------------------------------------------------------------------------
+# Short-particle word-boundary anchoring (da#155)
+# ---------------------------------------------------------------------------
+
+
+class TestShortParticleBoundary:
+    """عن / قال / سمع must only match as standalone particles, never mid-word."""
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "عنبسة",  # عن at offset 0, followed by a letter
+            "معن",  # عن after a letter
+            "يعني",  # عن inside the word
+            "مقالة",  # قال inside the word
+        ],
+    )
+    def test_no_mid_word_particle_match(self, name: str) -> None:
+        assert extract_transmission_phrases(name) == []
+
+    def test_standalone_particle_still_matches(self) -> None:
+        labels = [label for _, _, label in extract_transmission_phrases("فلان عن فلان")]
+        assert "an" in labels
+
+    def test_only_real_particle_matches_in_mixed(self) -> None:
+        # The real عن (between the two names) matches; the عن inside عنبسة does not.
+        results = extract_transmission_phrases("عنبسة عن عبد الله")
+        assert [label for _, _, label in results] == ["an"]
+
+
+# ---------------------------------------------------------------------------
+# contains_transmission_marker — fail-loud signal (da#158)
+# ---------------------------------------------------------------------------
+
+
+class TestContainsTransmissionMarker:
+    def test_detects_voweled_long_form(self) -> None:
+        assert contains_transmission_marker("حَدَّثَنَا سُفْيَانُ") is True
+
+    def test_detects_bare_alif_variant(self) -> None:
+        assert contains_transmission_marker("اخبرنا سفيان") is True
+
+    def test_ignores_particle_inside_name(self) -> None:
+        # عنبسة / مقالة contain عن / قال as substrings but carry no real marker.
+        assert contains_transmission_marker("عنبسة") is False
+        assert contains_transmission_marker("مقالة") is False
+
+    def test_plain_name_has_no_marker(self) -> None:
+        assert contains_transmission_marker("عبد الله بن مسلمة") is False
+
+    def test_empty(self) -> None:
+        assert contains_transmission_marker("") is False

@@ -6,9 +6,12 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 import pytest
+import structlog
 
 from src.models.enums import VariantType
 from src.resolve.parallels import (
+    _build_postings,
+    _candidate_partners,
     _classify_pair,
     _jaccard,
     _tokenize,
@@ -199,3 +202,138 @@ class TestDetectParallels:
         rows = pq.read_table(detect_parallels(staging, threshold=0.1)).to_pylist()
         assert len(rows) == 1
         assert rows[0]["variant_type"] == VariantType.THEMATIC.value
+
+
+class TestBlocking:
+    """Inverted-index blocking: the candidate-generation scale fix (da#160)."""
+
+    def test_postings_maps_token_to_hadith_indices(self) -> None:
+        indexed = [
+            ("a", "sunni", frozenset({"x", "y"})),
+            ("b", "sunni", frozenset({"y", "z"})),
+        ]
+        postings = _build_postings(indexed)
+        assert postings["x"] == [0]
+        assert postings["y"] == [0, 1]
+        assert postings["z"] == [1]
+
+    def test_common_token_skipped_as_blocking_key(self) -> None:
+        # "the" appears in every hadith (df 3); "rare" only in 0 and 2 (df 2).
+        indexed = [
+            ("h0", "sunni", frozenset({"the", "rare"})),
+            ("h1", "sunni", frozenset({"the", "other"})),
+            ("h2", "sunni", frozenset({"the", "rare"})),
+        ]
+        postings = _build_postings(indexed)
+        # df cap 2: "the" (df 3) is NOT a usable key, so h0's only partner is h2
+        # (shared via "rare"), NOT h1 (shared only via the skipped "the").
+        partners = _candidate_partners(0, indexed[0][2], postings, max_block_df=2)
+        assert partners == {2}
+        # Raising the cap above df("the") re-includes h1 as a candidate.
+        partners_all = _candidate_partners(0, indexed[0][2], postings, max_block_df=10)
+        assert partners_all == {1, 2}
+
+
+def _pair_set(path: Path) -> set[tuple[str, str]]:
+    rows = pq.read_table(path).to_pylist()
+    return {(r["hadith_id_a"], r["hadith_id_b"]) for r in rows}
+
+
+class TestProductionShapedCorpus:
+    """End-to-end on a production-shaped corpus: many hadiths, duplicate clusters
+    among unique distractors. Proves PARALLEL_OF links are EMITTED at scale and
+    that blocking is equivalent to the exhaustive scan it replaced (da#160)."""
+
+    # A 2-token scaffold shared by EVERY hadith — these become high-document-
+    # frequency tokens that blocking must skip without losing intra-cluster pairs.
+    _SCAFFOLD = "narrated reported"
+
+    def _build_corpus(
+        self, staging: Path, *, clusters: int, per_cluster: int, distractors: int
+    ) -> set[tuple[str, str]]:
+        """Write a hadiths parquet: ``clusters`` groups of ``per_cluster`` identical
+        hadiths (each group with its own distinctive vocabulary) plus ``distractors``
+        lone hadiths. Returns the set of expected intra-cluster (a,b) pairs."""
+        rows: list[dict[str, object]] = []
+        expected: set[tuple[str, str]] = set()
+        for c in range(clusters):
+            # Distinctive, cluster-local vocabulary (df == per_cluster, well under
+            # the blocking cap) + the shared high-df scaffold.
+            body = " ".join(f"clusterword{c}token{t}" for t in range(8))
+            matn = f"{self._SCAFFOLD} {body}"
+            ids = []
+            for k in range(per_cluster):
+                sid = f"sunnah:c{c}:h{k}"
+                ids.append(sid)
+                rows.append({"source_id": sid, "matn_en": matn, "sect": "sunni"})
+            ids.sort()
+            for a in range(len(ids)):
+                for b in range(a + 1, len(ids)):
+                    expected.add((ids[a], ids[b]))
+        for d in range(distractors):
+            body = " ".join(f"distinct{d}word{t}" for t in range(8))
+            rows.append(
+                {
+                    "source_id": f"sunnah:d:{d}",
+                    "matn_en": f"{self._SCAFFOLD} {body}",
+                    "sect": "sunni",
+                }
+            )
+        write_hadiths(staging, rows, suffix="prod")
+        return expected
+
+    def test_emits_edges_and_matches_exhaustive_scan(self, tmp_path: Path) -> None:
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        expected = self._build_corpus(staging, clusters=6, per_cluster=3, distractors=60)
+
+        # Blocked run with a small cap (< corpus size): the scaffold tokens
+        # ("narrated"/"reported", df = every hadith) are skipped, so blocking does
+        # NOT degenerate to the O(n²) scan, yet still recovers the intra-cluster
+        # pairs (which share cluster-local tokens with df == per_cluster == 3).
+        blocked = detect_parallels(staging, threshold=0.5, max_block_df=10)
+        blocked_pairs = _pair_set(blocked)
+
+        # Production-shaped corpus actually produces edges (the da#160 regression
+        # was zero) — one row per intra-cluster pair: C(3,2) * 6 = 18.
+        assert blocked_pairs == expected
+        assert len(blocked_pairs) == 18
+        rows = pq.read_table(blocked).to_pylist()
+        assert all(r["variant_type"] == VariantType.VERBATIM.value for r in rows)
+        assert all(not r["cross_sect"] for r in rows)
+
+        # Exhaustive reference (cap above corpus size ⇒ every token is a key ⇒ the
+        # old all-pairs scan). Blocking must yield the identical pair set.
+        exhaustive = detect_parallels(staging, threshold=0.5, max_block_df=100_000)
+        assert _pair_set(exhaustive) == blocked_pairs
+
+    def test_default_cap_equivalent_to_exhaustive_on_slice(self, tmp_path: Path) -> None:
+        # Below the default cap every token stays eligible, so the default-config
+        # run is bit-for-bit the exhaustive scan (loaded-slice / CI guarantee).
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        self._build_corpus(staging, clusters=4, per_cluster=2, distractors=20)
+        default_run = detect_parallels(staging, threshold=0.5)
+        exhaustive = detect_parallels(staging, threshold=0.5, max_block_df=100_000)
+        assert _pair_set(default_run) == _pair_set(exhaustive)
+        assert len(_pair_set(default_run)) == 4  # C(2,2) * 4 clusters
+
+    def test_corpus_with_no_pairs_warns(self, tmp_path: Path) -> None:
+        # Hadiths present but no pair clears the threshold ⇒ "produced nothing" is
+        # surfaced as a WARNING so an empty links artifact is not silent (da#160).
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        write_hadiths(
+            staging,
+            [
+                {"source_id": "sunnah:bukhari:1", "matn_en": "alpha beta gamma", "sect": "sunni"},
+                {"source_id": "sunnah:bukhari:2", "matn_en": "delta epsilon zeta", "sect": "sunni"},
+            ],
+            suffix="a",
+        )
+        with structlog.testing.capture_logs() as logs:
+            out = detect_parallels(staging, threshold=0.5)
+        assert pq.read_table(out).num_rows == 0
+        detected = next(e for e in logs if e["event"] == "parallels_detected")
+        assert detected["log_level"] == "warning"
+        assert detected["pairs"] == 0
