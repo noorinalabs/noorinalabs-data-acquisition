@@ -40,6 +40,7 @@ from src.parse.identity import (
     grading_node_id,
     hadith_node_id,
 )
+from src.utils.grade import normalize_grade
 from src.utils.logging import get_logger
 from src.utils.neo4j_client import Neo4jClient
 
@@ -202,6 +203,7 @@ SET n.matn_ar      = row.matn_ar,
     n.isnad_raw_ar = row.isnad_raw_ar,
     n.isnad_raw_en = row.isnad_raw_en,
     n.grade        = row.grade,
+    n.grade_normalized = row.grade_normalized,
     n.source_corpus = row.source_corpus,
     n.sect         = row.sect,
     n.collection_name = row.collection_name
@@ -247,6 +249,10 @@ def _load_hadiths(
                     "isnad_raw_ar": _val(row, "isnad_raw_ar"),
                     "isnad_raw_en": _val(row, "isnad_raw_en"),
                     "grade": _val(row, "grade"),
+                    # Normalized display grade alongside the verbatim raw value: a
+                    # corpus may store the grade as raw Arabic / mixed script,
+                    # which is not a stable key to filter or display on (da#148).
+                    "grade_normalized": normalize_grade(_val(row, "grade")),
                     "source_corpus": _val(row, "source_corpus", ""),
                     "sect": _val(row, "sect", ""),
                     "collection_name": _val(row, "collection_name", ""),
@@ -440,6 +446,7 @@ MERGE (n:Grading {id: row.id})
 SET n.hadith_id          = row.hadith_id,
     n.scholar_name       = row.scholar_name,
     n.grade              = row.grade,
+    n.grade_normalized   = row.grade_normalized,
     n.methodology_school = row.methodology_school,
     n.era                = row.era
 """
@@ -488,6 +495,10 @@ def _load_gradings(
                     "hadith_id": hadith_node_id(sid),
                     "scholar_name": _val(row, "collection_name", "unknown"),
                     "grade": grade,
+                    # Normalized display grade (da#148): the raw ``grade`` may be
+                    # Arabic / mixed-script free text; map it onto the HadithGrade
+                    # vocabulary so the UI and queries have a stable key.
+                    "grade_normalized": normalize_grade(grade),
                     "methodology_school": None,
                     "era": None,
                 }
