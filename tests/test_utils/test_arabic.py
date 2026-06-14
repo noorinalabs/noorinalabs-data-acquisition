@@ -223,3 +223,26 @@ class TestExtractTransmissionPhrases:
         assert isinstance(start, int)
         assert isinstance(end, int)
         assert label == "haddathana"
+
+    def test_matches_diacritized_term(self) -> None:
+        """Fully-voweled terms must match (da#146) — bare patterns alone do not."""
+        # حَدَّثَنَا (voweled) vs the bare keyword حدثنا.
+        results = extract_transmission_phrases("حَدَّثَنَا سُفْيَانُ")
+        labels = [label for _, _, label in results]
+        assert "haddathana" in labels
+
+    def test_overlapping_variants_resolve_to_longer(self) -> None:
+        """``سمعت`` must win over the bare ``سمع`` at a shared position."""
+        results = extract_transmission_phrases("سمعت فلانا")
+        # Exactly one transmission phrase at the start, labelled samitu.
+        starts = [s for s, _, _ in results]
+        assert starts == sorted(starts)
+        assert results[0][2] == "samitu"
+        # No duplicate/overlapping samia span at the same start.
+        assert not any(label == "samia" and start == 0 for start, _, label in results)
+
+    def test_singular_variants_recognized(self) -> None:
+        results = extract_transmission_phrases("حدثني فلان أخبرني فلان")
+        labels = {label for _, _, label in results}
+        assert "haddathani" in labels
+        assert "akhbarani" in labels
