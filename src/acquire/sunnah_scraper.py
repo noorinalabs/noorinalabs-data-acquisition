@@ -200,13 +200,29 @@ def _extract_hadith_from_row(row: Tag) -> dict[str, Any] | None:
 def _scrape_book_page(
     client: httpx.Client,
     collection: str,
-    book_number: int,
+    book_number: int | str,
 ) -> list[dict[str, Any]]:
-    """Scrape all hadiths from a single book page."""
+    """Scrape all hadiths from a single book page.
+
+    ``book_number`` is the URL path segment: an ``int`` for numbered books or a
+    name such as ``"introduction"``.  A numeric *key* is derived for chapter
+    numbering and the per-row ``book_number`` fallback; named segments carry no
+    inherent number, so they key to ``0`` and their hadiths fall back to the
+    collection-wide reference for source_id keying (see
+    ``_extract_collection_ref_number``).
+    """
     url = f"{BASE_URL}/{collection}/{book_number}"
     soup = _fetch_page(client, url)
     if soup is None:
         return []
+
+    book_key = (
+        book_number
+        if isinstance(book_number, int)
+        else int(book_number)
+        if book_number.isdigit()
+        else 0
+    )
 
     # Chapter info
     chapter_name_en: str | None = None
@@ -238,7 +254,7 @@ def _scrape_book_page(
 
     # Track chapter numbers within a book page. Sunnah.com sometimes has
     # multiple chapters per book, marked by chapter header elements.
-    current_chapter_number = book_number
+    current_chapter_number = book_key
     chapter_counter = 0
     for row in rows:
         chapter_heading = row.find_previous_sibling(
@@ -246,14 +262,14 @@ def _scrape_book_page(
         )
         if chapter_heading:
             chapter_counter += 1
-            current_chapter_number = book_number * 100 + chapter_counter
+            current_chapter_number = book_key * 100 + chapter_counter
 
         record = _extract_hadith_from_row(row)
         if record is not None:
             # Prefer the book number parsed from the in-book reference; fall
-            # back to the page URL's book number when the row was absent.
+            # back to the page URL's book key when the row was absent.
             if record.get("book_number") is None:
-                record["book_number"] = book_number
+                record["book_number"] = book_key
             record["chapter_number"] = current_chapter_number
             record["chapter_name_ar"] = chapter_name_ar
             record["chapter_name_en"] = chapter_name_en
@@ -262,29 +278,50 @@ def _scrape_book_page(
     return hadiths
 
 
-def _get_book_numbers(client: httpx.Client, collection: str) -> list[int]:
-    """Get list of book numbers for a collection from its index page."""
+def _get_book_numbers(client: httpx.Client, collection: str) -> list[int | str]:
+    """Get the book "segments" for a collection from its index page.
+
+    Books are linked as ``/{collection}/{segment}``.  Most segments are numeric
+    (``/riyadussalihin/1``), but some are named — sunnah.com routes a
+    collection's first "Book of Miscellany"-style book at
+    ``/{collection}/introduction``.  Those named books are real hadith pages
+    (riyadussalihin's ``introduction`` alone holds 679 of its 1,896 hadiths), so
+    the earlier ``segment.isdigit()`` filter silently truncated such collections
+    by their entire first book.
+
+    Numeric segments are returned as ``int`` (sorted ascending); named segments
+    are returned as ``str`` and ordered first, since the named book (the
+    introduction) precedes the numbered ones.
+    """
     soup = _fetch_page(client, f"{BASE_URL}/{collection}")
     if soup is None:
         return []
 
-    book_numbers: list[int] = []
-    # Books are linked as /{collection}/{number}
+    numeric: list[int] = []
+    named: list[str] = []
     links = soup.select("a[href]")
     prefix = f"/{collection}/"
-    seen: set[int] = set()
+    seen: set[str] = set()
     for link in links:
         href = link.get("href", "")
-        if isinstance(href, str) and href.startswith(prefix):
-            segment = href[len(prefix) :].rstrip("/")
-            if segment.isdigit():
-                num = int(segment)
-                if num not in seen:
-                    seen.add(num)
-                    book_numbers.append(num)
+        if not isinstance(href, str) or not href.startswith(prefix):
+            continue
+        # Drop any #anchor / ?query, then trailing slashes, so a variant like
+        # "introduction#C0.00" folds onto the bare "introduction" book page.
+        segment = href[len(prefix) :].split("#", 1)[0].split("?", 1)[0].rstrip("/")
+        # Only single path components are book pages (skip "" and ".../x/y").
+        if not segment or "/" in segment or segment in seen:
+            continue
+        seen.add(segment)
+        if segment.isdigit():
+            numeric.append(int(segment))
+        else:
+            named.append(segment)
 
-    book_numbers.sort()
-    return book_numbers
+    numeric.sort()
+    named.sort()
+    # Named books (the introduction / first book) come before the numbered ones.
+    return [*named, *numeric]
 
 
 def _scrape_collection(

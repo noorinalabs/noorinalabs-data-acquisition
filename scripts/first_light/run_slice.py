@@ -32,6 +32,10 @@ Examples
 
     # Live re-scrape riyadussalihin book 1, then load
     uv run python scripts/first_light/run_slice.py --live --collection riyadussalihin --book 1
+
+    # Complete a whole collection live (every book incl. the introduction) and
+    # load it — da#177 used this to take riyadussalihin to its full 1,896.
+    uv run python scripts/first_light/run_slice.py --live --all-books --collection riyadussalihin
 """
 
 from __future__ import annotations
@@ -80,6 +84,35 @@ def _acquire_live(raw_dir: Path, collection: str, book: int) -> Path:
     out.write_text(json.dumps(hadiths, ensure_ascii=False, indent=2), encoding="utf-8")
     write_manifest(dest, [out])
     print(f"[acquire:live] scraped {len(hadiths)} hadiths from {collection} book {book} -> {out}")
+    return dest
+
+
+def _acquire_live_full(raw_dir: Path, collection: str) -> Path:
+    """Live-scrape the ENTIRE collection (all books, incl. the introduction).
+
+    Unlike ``_acquire_live`` (one ``--book``), this walks every book the index
+    lists — the path used to *complete* a collection on staging (da#177:
+    riyadussalihin -> 1,896). Rate-limited by ``sunnah_scraper``; needs network.
+    """
+    import httpx
+
+    from src.acquire.base import ensure_dir
+    from src.acquire.sunnah_scraper import (
+        REQUEST_TIMEOUT,
+        USER_AGENT,
+        _scrape_collection,
+    )
+
+    dest = ensure_dir(raw_dir / "sunnah_scraped")
+    client = httpx.Client(
+        headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT, follow_redirects=True
+    )
+    try:
+        out = _scrape_collection(client, collection, dest)
+    finally:
+        client.close()
+    count = len(json.loads(out.read_text(encoding="utf-8"))) if out is not None else 0
+    print(f"[acquire:live-full] scraped {count} hadiths from {collection} (all books) -> {dest}")
     return dest
 
 
@@ -183,6 +216,11 @@ def main() -> None:
     parser.add_argument("--collection", default="riyadussalihin", help="Collection (live mode)")
     parser.add_argument("--book", type=int, default=1, help="Book number (live mode)")
     parser.add_argument(
+        "--all-books",
+        action="store_true",
+        help="With --live: scrape the whole collection (every book incl. the introduction)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Acquire + parse only; skip the Neo4j load (no DB connection)",
@@ -204,7 +242,9 @@ def main() -> None:
 
     print(f"=== first-light slice (da#73) — work_dir={work_dir} ===")
 
-    if args.live:
+    if args.live and args.all_books:
+        _acquire_live_full(raw_dir, args.collection)
+    elif args.live:
         _acquire_live(raw_dir, args.collection, args.book)
     else:
         _acquire_sample(raw_dir)

@@ -3,20 +3,31 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 
 from src.acquire.sunnah_scraper import (
+    REQUEST_TIMEOUT,
     SCRAPE_COLLECTIONS,
+    USER_AGENT,
     _extract_collection_ref_number,
     _extract_hadith_from_row,
     _extract_in_book_ref,
     _get_book_numbers,
     _scrape_book_page,
+    _scrape_collection,
     run,
 )
+
+# Opt-in live leg: hits the real sunnah.com (keyless). Off by default so CI stays
+# offline-deterministic; set RUN_LIVE_SUNNAH_SCRAPE=1 to exercise the real parse
+# path end-to-end (the no-fixture-masking guard, main#671).
+_RUN_LIVE = os.getenv("RUN_LIVE_SUNNAH_SCRAPE") == "1"
+_LIVE_SKIP_REASON = "set RUN_LIVE_SUNNAH_SCRAPE=1 to run the live sunnah.com scrape leg"
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -112,6 +123,41 @@ class TestGetBookNumbers:
         books = _get_book_numbers(client, "nonexistent")
         assert books == []
 
+    def test_real_index_markup_includes_introduction(self) -> None:
+        """Real-upstream guard (da#177): the saved sunnah.com riyadussalihin
+        index lists a NAMED ``introduction`` book ("The Book of Miscellany")
+        alongside /1../19. The old digits-only enumerator dropped it, silently
+        truncating the collection by its first 679 hadiths."""
+        index_html = (FIXTURES_DIR / "riyadussalihin_index_sample.html").read_text(encoding="utf-8")
+        client = MagicMock(spec=httpx.Client)
+        client.get.return_value = _mock_response(index_html)
+
+        books = _get_book_numbers(client, "riyadussalihin")
+
+        # Named books first, then numbered books ascending.
+        assert books == ["introduction", *range(1, 20)]
+        # Non-book links (the /riyadussalihin home, /contactus) are excluded.
+        assert "" not in books
+
+    def test_folds_anchor_variant_and_skips_subpaths(self) -> None:
+        """A named book can appear with an #anchor (sunnah.com hisn:
+        ``introduction#C0.00``); fold it onto the bare segment and dedupe.
+        Multi-component hrefs (.../x/y) are not book pages and are skipped."""
+        html = """
+        <html><body>
+          <a href="/hisn/introduction">Introduction</a>
+          <a href="/hisn/introduction#C0.00">Introduction (anchor)</a>
+          <a href="/hisn/1">Book 1</a>
+          <a href="/hisn/1/5">A hadith permalink</a>
+          <a href="/hisn/">collection home</a>
+        </body></html>
+        """
+        client = MagicMock(spec=httpx.Client)
+        client.get.return_value = _mock_response(html)
+
+        books = _get_book_numbers(client, "hisn")
+        assert books == ["introduction", 1]
+
 
 class TestScrapeBookPage:
     def test_extracts_hadiths(self) -> None:
@@ -125,6 +171,35 @@ class TestScrapeBookPage:
         assert hadiths[0]["book_number"] == 1
         assert hadiths[0]["chapter_name_en"] == "The Book of Purification"
         assert hadiths[0]["chapter_name_ar"] == "كتاب الطهارة"
+
+    def test_named_introduction_segment(self) -> None:
+        """A named book segment ("introduction") builds the right URL and keys to
+        book 0; its hadith_number falls back to the collection-wide reference
+        because the in-book row reads "Introduction, Hadith N" (not "Book N")."""
+        intro_html = """
+        <html><body>
+        <div class="actualHadithContainer">
+          <div class="hadith_reference_sticky">Riyad as-Salihin 1</div>
+          <div class="arabic_hadith_full">إنما الأعمال بالنيات</div>
+          <div class="english_hadith_full">Actions are judged by intentions</div>
+          <table class="hadith_reference">
+            <tr><td>In-book reference</td><td>: Introduction, Hadith 1</td></tr>
+          </table>
+        </div>
+        </body></html>
+        """
+        client = MagicMock(spec=httpx.Client)
+        client.get.return_value = _mock_response(intro_html)
+
+        hadiths = _scrape_book_page(client, "riyadussalihin", "introduction")
+
+        client.get.assert_called_once_with("https://sunnah.com/riyadussalihin/introduction")
+        assert len(hadiths) == 1
+        # "Introduction, Hadith 1" doesn't match the "Book N" in-book pattern, so
+        # hadith_number falls back to the collection-wide ref (1), and book_number
+        # falls back to the named-segment key (0).
+        assert hadiths[0]["hadith_number"] == 1
+        assert hadiths[0]["book_number"] == 0
 
 
 class TestRun:
@@ -359,3 +434,36 @@ class TestRiyadussalihinFixture:
             for r in records
         }
         assert len(source_ids) == len(records)
+
+
+@pytest.mark.skipif(not _RUN_LIVE, reason=_LIVE_SKIP_REASON)
+class TestRiyadussalihinLiveUpstream:
+    """Live, opt-in scrape of the REAL sunnah.com riyadussalihin (no key needed).
+
+    This is the no-fixture-masking guard (main#671): a saved fixture proves the
+    parser handles known markup, but only a live fetch proves the *enumerator*
+    still discovers every book — the exact axis where the introduction book was
+    being dropped. Gated on RUN_LIVE_SUNNAH_SCRAPE=1 so CI stays offline.
+    """
+
+    def _client(self) -> httpx.Client:
+        return httpx.Client(
+            headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT, follow_redirects=True
+        )
+
+    def test_introduction_is_enumerated(self) -> None:
+        with self._client() as client:
+            books = _get_book_numbers(client, "riyadussalihin")
+        assert "introduction" in books, "the introduction book must be discovered"
+        assert sum(1 for b in books if isinstance(b, int)) >= 19
+
+    def test_full_collection_reaches_expected_total(self, tmp_path: Path) -> None:
+        with self._client() as client:
+            out = _scrape_collection(client, "riyadussalihin", tmp_path)
+        assert out is not None
+        hadiths = json.loads(out.read_text(encoding="utf-8"))
+        # Riyad as-Salihin is 1,896 hadiths (679 in the introduction + 1,217 in
+        # books 1-19). Allow a small tolerance for upstream markup churn.
+        assert len(hadiths) >= 1890, f"expected ~1896, got {len(hadiths)}"
+        assert all(h.get("text_ar") and h.get("text_en") for h in hadiths)
+        assert all(h.get("hadith_number") is not None for h in hadiths)
