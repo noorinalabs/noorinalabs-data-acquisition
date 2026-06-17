@@ -308,15 +308,27 @@ class TestProductionShapedCorpus:
         assert _pair_set(exhaustive) == blocked_pairs
 
     def test_default_cap_equivalent_to_exhaustive_on_slice(self, tmp_path: Path) -> None:
-        # Below the default cap every token stays eligible, so the default-config
-        # run is bit-for-bit the exhaustive scan (loaded-slice / CI guarantee).
+        # On a loaded slice no larger than the default cap every token's df stays
+        # under the cap, so the default-config run must recover the SAME pair set
+        # as the exhaustive (cap-above-corpus) scan (loaded-slice / CI guarantee).
         staging = tmp_path / "staging"
         staging.mkdir()
-        self._build_corpus(staging, clusters=4, per_cluster=2, distractors=20)
-        default_run = detect_parallels(staging, threshold=0.5)
-        exhaustive = detect_parallels(staging, threshold=0.5, max_block_df=100_000)
-        assert _pair_set(default_run) == _pair_set(exhaustive)
-        assert len(_pair_set(default_run)) == 4  # C(2,2) * 4 clusters
+        expected = self._build_corpus(staging, clusters=4, per_cluster=2, distractors=20)
+
+        # Capture each run's pair set as a value BEFORE the next call overwrites the
+        # shared parallel_links.parquet. Both detect_parallels calls return the same
+        # path, so reading both paths only after the second run would compare the
+        # exhaustive result to itself rather than to the default run (da#172).
+        default_pairs = _pair_set(detect_parallels(staging, threshold=0.5))
+        exhaustive_pairs = _pair_set(detect_parallels(staging, threshold=0.5, max_block_df=100_000))
+
+        # The default cap loses none of the real intra-cluster pairs relative to the
+        # exhaustive scan: C(2,2) * 4 clusters = 4. Anchoring to the independently
+        # computed expected set means a default-config regression that drops pairs
+        # makes default_pairs diverge from BOTH expected and exhaustive_pairs.
+        assert default_pairs == expected
+        assert default_pairs == exhaustive_pairs
+        assert len(default_pairs) == 4
 
     def test_corpus_with_no_pairs_warns(self, tmp_path: Path) -> None:
         # Hadiths present but no pair clears the threshold ⇒ "produced nothing" is
