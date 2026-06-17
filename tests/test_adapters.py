@@ -40,6 +40,7 @@ EXPECTED_SLUGS = [
     "halimbahae",
     "mis",
     "bihar",
+    "tusi",
 ]
 
 

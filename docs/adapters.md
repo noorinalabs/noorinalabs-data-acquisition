@@ -35,6 +35,7 @@ Every ingest source is one frozen `SourceAdapter` row declaring:
 | `open_hadith` | `open_hadith` | sunni | yes | Open-Hadith-Data (mhashim6) — 9 Sunni books incl. the Six Books |
 | `muhaddithat` | `muhaddithat` | multi (`None`) | yes | muhaddithat/isnad-datasets — female narrators across both traditions |
 | `itqan` | `itqan` | multi (`None`) | yes | Itqan rijal DB — 115,735 narrator profiles, 22 classical texts (no upstream license; owner-approved, da#92a) |
+| `tusi` | `tusi` | **shia** | yes | narmafraz/ThaqalaynData (**CC0 1.0**) — Tahdhib al-Ahkam + al-Istibsar of al-Tusi, completing the Four Books (Arabic-only; AI translations omitted, da#182) |
 
 Notes:
 
@@ -44,6 +45,14 @@ Notes:
 - **Multi-sect sources (`sect = None`)** — `fawaz`, `muhaddithat`, `itqan` — span
   both traditions; their parsers set `sect` per record rather than uniformly. They
   contribute to *both* Sunni and Shia coverage in `adapters_for_sect`.
+- **`thaqalayn` vs `tusi`** are TWO distinct Shia upstreams, kept in
+  separate corpora on purpose. `thaqalayn` clones `MohammedArab1/ThaqalaynAPI` (a
+  website scrape of thaqalayn.net carrying al-Kafi + al-Faqih of the Four Books);
+  `tusi` clones `narmafraz/ThaqalaynData` — the original CC0 data backend
+  — for the two Books the scrape omits (Tahdhib al-Ahkam + al-Istibsar). Different
+  schema and license, so they never share a parser or corpus namespace. Only the
+  genuine Arabic is loaded; ThaqalaynData's non-Arabic translations are
+  AI-generated (`verse.ai`, `pipeline_v4`) and deliberately dropped.
 
 ## Adding a source
 
