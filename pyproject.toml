@@ -16,6 +16,11 @@ dependencies = [
     "structlog>=24.1",
     "python-dotenv>=1.0",
     "kaggle>=1.6",
+    # Direct floor on the bleach transitive (pulled in via kaggle) to clear
+    # GHSA-gj48-438w-jh9v + GHSA-8rfp-98v4-mmr6 (noorinalabs-main#703). The 3rd
+    # advisory GHSA-g75f-g53v-794x (ReDoS) has no fixed release; da runs no
+    # pip-audit gate so no --ignore-vuln is required here.
+    "bleach>=6.4.0",
     "beautifulsoup4>=4.12",
     "lxml>=5.1",
     "tqdm>=4.66",
