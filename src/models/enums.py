@@ -155,7 +155,7 @@ class SourceCorpus(StrEnum):
     HALIMBAHAE = "halimbahae"
     MIS = "mis"
     BIHAR = "bihar"
-    THAQALAYN_DATA = "thaqalayn_data"
+    TUSI = "tusi"
 
 
 class Sect(StrEnum):

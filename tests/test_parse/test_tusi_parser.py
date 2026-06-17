@@ -1,7 +1,7 @@
 """End-to-end tests for the ThaqalaynData (Tahdhib + al-Istibsar) parser.
 
 These run against REAL upstream verse files vendored under
-``fixtures/thaqalayn_data_raw/`` (CC0), not a hand-built mock — the main#671
+``fixtures/tusi_raw/`` (CC0), not a hand-built mock — the main#671
 guard: a schema drift that silently zeroed the Arabic body would fail
 ``test_every_hadith_has_arabic`` here, instead of shipping 0%-text undetected.
 """
@@ -15,10 +15,10 @@ import pyarrow.parquet as pq
 
 from src.parse.identity import is_double_prefixed, validate_source_id
 from src.parse.schemas import COLLECTION_SCHEMA, HADITH_SCHEMA
-from src.parse.thaqalayn_data import run
+from src.parse.tusi import run
 
 _ARABIC = re.compile(r"[؀-ۿ]")
-_FIXTURE_RAW = Path(__file__).parent / "fixtures" / "thaqalayn_data_raw"
+_FIXTURE_RAW = Path(__file__).parent / "fixtures" / "tusi_raw"
 _BOOK_SLUGS = {"al-istibsar", "tahdhib-al-ahkam"}
 
 
@@ -71,7 +71,7 @@ class TestThaqalaynDataParser:
             for col in ("matn_en", "isnad_raw_en", "full_text_en", "grade"):
                 assert row[col] is None, f"{col} unexpectedly populated for {row['source_id']}"
             assert row["sect"] == "shia"
-            assert row["source_corpus"] == "thaqalayn_data"
+            assert row["source_corpus"] == "tusi"
 
     def test_source_ids_valid_and_not_double_prefixed(self, tmp_path: Path) -> None:
         hadiths, _ = _parse(tmp_path)
@@ -79,9 +79,9 @@ class TestThaqalaynDataParser:
             sid = row["source_id"]
             validate_source_id(sid)  # raises on a malformed id
             assert not is_double_prefixed(sid), sid
-            # grammar: thaqalayn_data:<slug>:<part>:<chapter>:<hadith>
+            # grammar: tusi:<slug>:<part>:<chapter>:<hadith>
             segments = sid.split(":")
-            assert segments[0] == "thaqalayn_data"
+            assert segments[0] == "tusi"
             assert segments[1] in _BOOK_SLUGS
             assert len(segments) == 5
 
@@ -98,8 +98,8 @@ class TestThaqalaynDataParser:
     def test_collections_one_row_per_book(self, tmp_path: Path) -> None:
         _, collections = _parse(tmp_path)
         by_id = {c["collection_id"]: c for c in collections}
-        assert set(by_id) == {"thaqalayn_data:al-istibsar", "thaqalayn_data:tahdhib-al-ahkam"}
-        istibsar = by_id["thaqalayn_data:al-istibsar"]
+        assert set(by_id) == {"tusi:al-istibsar", "tusi:tahdhib-al-ahkam"}
+        istibsar = by_id["tusi:al-istibsar"]
         assert istibsar["name_en"] == "al-Istibsar"
         assert istibsar["name_ar"] == "الاستبصار"
         assert istibsar["compiler_name"] == "Muhammad ibn al-Hasan al-Tusi"

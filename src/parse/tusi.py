@@ -33,7 +33,7 @@ da#182 deliberately omits them: the English and grade staging columns stay null.
 The genuine Arabic goes to ``matn_ar`` (the field the graph loader surfaces on the
 Hadith node — see :func:`_hadith_row`), with the clean ``narrator_chain`` lead-in
 also exposed as ``isnad_raw_ar``. The real-upstream fixture test
-(``tests/test_parse/test_thaqalayn_data_parser.py``) asserts non-empty Arabic so a
+(``tests/test_parse/test_tusi_parser.py``) asserts non-empty Arabic so a
 schema drift that silently zeroed the text would fail CI.
 """
 
@@ -51,7 +51,7 @@ from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-SOURCE_CORPUS = "thaqalayn_data"
+SOURCE_CORPUS = "tusi"
 SECT = "shia"
 COMPILER_NAME = "Muhammad ibn al-Hasan al-Tusi"
 
@@ -68,8 +68,8 @@ BOOK_META: dict[str, dict[str, str]] = {
 
 
 def _clone_books_root(raw_dir: Path) -> Path:
-    """Path to the cloned ``books/`` directory (see src/acquire/thaqalayn_data.py)."""
-    return raw_dir / "thaqalayn_data" / "clone" / "books"
+    """Path to the cloned ``books/`` directory (see src/acquire/tusi.py)."""
+    return raw_dir / "tusi" / "clone" / "books"
 
 
 def _verse_path_parts(path: str, slug: str) -> tuple[int, int, int] | None:
@@ -166,7 +166,7 @@ def _parse_book(book_dir: Path, slug: str) -> list[dict[str, Any]]:
         verse = data.get("verse") or {}
         coords = _verse_path_parts(safe_str(verse.get("path")) or "", slug)
         if coords is None:
-            logger.warning("thaqalayn_data_unparseable_path", file=json_path.name)
+            logger.warning("tusi_unparseable_path", file=json_path.name)
             continue
         part, chapter, hadith = coords
         chapter_title = data.get("chapter_title") or {}
@@ -206,7 +206,7 @@ def run(raw_dir: Path, staging_dir: Path) -> tuple[Path, Path]:
         msg = f"No ThaqalaynData clone found at {books_root}"
         raise FileNotFoundError(msg)
 
-    logger.info("thaqalayn_data_parse_start", books=list(BOOK_META))
+    logger.info("tusi_parse_start", books=list(BOOK_META))
 
     hadith_rows: list[dict[str, Any]] = []
     coll_rows: list[dict[str, Any]] = []
@@ -216,7 +216,7 @@ def run(raw_dir: Path, staging_dir: Path) -> tuple[Path, Path]:
             msg = f"Expected Book directory {book_dir} missing in clone"
             raise FileNotFoundError(msg)
         book_rows = _parse_book(book_dir, slug)
-        logger.info("thaqalayn_data_parsed_book", book=slug, hadiths=len(book_rows))
+        logger.info("tusi_parsed_book", book=slug, hadiths=len(book_rows))
         hadith_rows.extend(book_rows)
         coll_rows.append(_collection_row(slug, len(book_rows)))
 
@@ -229,7 +229,7 @@ def run(raw_dir: Path, staging_dir: Path) -> tuple[Path, Path]:
         schema=HADITH_SCHEMA,
     )
     hadiths_path = write_parquet(
-        hadith_table, Path(staging_dir) / "hadiths_thaqalayn_data.parquet", schema=HADITH_SCHEMA
+        hadith_table, Path(staging_dir) / "hadiths_tusi.parquet", schema=HADITH_SCHEMA
     )
 
     coll_table = pa.table(
@@ -238,12 +238,12 @@ def run(raw_dir: Path, staging_dir: Path) -> tuple[Path, Path]:
     )
     collections_path = write_parquet(
         coll_table,
-        Path(staging_dir) / "collections_thaqalayn_data.parquet",
+        Path(staging_dir) / "collections_tusi.parquet",
         schema=COLLECTION_SCHEMA,
     )
 
     logger.info(
-        "thaqalayn_data_parse_complete",
+        "tusi_parse_complete",
         hadiths=len(hadith_rows),
         collections=len(coll_rows),
     )

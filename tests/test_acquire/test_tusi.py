@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.acquire.thaqalayn_data import TARGET_BOOK_SLUGS, run
+from src.acquire.tusi import TARGET_BOOK_SLUGS, run
 
 
 def _fake_clone(_url: str, dest: Path, **_kwargs: object) -> Path:
@@ -36,8 +36,8 @@ def _fake_clone_missing_book(_url: str, dest: Path, **_kwargs: object) -> Path:
 
 
 class TestThaqalaynDataAcquire:
-    @patch("src.acquire.thaqalayn_data.emit_raw_new_for_manifest")
-    @patch("src.acquire.thaqalayn_data.clone_repo", side_effect=_fake_clone)
+    @patch("src.acquire.tusi.emit_raw_new_for_manifest")
+    @patch("src.acquire.tusi.clone_repo", side_effect=_fake_clone)
     def test_clones_and_writes_manifest(
         self, mock_clone: object, mock_emit: object, tmp_path: Path
     ) -> None:
@@ -45,7 +45,7 @@ class TestThaqalaynDataAcquire:
 
         dest = run(raw_dir)
 
-        assert dest == raw_dir / "thaqalayn_data"
+        assert dest == raw_dir / "tusi"
         assert (dest / "manifest.json").exists()
         mock_clone.assert_called_once()  # type: ignore[attr-defined]
         mock_emit.assert_called_once()  # type: ignore[attr-defined]
@@ -53,8 +53,8 @@ class TestThaqalaynDataAcquire:
         manifest = json.loads((dest / "manifest.json").read_text())
         assert len(manifest) == len(TARGET_BOOK_SLUGS)
 
-    @patch("src.acquire.thaqalayn_data.emit_raw_new_for_manifest")
-    @patch("src.acquire.thaqalayn_data.clone_repo", side_effect=_fake_clone_missing_book)
+    @patch("src.acquire.tusi.emit_raw_new_for_manifest")
+    @patch("src.acquire.tusi.clone_repo", side_effect=_fake_clone_missing_book)
     def test_missing_book_directory_raises(
         self, _mock_clone: object, _mock_emit: object, tmp_path: Path
     ) -> None:

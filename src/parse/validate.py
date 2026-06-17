@@ -158,8 +158,8 @@ DEFAULT_BASELINES: dict[str, dict[str, float | int]] = {
     # da#182: Tahdhib al-Ahkam (~13,201) + al-Istibsar (~4,220) from ThaqalaynData
     # (CC0). Arabic-only load; the full hadith Arabic lands in matn_ar (the field the
     # graph loader surfaces on the Hadith node), so arabic_coverage_pct is ~100%.
-    "hadiths_thaqalayn_data": {"row_count": 17421, "arabic_coverage_pct": 100.0},
-    "collections_thaqalayn_data": {"row_count": 2},
+    "hadiths_tusi": {"row_count": 17421, "arabic_coverage_pct": 100.0},
+    "collections_tusi": {"row_count": 2},
 }
 
 DEFAULT_DRIFT_TOLERANCE_PCT = 30.0

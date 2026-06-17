@@ -262,11 +262,11 @@ SOURCE_REGISTRY: tuple[SourceAdapter, ...] = (
         description="Bihar al-Anwar — al-Majlisi's ~100k-hadith Shia encyclopedia (hubeali).",
     ),
     SourceAdapter(
-        slug="thaqalayn_data",
-        corpus=SourceCorpus.THAQALAYN_DATA,
+        slug="tusi",
+        corpus=SourceCorpus.TUSI,
         sect=Sect.SHIA,
-        acquire_module="thaqalayn_data",
-        parse_module="thaqalayn_data",
+        acquire_module="tusi",
+        parse_module="tusi",
         reachable=True,
         license_note=(
             "narmafraz/ThaqalaynData — the original thaqalayn.net data backend, "
