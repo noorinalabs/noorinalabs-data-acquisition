@@ -29,10 +29,10 @@ Real Arabic only (no fixture-masking — main#671)
 ------------------------------------------------
 The dataset's non-Arabic translations are **AI-generated** (``verse.ai``,
 ``model=pipeline_v4``) — they are NOT a human translation of the source, so
-da#182 deliberately omits them: the English/matn/isnad/grade staging columns
-stay null and the genuine Arabic (narrator_chain + text) goes to ``full_text_ar``,
-exactly as the sibling ``thaqalayn`` and ``bihar`` parsers do (isnad/matn
-separation and grading are Phase-2 concerns). The real-upstream fixture test
+da#182 deliberately omits them: the English and grade staging columns stay null.
+The genuine Arabic goes to ``matn_ar`` (the field the graph loader surfaces on the
+Hadith node — see :func:`_hadith_row`), with the clean ``narrator_chain`` lead-in
+also exposed as ``isnad_raw_ar``. The real-upstream fixture test
 (``tests/test_parse/test_thaqalayn_data_parser.py``) asserts non-empty Arabic so a
 schema drift that silently zeroed the text would fail CI.
 """
@@ -90,19 +90,25 @@ def _verse_path_parts(path: str, slug: str) -> tuple[int, int, int] | None:
         return None
 
 
-def _verse_arabic(verse: dict[str, Any]) -> str | None:
-    """Assemble the genuine Arabic body: narrator_chain sanad run + verse text."""
-    parts: list[str] = []
+def _chain_arabic(verse: dict[str, Any]) -> str | None:
+    """The genuine Arabic sanad lead-in from ``narrator_chain`` (~98% of verses)."""
     chain = verse.get("narrator_chain") or {}
-    for part in chain.get("parts", []):
-        text = part.get("text") if isinstance(part, dict) else None
-        if isinstance(text, str) and text.strip():
-            parts.append(text.strip())
+    parts = [
+        part["text"].strip()
+        for part in chain.get("parts", [])
+        if isinstance(part, dict) and isinstance(part.get("text"), str) and part["text"].strip()
+    ]
+    return " ".join(parts).strip() or None
+
+
+def _body_arabic(verse: dict[str, Any]) -> str | None:
+    """The genuine Arabic body from ``verse.text`` (continued isnad + matn)."""
     body = verse.get("text")
+    parts: list[str] = []
     if isinstance(body, list):
-        parts.extend(seg.strip() for seg in body if isinstance(seg, str) and seg.strip())
+        parts = [seg.strip() for seg in body if isinstance(seg, str) and seg.strip()]
     elif isinstance(body, str) and body.strip():
-        parts.append(body.strip())
+        parts = [body.strip()]
     return " ".join(parts).strip() or None
 
 
@@ -112,9 +118,20 @@ def _hadith_row(
     chapter: int,
     hadith: int,
     chapter_name_ar: str | None,
-    full_text_ar: str | None,
+    isnad_ar: str | None,
+    body_ar: str | None,
 ) -> dict[str, Any]:
-    """Assemble one HADITH_SCHEMA row (Arabic-only; English/matn/grade null)."""
+    """Assemble one HADITH_SCHEMA row from a verse's genuine Arabic (English null).
+
+    The graph loader (:mod:`src.graph.load_nodes` ``_HADITH_MERGE``) surfaces only
+    ``matn_ar`` / ``isnad_raw_ar`` (NOT ``full_text_ar``) on the Hadith node, so
+    the readable Arabic MUST live in ``matn_ar``. Upstream does not cleanly split
+    isnad from matn (``verse.text`` carries continued isnad + matn), so — as in the
+    sibling ``thaqalayn`` parser — ``matn_ar`` holds the full hadith Arabic
+    (sanad lead-in + body); ``isnad_raw_ar`` additionally surfaces the clean
+    ``narrator_chain`` lead-in. ``full_text_ar`` mirrors ``matn_ar`` for Phase-2.
+    """
+    full_ar = " ".join(p for p in (isnad_ar, body_ar) if p).strip() or None
     return {
         "source_id": generate_source_id(SOURCE_CORPUS, slug, part, chapter, hadith),
         "source_corpus": SOURCE_CORPUS,
@@ -124,11 +141,11 @@ def _hadith_row(
         "book_number": part,
         "chapter_number": chapter,
         "hadith_number": hadith,
-        "matn_ar": None,
+        "matn_ar": full_ar,
         "matn_en": None,
-        "isnad_raw_ar": None,
+        "isnad_raw_ar": isnad_ar,
         "isnad_raw_en": None,
-        "full_text_ar": full_text_ar,
+        "full_text_ar": full_ar,
         "full_text_en": None,
         "grade": None,
         "chapter_name_ar": chapter_name_ar,
@@ -160,7 +177,8 @@ def _parse_book(book_dir: Path, slug: str) -> list[dict[str, Any]]:
                 chapter,
                 hadith,
                 safe_str(chapter_title.get("ar")),
-                _verse_arabic(verse),
+                _chain_arabic(verse),
+                _body_arabic(verse),
             )
         )
     return rows

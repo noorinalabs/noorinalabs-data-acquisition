@@ -47,23 +47,28 @@ class TestThaqalaynDataParser:
 
     def test_every_hadith_has_arabic(self, tmp_path: Path) -> None:
         # The anti-fixture-masking assertion (main#671): real Arabic, never empty.
+        # matn_ar is the field the graph loader surfaces on the Hadith node, so it
+        # MUST carry the Arabic (full_text_ar mirrors it for Phase-2).
         hadiths, _ = _parse(tmp_path)
         for row in hadiths:
-            assert row["full_text_ar"], f"empty full_text_ar for {row['source_id']}"
-            assert _ARABIC.search(row["full_text_ar"]), f"no Arabic in {row['source_id']}"
+            for col in ("matn_ar", "full_text_ar"):
+                assert row[col], f"empty {col} for {row['source_id']}"
+                assert _ARABIC.search(row[col]), f"no Arabic in {col} for {row['source_id']}"
 
-    def test_arabic_only_fields_are_null(self, tmp_path: Path) -> None:
-        # AI translations / unparsed isnad-matn / grading are deliberately not loaded.
+    def test_isnad_lead_in_surfaced_as_arabic(self, tmp_path: Path) -> None:
+        # The clean narrator_chain lead-in is surfaced as isnad_raw_ar (present for
+        # ~98% of verses); when present it must be genuine Arabic.
+        hadiths, _ = _parse(tmp_path)
+        with_isnad = [r for r in hadiths if r["isnad_raw_ar"]]
+        assert with_isnad, "no isnad_raw_ar populated at all"
+        for row in with_isnad:
+            assert _ARABIC.search(row["isnad_raw_ar"]), f"no Arabic isnad for {row['source_id']}"
+
+    def test_english_and_grade_are_null(self, tmp_path: Path) -> None:
+        # AI translations and (absent) grading are deliberately not loaded.
         hadiths, _ = _parse(tmp_path)
         for row in hadiths:
-            for col in (
-                "matn_ar",
-                "matn_en",
-                "isnad_raw_ar",
-                "isnad_raw_en",
-                "full_text_en",
-                "grade",
-            ):
+            for col in ("matn_en", "isnad_raw_en", "full_text_en", "grade"):
                 assert row[col] is None, f"{col} unexpectedly populated for {row['source_id']}"
             assert row["sect"] == "shia"
             assert row["source_corpus"] == "thaqalayn_data"
