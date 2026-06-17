@@ -1,13 +1,29 @@
 """Parse Thaqalayn raw JSON into staging Parquet.
 
-Handles two formats:
-- **API format**: JSON from ``/api/v2/hadith/{bookId}`` — typically has a
-  ``data`` wrapper key with hadith objects.
-- **GitHub format**: scraped JSON files from the ThaqalaynAPI repository —
-  typically stored as bare arrays or nested differently.
+The Thaqalayn REST API v2 was removed circa early 2026 when the site was rebuilt
+with Next.js, so the **GitHub repo** (``MohammedArab1/ThaqalaynAPI``) is the sole
+acquisition source. That repo ships the dataset SEVERAL times over — a ``V1`` and
+a ``V2`` tree, each holding per-book files AND a giant ``allBooks.json`` aggregate
+— plus build/index files (``package-lock.json``, ``tsconfig.json``,
+``BookNames.json``, ``Ingredients/``). An earlier ``rglob("*.json")`` swept all of
+them, producing ~4x-duplicated rows and config files parsed as "collections"
+(da#175). We therefore read exactly ONE canonical tree: the per-book numeric files
+under ``V2/ThaqalaynData/<n>.json`` (V2 is richer — it carries the
+``thaqalaynSanad``/``thaqalaynMatn`` *English* isnad/matn split). :func:`book_json_files`
+is the single source of truth for that selection, shared with the acquire adapter.
 
-Detection heuristic: if top-level dict contains a ``"data"`` key whose value
-is a list, treat as API format. Otherwise treat as GitHub format.
+Each numeric file is a JSON array of hadith records with the real upstream schema::
+
+    id, bookId, book, volume, category, categoryId, chapter, chapterInCategoryId,
+    author, translator, englishText, arabicText, frenchText, URL,
+    majlisiGrading, behbudiGrading, mohseniGrading, gradingsFull,
+    thaqalaynSanad, thaqalaynMatn
+
+Identity (da#175): ``source_id = thaqalayn:<bookId>:<id>`` — ``id`` is the in-book
+ordinal and is REQUIRED for collision-safe ids (without it every row in a book
+collapsed onto one node). ``collection_name`` is the ``bookId`` slug so the graph
+APPEARS_IN loader (which keys collections as ``{corpus}:{collection_name}``) links
+each hadith to its volume's Collection.
 """
 
 from __future__ import annotations
@@ -27,265 +43,152 @@ logger = get_logger(__name__)
 SOURCE_CORPUS = "thaqalayn"
 SECT = "shia"
 
-
-def _detect_format(data: Any) -> str:
-    """Return 'api' or 'github' based on JSON structure."""
-    if isinstance(data, dict) and isinstance(data.get("data"), list):
-        return "api"
-    return "github"
+# The one canonical tree we read — see module docstring. Per-book files here are
+# named ``<n>.json``; the non-book ``allBooks.json``/``BookNames.json`` siblings
+# (and the ``Ingredients/`` subdir) are excluded by requiring a numeric stem.
+_DATA_SUBDIR = ("github_clone", "V2", "ThaqalaynData")
 
 
-def _extract_hadiths_api(data: dict[str, Any]) -> list[dict[str, Any]]:
-    """Extract hadith list from API-format JSON."""
-    result: list[dict[str, Any]] = data.get("data", [])
-    return result
+def book_json_files(thaq_dir: Path) -> list[Path]:
+    """Return the canonical per-book Thaqalayn JSON files under ``thaq_dir``.
+
+    Scoped to ``V2/ThaqalaynData/<numeric>.json`` — the per-book data files —
+    excluding the ``allBooks.json``/``BookNames.json`` aggregates, the
+    ``Ingredients/`` subdir, and repo build/config files. Shared with
+    :mod:`src.acquire.thaqalayn` so acquisition and parsing never drift (da#175).
+    """
+    data_dir = thaq_dir.joinpath(*_DATA_SUBDIR)
+    if not data_dir.is_dir():
+        return []
+    return sorted(p for p in data_dir.glob("*.json") if p.stem.isdigit())
 
 
-# Fields that indicate a dict is a hadith record rather than arbitrary metadata
-_HADITH_FIELD_INDICATORS = frozenset(
-    {
-        "hadithNumber",
-        "hadith_number",
-        "number",
-        "textAr",
-        "text_ar",
-        "arabicText",
-        "arabic",
-        "textEn",
-        "text_en",
-        "englishText",
-        "english",
-        "translation",
-        "isnad",
-        "matn",
-        "grade",
-        "grading",
-    }
-)
+def _primary_grade(rec: dict[str, Any]) -> str | None:
+    """Pick a single representative grade from the per-grader fields.
+
+    Thaqalayn carries up to three independent gradings; the staging schema (and
+    the Grading node it feeds) holds one ``grade`` per hadith. We prefer
+    al-Majlisi's grade (the most-cited classical grading), then Behbudi, then
+    Mohseni. ``behdudiGrading`` is accepted as a V1 spelling fallback. Empty
+    strings (the upstream "ungraded" sentinel) are treated as absent.
+    """
+    for key in ("majlisiGrading", "behbudiGrading", "behdudiGrading", "mohseniGrading"):
+        val = safe_str(rec.get(key))
+        if val:
+            return val
+    return None
 
 
-def _looks_like_hadith(obj: object) -> bool:
-    """Return True if a dict has at least one hadith-indicative field."""
-    return isinstance(obj, dict) and bool(obj.keys() & _HADITH_FIELD_INDICATORS)
-
-
-def _extract_hadiths_github(data: Any) -> list[dict[str, Any]]:
-    """Extract hadith list from GitHub-format JSON."""
-    if isinstance(data, list):
-        return [item for item in data if _looks_like_hadith(item)]
-    if isinstance(data, dict):
-        # Try common wrapper keys
-        for key in ("hadiths", "data", "chapters"):
-            val = data.get(key)
-            if isinstance(val, list):
-                return [item for item in val if _looks_like_hadith(item)]
-        # Might be nested chapters with hadiths — require hadith-indicative fields
-        result: list[dict[str, Any]] = []
-        for val in data.values():
-            if isinstance(val, list):
-                result.extend(v for v in val if _looks_like_hadith(v))
-        return result
-    return []
-
-
-def _normalize_grade(raw: Any) -> str | None:
-    """Serialize grades to a single string. Arrays or semicolons preserved as JSON."""
-    if raw is None:
+def _hadith_to_row(rec: dict[str, Any]) -> dict[str, Any] | None:
+    """Convert one upstream record to a staging row, or None if unusable."""
+    book_id = safe_str(rec.get("bookId"))
+    hadith_num = safe_int(rec.get("id"))
+    if not book_id or hadith_num is None:
         return None
-    if isinstance(raw, list):
-        if len(raw) == 1:
-            return safe_str(raw[0])
-        return json.dumps(raw, ensure_ascii=False)
-    s = safe_str(raw)
-    if s and ";" in s:
-        parts = [p.strip() for p in s.split(";") if p.strip()]
-        if len(parts) > 1:
-            return json.dumps(parts, ensure_ascii=False)
-    return s
 
+    source_id = generate_source_id(SOURCE_CORPUS, book_id, hadith_num)
 
-def _hadith_to_row(
-    h: dict[str, Any],
-    collection_name: str,
-    book_number: int | None,
-) -> dict[str, Any]:
-    """Convert a single hadith dict to a staging row."""
-    hadith_num = safe_int(h.get("hadithNumber") or h.get("hadith_number") or h.get("number"))
-    source_id = generate_source_id(
-        SOURCE_CORPUS,
-        collection_name,
-        book_number or 0,
-        hadith_num or 0,
-    )
-
-    # Isnad/matn: Thaqalayn generally does not separate isnad from matn.
-    # If explicit fields exist, use them; otherwise put everything in full_text.
-    isnad_ar = safe_str(h.get("isnad") or h.get("isnad_ar"))
-    matn_ar = safe_str(h.get("matn") or h.get("matn_ar") or h.get("textAr") or h.get("text_ar"))
-    full_ar = safe_str(
-        h.get("fullText")
-        or h.get("full_text")
-        or h.get("textAr")
-        or h.get("text_ar")
-        or h.get("arabicText")
-        or h.get("arabic")
-    )
-    matn_en = safe_str(
-        h.get("matn_en")
-        or h.get("textEn")
-        or h.get("text_en")
-        or h.get("english")
-        or h.get("englishText")
-        or h.get("translation")
-    )
-    full_en = safe_str(h.get("fullTextEn") or h.get("full_text_en"))
-    chapter_ar = safe_str(h.get("chapterAr") or h.get("chapter_ar") or h.get("babAr"))
-    chapter_en = safe_str(
-        h.get("chapter") or h.get("chapterEn") or h.get("chapter_en") or h.get("babEn")
-    )
-    chapter_num = safe_int(h.get("chapterNumber") or h.get("chapter_number"))
-
-    grade = _normalize_grade(h.get("grade") or h.get("grading") or h.get("grades"))
+    # Thaqalayn separates isnad from matn only on the ENGLISH translation
+    # (``thaqalaynSanad``/``thaqalaynMatn`` are English); the Arabic (``arabicText``)
+    # is stored whole, isnad + matn together. So the split feeds the ``*_en`` fields
+    # and the Arabic text stays intact in both ``matn_ar`` and ``full_text_ar``
+    # rather than mis-routing English prose into an Arabic column (da#175).
+    arabic = safe_str(rec.get("arabicText"))
+    english = safe_str(rec.get("englishText"))
+    sanad_en = safe_str(rec.get("thaqalaynSanad"))
+    matn_en = safe_str(rec.get("thaqalaynMatn")) or english
 
     return {
         "source_id": source_id,
         "source_corpus": SOURCE_CORPUS,
-        "collection_name": collection_name,
-        "book_number": book_number,
-        "chapter_number": chapter_num,
+        "collection_name": book_id,
+        "book_number": safe_int(rec.get("categoryId")),
+        "chapter_number": safe_int(rec.get("chapterInCategoryId")),
         "hadith_number": hadith_num,
-        "matn_ar": matn_ar,
+        "matn_ar": arabic,
         "matn_en": matn_en,
-        "isnad_raw_ar": isnad_ar,
-        "isnad_raw_en": None,
-        "full_text_ar": full_ar,
-        "full_text_en": full_en,
-        "grade": grade,
-        "chapter_name_ar": chapter_ar,
-        "chapter_name_en": chapter_en,
+        "isnad_raw_ar": None,
+        "isnad_raw_en": sanad_en,
+        "full_text_ar": arabic,
+        "full_text_en": english,
+        "grade": _primary_grade(rec),
+        "chapter_name_ar": None,
+        "chapter_name_en": safe_str(rec.get("chapter")),
         "sect": SECT,
     }
 
 
-def _infer_collection_name(file_path: Path, data: Any) -> str:
-    """Best-effort collection name from file or data."""
-    if isinstance(data, dict):
-        for key in ("bookName", "book_name", "collection", "title"):
-            val = data.get(key)
-            if isinstance(val, str) and val.strip():
-                return val.strip()
-    # Fall back to file stem (e.g., "book_123" -> "book_123")
-    return file_path.stem
+def _collection_name_en(rec: dict[str, Any], book_id: str) -> str:
+    """Human display name for a book's Collection node.
 
-
-def _infer_book_number(file_path: Path) -> int | None:
-    """Extract book number from filename like book_42.json."""
-    stem = file_path.stem
-    if stem.startswith("book_"):
-        return safe_int(stem.removeprefix("book_"))
-    return None
-
-
-def _discover(raw_dir: Path) -> None:
-    """Load first JSON and log keys/structure for field mapping discovery.
-
-    Development utility — only callable via ``python -m src.parse.thaqalayn``.
+    Volumes of a multi-volume work share the same ``book`` title, so the volume
+    is appended to keep each Collection distinct (and matching the per-volume
+    ``bookId``). Falls back to the ``bookId`` slug if no title is present.
     """
-    thaq_dir = raw_dir / "thaqalayn"
-    json_files = sorted(thaq_dir.glob("book_*.json"))
-    if not json_files:
-        # Try github clone
-        json_files = sorted((thaq_dir / "github_clone").rglob("*.json"))
-
-    if not json_files:
-        logger.warning("thaqalayn_discover_no_files")
-        return
-
-    sample = json_files[0]
-    with open(sample, encoding="utf-8") as f:
-        data = json.load(f)
-
-    fmt = _detect_format(data)
-    logger.info("thaqalayn_discover", file=sample.name, format=fmt)
-
-    if isinstance(data, dict):
-        logger.info("thaqalayn_discover_top_keys", keys=list(data.keys()))
-        for key, val in data.items():
-            if isinstance(val, list) and val:
-                first = val[0]
-                if isinstance(first, dict):
-                    logger.info("thaqalayn_discover_item_keys", parent=key, keys=list(first.keys()))
-    elif isinstance(data, list) and data and isinstance(data[0], dict):
-        logger.info("thaqalayn_discover_item_keys", parent="root", keys=list(data[0].keys()))
+    book = safe_str(rec.get("book"))
+    if not book:
+        return book_id
+    volume = safe_int(rec.get("volume"))
+    if volume and "volume" not in book.lower():
+        return f"{book} (Volume {volume})"
+    return book
 
 
 def run(raw_dir: Path, staging_dir: Path) -> tuple[Path, Path]:
-    """Parse Thaqalayn JSONs into hadiths + collections Parquet files."""
+    """Parse Thaqalayn per-book JSONs into hadiths + collections Parquet files."""
     thaq_dir = raw_dir / "thaqalayn"
-
-    # Gather JSON files from API download or GitHub clone
-    json_files = sorted(thaq_dir.glob("book_*.json"))
-    github_jsons: list[Path] = []
+    json_files = book_json_files(thaq_dir)
     if not json_files:
-        github_jsons = sorted((thaq_dir / "github_clone").rglob("*.json"))
-        json_files = github_jsons
-
-    if not json_files:
-        msg = "No Thaqalayn JSON files found"
+        msg = f"No Thaqalayn per-book JSON files under {thaq_dir}/{'/'.join(_DATA_SUBDIR)}"
         raise FileNotFoundError(msg)
 
     logger.info("thaqalayn_parse_start", file_count=len(json_files))
 
     hadith_rows: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
     collections: dict[str, dict[str, Any]] = {}
     total_with_isnad = 0
-    total_hadiths = 0
 
     for fp in json_files:
         with open(fp, encoding="utf-8") as f:
             data = json.load(f)
+        if not isinstance(data, list):
+            logger.warning("thaqalayn_unexpected_shape", file=fp.name, type=type(data).__name__)
+            continue
 
-        fmt = _detect_format(data)
-        if fmt == "api":
-            hadiths = _extract_hadiths_api(data)
-        else:
-            hadiths = _extract_hadiths_github(data)
-
-        collection_name = _infer_collection_name(fp, data)
-        book_number = _infer_book_number(fp)
-
-        for h in hadiths:
-            if not isinstance(h, dict):
+        for rec in data:
+            if not isinstance(rec, dict):
                 continue
-            row = _hadith_to_row(h, collection_name, book_number)
+            row = _hadith_to_row(rec)
+            if row is None:
+                continue
+            # (bookId, id) is unique upstream, but guard against any dup so the
+            # MERGE-by-id load never silently collapses rows (da#175).
+            if row["source_id"] in seen_ids:
+                continue
+            seen_ids.add(row["source_id"])
             hadith_rows.append(row)
-            total_hadiths += 1
-            if row["isnad_raw_ar"] is not None:
+            # Thaqalayn's isnad/matn split is English-only (see _hadith_to_row).
+            if row["isnad_raw_en"] is not None:
                 total_with_isnad += 1
 
-        # Track collection metadata
-        if collection_name not in collections:
-            collections[collection_name] = {
-                "collection_id": generate_source_id(SOURCE_CORPUS, collection_name),
-                "name_ar": safe_str(
-                    (data if isinstance(data, dict) else {}).get("bookNameAr")
-                    or (data if isinstance(data, dict) else {}).get("book_name_ar")
-                ),
-                "name_en": collection_name,
-                "compiler_name": safe_str(
-                    (data if isinstance(data, dict) else {}).get("author")
-                    or (data if isinstance(data, dict) else {}).get("compiler")
-                ),
-                "compilation_year_ah": None,
-                "sect": SECT,
-                "total_hadiths": 0,
-                "source_corpus": SOURCE_CORPUS,
-            }
-        collections[collection_name]["total_hadiths"] += len(
-            [h for h in hadiths if isinstance(h, dict)]
-        )
+            book_id = row["collection_name"]
+            coll = collections.get(book_id)
+            if coll is None:
+                collections[book_id] = {
+                    "collection_id": generate_source_id(SOURCE_CORPUS, book_id),
+                    "name_ar": None,
+                    "name_en": _collection_name_en(rec, book_id),
+                    "compiler_name": safe_str(rec.get("author")),
+                    "compilation_year_ah": None,
+                    "sect": SECT,
+                    "total_hadiths": 1,
+                    "source_corpus": SOURCE_CORPUS,
+                }
+            else:
+                coll["total_hadiths"] += 1
 
-    # Log isnad separation rate
+    total_hadiths = len(hadith_rows)
     isnad_rate = (total_with_isnad / total_hadiths * 100) if total_hadiths else 0.0
     logger.info(
         "thaqalayn_isnad_rate",
@@ -294,7 +197,6 @@ def run(raw_dir: Path, staging_dir: Path) -> tuple[Path, Path]:
         rate_pct=round(isnad_rate, 1),
     )
 
-    # Build and write hadiths parquet
     hadith_table = pa.table(
         {field.name: [r[field.name] for r in hadith_rows] for field in HADITH_SCHEMA},
         schema=HADITH_SCHEMA,
@@ -303,7 +205,6 @@ def run(raw_dir: Path, staging_dir: Path) -> tuple[Path, Path]:
         hadith_table, Path(staging_dir) / "hadiths_thaqalayn.parquet", schema=HADITH_SCHEMA
     )
 
-    # Build and write collections parquet
     coll_rows = list(collections.values())
     coll_table = pa.table(
         {field.name: [r[field.name] for r in coll_rows] for field in COLLECTION_SCHEMA},
@@ -319,13 +220,3 @@ def run(raw_dir: Path, staging_dir: Path) -> tuple[Path, Path]:
         collections=len(coll_rows),
     )
     return hadiths_path, collections_path
-
-
-if __name__ == "__main__":
-    import sys
-
-    from src.config import get_settings
-
-    settings = get_settings()
-    if "--discover" in sys.argv:
-        _discover(settings.data_raw_dir)
