@@ -31,6 +31,11 @@ def run_all(raw_dir: Path, staging_dir: Path) -> dict[str, list[Path]]:
     results: dict[str, list[Path]] = {}
     for adapter in SOURCE_REGISTRY:
         name = adapter.slug
+        if not adapter.active:
+            # Inactive sources (e.g. open_hadith — a confirmed duplicate, da#191)
+            # are never parsed. The registry row is retained for coverage only.
+            logger.info("parse_skipped_inactive", source=name)
+            continue
         try:
             logger.info("parsing", source=name)
             output_files = _normalize_output(adapter.parse(raw_dir, staging_dir))

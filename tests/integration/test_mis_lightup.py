@@ -1,12 +1,14 @@
-"""Live-Neo4j proof that MIS loads as real Hadith nodes + multi-isnad edges (da#97).
+"""Live-Neo4j proof that MIS contributes multi-isnad edges only — no Hadith nodes
+(da#97; composition per da#191).
 
 Exercises the slice end-to-end against a live ``neo4j:5`` container:
 
-    parse (mis.run) -> load Hadith nodes (load_all_nodes) -> load network edges
+    parse (mis.run) -> load_all_nodes (composition drops mis Hadith) -> load edges
 
-and asserts (a) the Hadith nodes land with canonical ``hdt:`` ids and the
-``mis`` / ``sunni`` provenance, and (b) the **multiplicity** survives all the way
-to graph relationships — a hadith with three isnads yields the chain-specific
+and asserts (a) MIS loads ZERO Hadith nodes — its Sahih Muslim matn duplicates
+the ``lk`` canonical edition, so the canonical composition (da#191) keeps MIS for
+its multi-isnad CHAINS only — and (b) the **multiplicity** still survives all the
+way to graph relationships — a hadith with three isnads yields the chain-specific
 edges (``A->D``, ``E->B``) that would be gone had the parallel asanid been
 collapsed.
 
@@ -81,7 +83,7 @@ def _make_mis_fixture(raw_dir: Path) -> None:
 
 @pytest.mark.integration
 class TestMisLoadLive:
-    def test_mis_loads_hadith_nodes_and_multi_isnad_edges(
+    def test_mis_loads_no_hadith_nodes_but_multi_isnad_edges_survive(
         self, neo4j_client, tmp_path: Path
     ) -> None:
         raw = tmp_path / "raw"
@@ -91,20 +93,16 @@ class TestMisLoadLive:
         curated.mkdir()
         _make_mis_fixture(raw)
 
-        hadiths_path, edges_path = mis.run(raw, staging)
+        _hadiths_path, edges_path = mis.run(raw, staging)
 
-        # --- Hadith nodes via the production node loader ---------------------
-        results = load_all_nodes(neo4j_client, staging, curated, strict=False)
-        hadith_result = next(r for r in results if r.node_type == "Hadith")
-        assert not hadith_result.validation_errors
-
-        hadith_nodes = neo4j_client.execute_read(
-            "MATCH (h:Hadith) RETURN h.id AS id, h.source_corpus AS corpus, h.sect AS sect"
-        )
-        assert len(hadith_nodes) == 2
-        assert all(n["id"].startswith("hdt:mis:sahih_muslim:") for n in hadith_nodes)
-        assert all(n["corpus"] == "mis" for n in hadith_nodes)
-        assert all(n["sect"] == "sunni" for n in hadith_nodes)
+        # --- MIS contributes NO Hadith nodes (composition, da#191) ----------
+        # Its Sahih Muslim matn duplicates the lk canonical edition, so the node
+        # loader drops every mis Hadith; MIS is kept for its multi-isnad chains.
+        load_all_nodes(neo4j_client, staging, curated, strict=False)
+        mis_hadith_nodes = neo4j_client.execute_read(
+            "MATCH (h:Hadith {source_corpus: 'mis'}) RETURN count(h) AS n"
+        )[0]["n"]
+        assert mis_hadith_nodes == 0
 
         # --- Multi-isnad edges into the live graph --------------------------
         edge_rows = pq.read_table(edges_path).to_pylist()
