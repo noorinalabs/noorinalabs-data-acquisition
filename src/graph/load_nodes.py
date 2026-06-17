@@ -34,6 +34,7 @@ from typing import Any
 import pyarrow.parquet as pq
 import yaml
 
+from src.parse.composition import is_canonical_hadith
 from src.parse.identity import (
     chain_node_id,
     collection_node_id,
@@ -266,6 +267,16 @@ def _load_hadiths(
                 all_errors.append(f"{fp.name} row {i}: invalid source_id={sid!r}")
                 total_skipped += 1
                 continue
+            # Canonical corpus composition (da#191): skip Hadith whose
+            # (source_corpus, collection) duplicates the chosen canonical edition
+            # — halimbahae/fawaz non-unique books, the mis Sahih Muslim matn copy.
+            # One enforcement point so a fresh run_all (the production path) yields
+            # the deduped graph without manual surgery.
+            if not is_canonical_hadith(
+                _val(row, "source_corpus", ""), _val(row, "collection_name", "")
+            ):
+                total_skipped += 1
+                continue
             hid = hadith_node_id(sid)
             # Fall back to the raw full text when a source supplies no separated
             # matn: halimbahae / open_hadith / bihar populate ``full_text_ar``
@@ -356,6 +367,12 @@ def _load_collections(
             cid = row.get("collection_id")
             if not cid or not isinstance(cid, str):
                 all_errors.append(f"{fp.name} row {i}: invalid collection_id={cid!r}")
+                total_skipped += 1
+                continue
+            # Canonical composition (da#191): drop Collection nodes for non-canonical
+            # (source_corpus, collection) pairs so they don't outlive their Hadith.
+            # The collection slug is the last ``:``-segment of collection_id.
+            if not is_canonical_hadith(_val(row, "source_corpus", ""), cid.rsplit(":", 1)[-1]):
                 total_skipped += 1
                 continue
             full_id = collection_node_id(cid)

@@ -93,6 +93,11 @@ class SourceAdapter:
     acquire_fn: str = "run"
     parse_fn: str = "run"
     raw_subdir: str | None = None
+    # Whether this source participates in acquire/parse run_all. An adapter row is
+    # retained for every SourceCorpus (the coverage invariant), but a source that
+    # is a confirmed duplicate of another is marked inactive so it is never
+    # acquired/parsed/loaded — see ``src.parse.composition`` (da#191).
+    active: bool = True
 
     def acquire(self, raw_dir: Path) -> Path | None:
         """Download this source's raw data, returning its output path (or ``None``)."""
@@ -190,6 +195,12 @@ SOURCE_REGISTRY: tuple[SourceAdapter, ...] = (
         reachable=True,
         license_note="Open-Hadith-Data (mhashim6) — open GitHub, 9 books incl. the Six Books.",
         description="Open-Hadith-Data — 9 Sunni books.",
+        # Confirmed 100% duplicate of `halimbahae` (identical 9 collections, same
+        # per-collection counts, identical normalized matn) — pre-cutover audit
+        # da#191. Dropped entirely: halimbahae carries the same books with full
+        # tashkeel + a clear ODbL license. Adapter retained for the coverage
+        # invariant; inactive so it is never acquired/parsed/loaded.
+        active=False,
     ),
     SourceAdapter(
         slug="muhaddithat",

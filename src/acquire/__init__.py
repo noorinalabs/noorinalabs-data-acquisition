@@ -24,6 +24,12 @@ def run_all(raw_dir: Path) -> dict[str, Path | None]:
     results: dict[str, Path | None] = {}
     for adapter in SOURCE_REGISTRY:
         name = adapter.slug
+        if not adapter.active:
+            # Inactive sources (e.g. open_hadith — a confirmed duplicate, da#191)
+            # are never acquired. The registry row is retained for the coverage
+            # invariant only.
+            logger.info("acquire_skipped_inactive", source=name)
+            continue
         try:
             logger.info("acquiring", source=name)
             path = adapter.acquire(raw_dir)
