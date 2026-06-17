@@ -267,10 +267,18 @@ def _load_hadiths(
                 total_skipped += 1
                 continue
             hid = hadith_node_id(sid)
+            # Fall back to the raw full text when a source supplies no separated
+            # matn: halimbahae / open_hadith / bihar populate ``full_text_ar``
+            # only (they do not split isnad from matn). The loader persists
+            # matn_ar — not full_text_ar — so without this the Hadith node lands
+            # textless on the graph (da#190).
+            matn_ar = _val(row, "matn_ar", "")
+            if not (matn_ar and str(matn_ar).strip()):
+                matn_ar = _val(row, "full_text_ar", "")
             batch.append(
                 {
                     "id": hid,
-                    "matn_ar": _val(row, "matn_ar", ""),
+                    "matn_ar": matn_ar,
                     "matn_en": _val(row, "matn_en"),
                     "isnad_raw_ar": _val(row, "isnad_raw_ar"),
                     "isnad_raw_en": _val(row, "isnad_raw_en"),
