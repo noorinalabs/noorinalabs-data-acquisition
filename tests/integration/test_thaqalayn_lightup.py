@@ -33,80 +33,109 @@ pytestmark = pytest.mark.integration
 
 
 # ---------------------------------------------------------------------------
-# Sample Thaqalayn data — API-format JSON, two of the Four Books (Shia).
-# Mirrors the real ThaqalaynAPI shape: a top-level ``data`` list of hadith
-# objects under a ``bookName``. Arabic + English matn, grades, chapters.
+# Sample Thaqalayn data — the REAL upstream record shape (da#175): a JSON array
+# of records per book under ``github_clone/V2/ThaqalaynData/<n>.json``, with
+# ``id``/``bookId``/``arabicText``/``thaqalaynSanad``/``majlisiGrading`` fields.
+# Two of the Four Books (al-Kafi, Man Lā Yaḥḍuruhu al-Faqīh).
 # ---------------------------------------------------------------------------
 
-_AL_KAFI = {
-    "bookName": "Al-Kafi",
-    "bookNameAr": "الكافي",
-    "author": "al-Kulayni",
-    "data": [
-        {
-            "hadithNumber": 1,
-            "textAr": "إنما الأعمال بالنيات ولكل امرئ ما نوى",
-            "textEn": "Actions are but by intentions; everyone shall have what they intended.",
-            "grade": "Sahih",
-            "chapterEn": "The Book of Intellect and Ignorance",
-            "chapterNumber": 1,
-        },
-        {
-            "hadithNumber": 2,
-            "textAr": "العلم نور يقذفه الله في قلب من يشاء",
-            "textEn": "Knowledge is a light that Allah casts into the heart of whom He wills.",
-            "grade": "Hasan",
-            "chapterEn": "The Book of the Excellence of Knowledge",
-            "chapterNumber": 2,
-        },
-        {
-            "hadithNumber": 3,
-            "textAr": "من سلك طريقا يطلب فيه علما سلك الله به طريقا إلى الجنة",
-            "textEn": "Whoever travels a path seeking knowledge, Allah sets them toward Paradise.",
-            "grade": "Sahih",
-            "chapterEn": "The Book of the Excellence of Knowledge",
-            "chapterNumber": 2,
-        },
-    ],
-}
+_AL_KAFI = [
+    {
+        "id": 1,
+        "bookId": "Al-Kafi-Volume-1-Kulayni",
+        "book": "Al-Kāfi",
+        "volume": 1,
+        "category": "The Book of Intellect and Ignorance",
+        "categoryId": 1,
+        "chapter": "Chapter 1",
+        "chapterInCategoryId": 1,
+        "author": "al-Kulayni",
+        "arabicText": "إنما الأعمال بالنيات ولكل امرئ ما نوى",
+        "englishText": "Actions are but by intentions; everyone shall have what they intended.",
+        "majlisiGrading": "Sahih",
+        "thaqalaynSanad": "A number of our companions narrated",
+        "thaqalaynMatn": "Actions are but by intentions.",
+    },
+    {
+        "id": 2,
+        "bookId": "Al-Kafi-Volume-1-Kulayni",
+        "book": "Al-Kāfi",
+        "volume": 1,
+        "category": "The Book of the Excellence of Knowledge",
+        "categoryId": 2,
+        "chapter": "Chapter 2",
+        "chapterInCategoryId": 1,
+        "author": "al-Kulayni",
+        "arabicText": "العلم نور يقذفه الله في قلب من يشاء",
+        "englishText": "Knowledge is a light that Allah casts into the heart of whom He wills.",
+        "majlisiGrading": "Hasan",
+        "thaqalaynSanad": "",
+        "thaqalaynMatn": "",
+    },
+    {
+        "id": 3,
+        "bookId": "Al-Kafi-Volume-1-Kulayni",
+        "book": "Al-Kāfi",
+        "volume": 1,
+        "category": "The Book of the Excellence of Knowledge",
+        "categoryId": 2,
+        "chapter": "Chapter 2",
+        "chapterInCategoryId": 2,
+        "author": "al-Kulayni",
+        "arabicText": "من سلك طريقا يطلب فيه علما سلك الله به طريقا إلى الجنة",
+        "englishText": "Whoever travels a path seeking knowledge, Allah sets them toward Paradise.",
+        "majlisiGrading": "Sahih",
+        "thaqalaynSanad": "",
+        "thaqalaynMatn": "",
+    },
+]
 
-_MAN_LA_YAHDURUHU = {
-    "bookName": "Man La Yahduruhu al-Faqih",
-    "bookNameAr": "من لا يحضره الفقيه",
-    "author": "al-Shaykh al-Saduq",
-    "data": [
-        {
-            "hadithNumber": 1,
-            "textAr": "الطهور نصف الإيمان",
-            "textEn": "Purification is half of faith.",
-            "grade": "Sahih",
-            "chapterEn": "The Book of Purification",
-            "chapterNumber": 1,
-        },
-        {
-            "hadithNumber": 2,
-            "textAr": "الصلاة عمود الدين",
-            "textEn": "Prayer is the pillar of the religion.",
-            "grade": "Sahih",
-            "chapterEn": "The Book of Prayer",
-            "chapterNumber": 2,
-        },
-    ],
-}
+_MAN_LA_YAHDURUHU = [
+    {
+        "id": 1,
+        "bookId": "Man-La-Yahduruh-al-Faqih-Volume-1-Saduq",
+        "book": "Man Lā Yaḥḍuruhu al-Faqīh",
+        "volume": 1,
+        "category": "The Book of Purification",
+        "categoryId": 1,
+        "chapter": "Chapter 1",
+        "chapterInCategoryId": 1,
+        "author": "al-Shaykh al-Saduq",
+        "arabicText": "الطهور نصف الإيمان",
+        "englishText": "Purification is half of faith.",
+        "majlisiGrading": "Sahih",
+        "thaqalaynSanad": "",
+        "thaqalaynMatn": "",
+    },
+    {
+        "id": 2,
+        "bookId": "Man-La-Yahduruh-al-Faqih-Volume-1-Saduq",
+        "book": "Man Lā Yaḥḍuruhu al-Faqīh",
+        "volume": 1,
+        "category": "The Book of Prayer",
+        "categoryId": 2,
+        "chapter": "Chapter 2",
+        "chapterInCategoryId": 1,
+        "author": "al-Shaykh al-Saduq",
+        "arabicText": "الصلاة عمود الدين",
+        "englishText": "Prayer is the pillar of the religion.",
+        "majlisiGrading": "Sahih",
+        "thaqalaynSanad": "",
+        "thaqalaynMatn": "",
+    },
+]
 
 # Total hadith / collection counts the fixture is expected to produce.
-_EXPECTED_HADITHS = len(_AL_KAFI["data"]) + len(_MAN_LA_YAHDURUHU["data"])  # 5
+_EXPECTED_HADITHS = len(_AL_KAFI) + len(_MAN_LA_YAHDURUHU)  # 5
 _EXPECTED_COLLECTIONS = 2
 
 
 def _write_thaqalayn_raw(raw_dir: Path) -> None:
-    """Write the two-book Thaqalayn API-format fixture under raw/thaqalayn/."""
-    thaq_dir = raw_dir / "thaqalayn"
-    thaq_dir.mkdir(parents=True)
-    (thaq_dir / "book_1.json").write_text(
-        json.dumps(_AL_KAFI, ensure_ascii=False), encoding="utf-8"
-    )
-    (thaq_dir / "book_2.json").write_text(
+    """Write the two-book Thaqalayn fixture under the real V2 clone layout."""
+    data_dir = raw_dir / "thaqalayn" / "github_clone" / "V2" / "ThaqalaynData"
+    data_dir.mkdir(parents=True)
+    (data_dir / "1.json").write_text(json.dumps(_AL_KAFI, ensure_ascii=False), encoding="utf-8")
+    (data_dir / "2.json").write_text(
         json.dumps(_MAN_LA_YAHDURUHU, ensure_ascii=False), encoding="utf-8"
     )
 
