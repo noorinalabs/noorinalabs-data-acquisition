@@ -1,0 +1,89 @@
+{
+  "data": {
+    "index": 1,
+    "local_index": 1,
+    "nav": {
+      "next": "/books/al-istibsar:1:2",
+      "up": "/books/al-istibsar:1"
+    },
+    "part_type": "Chapter",
+    "path": "/books/al-istibsar:1:1",
+    "titles": {
+      "ar": "1- بَابُ مِقدَارِ المَاءِ ألّذِي لَا يُنَجّسُهُ شَيءٌ"
+    },
+    "verse_count": 11,
+    "verse_refs": [
+      {
+        "local_index": 1,
+        "part_type": "Hadith",
+        "path": "/books/al-istibsar:1:1:1"
+      },
+      {
+        "local_index": 2,
+        "part_type": "Hadith",
+        "path": "/books/al-istibsar:1:1:2"
+      },
+      {
+        "local_index": 3,
+        "part_type": "Hadith",
+        "path": "/books/al-istibsar:1:1:3"
+      },
+      {
+        "local_index": 4,
+        "part_type": "Hadith",
+        "path": "/books/al-istibsar:1:1:4"
+      },
+      {
+        "local_index": 5,
+        "part_type": "Hadith",
+        "path": "/books/al-istibsar:1:1:5"
+      },
+      {
+        "local_index": 6,
+        "part_type": "Hadith",
+        "path": "/books/al-istibsar:1:1:6"
+      },
+      {
+        "local_index": 7,
+        "part_type": "Hadith",
+        "path": "/books/al-istibsar:1:1:7"
+      },
+      {
+        "local_index": 8,
+        "part_type": "Hadith",
+        "path": "/books/al-istibsar:1:1:8"
+      },
+      {
+        "local_index": 9,
+        "part_type": "Hadith",
+        "path": "/books/al-istibsar:1:1:9"
+      },
+      {
+        "local_index": 10,
+        "part_type": "Hadith",
+        "path": "/books/al-istibsar:1:1:10"
+      },
+      {
+        "local_index": 11,
+        "part_type": "Hadith",
+        "path": "/books/al-istibsar:1:1:11"
+      }
+    ],
+    "verse_start_index": 0,
+    "verse_translations": [
+      "bn.ai",
+      "de.ai",
+      "en.ai",
+      "es.ai",
+      "fa.ai",
+      "fr.ai",
+      "id.ai",
+      "ru.ai",
+      "tr.ai",
+      "ur.ai",
+      "zh.ai"
+    ]
+  },
+  "index": "al-istibsar:1:1",
+  "kind": "verse_list"
+}

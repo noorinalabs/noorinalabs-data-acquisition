@@ -155,6 +155,11 @@ DEFAULT_BASELINES: dict[str, dict[str, float | int]] = {
     # Itqan teacher/student transmission edges and name variants (da#93 / da#94).
     "network_edges_itqan": {"row_count": 100656},
     "narrator_aliases_itqan": {"row_count": 217762},
+    # da#182: Tahdhib al-Ahkam (~13,201) + al-Istibsar (~4,220) from ThaqalaynData
+    # (CC0). Arabic-only load, so arabic_coverage_pct (matn_ar-based) is 0.0 — as with
+    # the sibling thaqalayn/bihar sources that also carry the full body in full_text_ar.
+    "hadiths_thaqalayn_data": {"row_count": 17421, "arabic_coverage_pct": 0.0},
+    "collections_thaqalayn_data": {"row_count": 2},
 }
 
 DEFAULT_DRIFT_TOLERANCE_PCT = 30.0

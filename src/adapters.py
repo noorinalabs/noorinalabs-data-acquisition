@@ -261,6 +261,25 @@ SOURCE_REGISTRY: tuple[SourceAdapter, ...] = (
         ),
         description="Bihar al-Anwar — al-Majlisi's ~100k-hadith Shia encyclopedia (hubeali).",
     ),
+    SourceAdapter(
+        slug="thaqalayn_data",
+        corpus=SourceCorpus.THAQALAYN_DATA,
+        sect=Sect.SHIA,
+        acquire_module="thaqalayn_data",
+        parse_module="thaqalayn_data",
+        reachable=True,
+        license_note=(
+            "narmafraz/ThaqalaynData — the original thaqalayn.net data backend, "
+            "CC0 1.0 Universal (public-domain dedication). Carries the real Arabic "
+            "source text for the two Books MohammedArab1/ThaqalaynAPI (the 'thaqalayn' "
+            "corpus) omits; its non-Arabic translations are AI-generated (pipeline_v4) "
+            "and deliberately NOT loaded."
+        ),
+        description=(
+            "ThaqalaynData (CC0) — Tahdhib al-Ahkam + al-Istibsar of al-Tusi, "
+            "completing the Shia Four Books (Arabic-only)."
+        ),
+    ),
 )
 
 
