@@ -50,7 +50,7 @@ Notes:
   website scrape of thaqalayn.net carrying al-Kafi + al-Faqih of the Four Books);
   `thaqalayn_data` clones `narmafraz/ThaqalaynData` — the original CC0 data backend
   — for the two Books the scrape omits (Tahdhib al-Ahkam + al-Istibsar). Different
-  schema and licence, so they never share a parser or corpus namespace. Only the
+  schema and license, so they never share a parser or corpus namespace. Only the
   genuine Arabic is loaded; ThaqalaynData's non-Arabic translations are
   AI-generated (`verse.ai`, `pipeline_v4`) and deliberately dropped.
 

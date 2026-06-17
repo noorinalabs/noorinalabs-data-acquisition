@@ -9,7 +9,7 @@ da#182). The two missing Books live in the project's ORIGINAL data backend,
 which carries all four Books with the real Arabic source text.
 
 This downloader clones that repo (idempotent — a populated clone is reused). It is
-a DIFFERENT upstream, schema, and licence from ``thaqalayn`` (hence its own
+a DIFFERENT upstream, schema, and license from ``thaqalayn`` (hence its own
 ``thaqalayn_data`` corpus), so the two never share a parser or a corpus
 namespace. :mod:`src.parse.thaqalayn_data` parses the clone.
 
