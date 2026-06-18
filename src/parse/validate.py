@@ -133,7 +133,10 @@ DEFAULT_BASELINES: dict[str, dict[str, float | int]] = {
     # Baselines calibrated from Wave 3 full pipeline run (2026-03-30)
     "hadiths_sunnah_api": {"row_count": 30000, "arabic_coverage_pct": 90.0},
     "hadiths_open_hadith": {"row_count": 62160, "arabic_coverage_pct": 0.0},
-    "hadiths_thaqalayn": {"row_count": 113401, "arabic_coverage_pct": 0.0},
+    # Recalibrated da#175: the old 113401/0.0 baseline was captured from the
+    # broken parse (V1+V2+allBooks duplication, English text mis-routed into the
+    # Arabic column). Corrected = V2 per-book scope, Arabic in matn_ar.
+    "hadiths_thaqalayn": {"row_count": 33190, "arabic_coverage_pct": 99.0},
     "hadiths_lk": {"row_count": 34088, "arabic_coverage_pct": 99.0},
     "hadiths_fawaz": {"row_count": 0, "arabic_coverage_pct": 0.0},
     "hadiths_sanadset": {"row_count": 650986, "arabic_coverage_pct": 90.0},
@@ -148,13 +151,18 @@ DEFAULT_BASELINES: dict[str, dict[str, float | int]] = {
     "narrators_bio_itqan": {"row_count": 115735},
     "collections_sunnah_api": {"row_count": 15},
     "collections_sunnah_scraped": {"row_count": 5},
-    "collections_thaqalayn": {"row_count": 64},
+    "collections_thaqalayn": {"row_count": 33},  # da#175: V2 per-book collections
     "collections_lk": {"row_count": 6},
     "collections_fawaz": {"row_count": 0},
     "network_edges_muhaddithat": {"row_count": 330},
     # Itqan teacher/student transmission edges and name variants (da#93 / da#94).
     "network_edges_itqan": {"row_count": 100656},
     "narrator_aliases_itqan": {"row_count": 217762},
+    # da#182: Tahdhib al-Ahkam (~13,201) + al-Istibsar (~4,220) from ThaqalaynData
+    # (CC0). Arabic-only load; the full hadith Arabic lands in matn_ar (the field the
+    # graph loader surfaces on the Hadith node), so arabic_coverage_pct is ~100%.
+    "hadiths_tusi": {"row_count": 17421, "arabic_coverage_pct": 100.0},
+    "collections_tusi": {"row_count": 2},
 }
 
 DEFAULT_DRIFT_TOLERANCE_PCT = 30.0

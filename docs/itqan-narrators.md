@@ -118,3 +118,73 @@ DETACH DELETE n
 > `source_corpus`: after cross-source dedup a canonical narrator can carry ids
 > from several corpora, so to *strip* Itqan from a multi-source narrator you would
 > remove its `itqan:` entries rather than delete the whole node.
+
+## Staging load (da#176) — executed 2026-06-16
+
+The full 115,735-profile load onto **staging** Neo4j, the narrator-side coverage
+keystone for the P5W5 production cutover (`deploy#470`).
+
+### What landed (read back from staging)
+
+`bio_promote` collapsed the 115,735 bios to **85,840** canonical narrators keyed
+by `nar:<uuid5(name_ar_normalized)>` (`make_canonical_id`) — many profiles share a
+normalized name. Verified counts on the live staging graph:
+
+| Metric | Value | Note |
+|--------|-------|------|
+| Total `Narrator` nodes | 132,999 | was 47,199 → **+85,800** new Itqan |
+| `source_corpus = itqan` | 85,840 | 85,800 Itqan-only + 40 unioned (see below) |
+| `source_corpus = lk` | 47,089 | **unchanged — 0 `lk` nodes touched** |
+| `source_corpus = muhaddithat` | 70 | was 110; 40 re-derived primary corpus |
+| Itqan provenance (`source_ids` has `itqan:`) | 85,840 | the removal handle above |
+| Non-`nar:` ids | 0 | every node keeps the canonical identity |
+
+Itqan trustworthiness split: thiqa 29,605 · unknown 21,869 · saduq 17,759 ·
+daif 13,709 · kadhdhab 1,639 · matruk 1,259.
+
+### No-clobber merge of the 40 collisions
+
+40 of the 85,840 Itqan canonical ids collided with already-loaded **muhaddithat**
+narrators (both sources are bio-promoted by normalized name, so they converge on
+the same `nar:` id — exactly the intended cross-source dedup). A naive load would
+have let `_NARRATOR_MERGE`'s unconditional 15-property `SET` clobber those nodes'
+`mention_count` and prior `source_ids` — the two-producer hazard
+(`disambiguate` OVERWRITES, `bio_promote` MERGES). It was avoided by feeding the 40
+existing canonical records back through `promote_bios_to_canonical`, whose
+parquet-level union preserves `mention_count` and unions `source_ids` /
+`source_corpora` before the graph `MERGE`. Read back after the load:
+
+```text
+nar:200b9c92-1ea1-5336-831f-b8bc3a773a19  أبو موسى الأشعري
+  source_ids      = ["muhaddithat:41", "itqan:74959"]   # prior id preserved + Itqan added
+  source_corpora  = ["itqan", "muhaddithat"]
+  source_corpus   = "itqan"                              # primary_corpus() is alphabetical-first
+  mention_count   = 0                                     # preserved, not reset
+  sect_affiliation= "neutral"                             # muhaddithat cross-tradition, preserved
+```
+
+The scalar `source_corpus` reads `itqan` for the 40 only because `primary_corpus()`
+takes the alphabetically-first corpus over `{itqan, muhaddithat}`; the full
+multi-source truth lives in `source_corpora` + `source_ids`. This is the identical
+result a single `run_all` (`disambiguate` → `bio_promote`) over both sources would
+produce.
+
+### Reproducing the produce step
+
+The acquire → parse → promote half is the committed, deterministic
+[full-load runbook](#full-load-runbook-all-115735-profiles) above; it writes
+`narrators_canonical.parquet` (85,840 rows, `source_corpus=itqan`) with no Neo4j
+access.
+
+### The load mechanism
+
+Staging Neo4j (`bolt://neo4j:7687`) is reachable only **inside the cluster** and
+the staging container has `apoc.import.file.enabled=false`, so the load ran on the
+staging box via `docker exec … cypher-shell` against the
+`noorinalabs-neo4j-1` container — the same out-of-band channel prior staging loads
+used (da#73 / da#141). The executed Cypher replicates `_NARRATOR_MERGE` verbatim
+(idempotent `MERGE` on `id`; re-running is a no-op), and the 40-record union above
+runs through the committed `promote_bios_to_canonical`. The **go-forward canonical
+loader** is the containerised `noorinalabs-graph-load` image (da#174,
+`Dockerfile.load` + `scripts/load_staging.sh`), which runs `graph.load_all` inside
+the cluster where bolt resolves; once merged, prefer it over the manual channel.

@@ -40,6 +40,7 @@ EXPECTED_SLUGS = [
     "halimbahae",
     "mis",
     "bihar",
+    "tusi",
 ]
 
 
@@ -176,3 +177,24 @@ class TestRunAllDerivesFromRegistry:
 
 def test_source_adapter_is_dataclass_instance() -> None:
     assert all(isinstance(a, SourceAdapter) for a in SOURCE_REGISTRY)
+
+
+class TestActiveComposition:
+    """Inactive sources (confirmed duplicates) are retained for the coverage
+    invariant but never acquired/parsed (da#191)."""
+
+    def test_open_hadith_is_inactive(self) -> None:
+        assert get_adapter("open_hadith").active is False
+
+    def test_open_hadith_still_has_an_adapter(self) -> None:
+        # Coverage invariant must still hold — the row is retained, just inactive.
+        assert SourceCorpus.OPEN_HADITH in {a.corpus for a in SOURCE_REGISTRY}
+
+    def test_open_hadith_is_the_only_inactive_source(self) -> None:
+        inactive = {a.slug for a in SOURCE_REGISTRY if not a.active}
+        assert inactive == {"open_hadith"}
+
+    def test_run_all_skips_inactive(self) -> None:
+        for mod in ("src.acquire", "src.parse"):
+            source = inspect.getsource(import_module(mod).run_all)
+            assert "adapter.active" in source

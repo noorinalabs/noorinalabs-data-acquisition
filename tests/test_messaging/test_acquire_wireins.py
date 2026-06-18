@@ -101,9 +101,9 @@ class TestMuhaddithatWireIn:
 class TestThaqalaynWireIn:
     def test_run_emits_with_source_thaqalayn_on_skip_path(self, tmp_path: Path) -> None:
         raw = tmp_path / "raw"
-        dest = raw / "thaqalayn"
-        # Pre-seed enough book_*.json files to hit the idempotent skip branch.
-        _seed_jsons(dest, [f"book_{i:03d}.json" for i in range(16)])
+        # Pre-seed enough canonical V2 per-book files to hit the idempotent skip.
+        data_dir = raw / "thaqalayn" / "github_clone" / "V2" / "ThaqalaynData"
+        _seed_jsons(data_dir, [f"{i}.json" for i in range(16)])
 
         with patch("src.acquire.thaqalayn.emit_raw_new_for_manifest") as emit:
             from src.acquire import thaqalayn
@@ -116,16 +116,12 @@ class TestThaqalaynWireIn:
     def test_run_emits_with_source_thaqalayn_on_fresh_clone(self, tmp_path: Path) -> None:
         raw = tmp_path / "raw"
 
-        def fake_download(dest: Path) -> list[Path]:
-            clone_dest = dest / "github_clone"
-            _seed_jsons(clone_dest, [f"book_{i:03d}.json" for i in range(16)])
-            return list(clone_dest.glob("*.json"))
+        def fake_clone_repo(_url: str, dest: Path, **_kw: Any) -> Path:
+            _seed_jsons(dest / "V2" / "ThaqalaynData", [f"{i}.json" for i in range(16)])
+            return dest
 
         with (
-            patch(
-                "src.acquire.thaqalayn._download_via_github",
-                side_effect=fake_download,
-            ),
+            patch("src.acquire.thaqalayn.clone_repo", side_effect=fake_clone_repo),
             patch("src.acquire.thaqalayn.emit_raw_new_for_manifest") as emit,
         ):
             from src.acquire import thaqalayn

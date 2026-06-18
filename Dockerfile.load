@@ -1,0 +1,37 @@
+# syntax=docker/dockerfile:1
+# One-off graph-load image for staging / prod ingest (da#174).
+#
+# Why a dedicated image: the target Neo4j (``bolt://neo4j:7687``) is reachable
+# only on the internet-isolated ``noorinalabs_backend`` docker network, so a
+# loader container attached to that network CANNOT ``pip install`` at run time.
+# This image therefore bakes every dependency + the loader code at BUILD time
+# (on a network with egress, e.g. the default bridge), and is then RUN attached
+# to ``noorinalabs_backend`` (no egress needed). Staging Parquet is bind-mounted
+# at run time under ``/app/data`` — nothing data-bearing is baked into the image.
+#
+# Driven by ``scripts/load_staging.sh`` (the runbook). The deployed isnad-graph
+# API image cannot be reused for this: it ships the neo4j driver but not pyarrow,
+# which the Parquet node/edge loaders require.
+FROM python:3.14-slim AS base
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+FROM base AS builder
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN pip install --no-cache-dir uv && uv sync --frozen --no-dev --no-install-project
+
+FROM base AS runtime
+WORKDIR /app
+COPY --from=builder /app/.venv /app/.venv
+COPY pyproject.toml uv.lock ./
+COPY src ./src
+COPY queries ./queries
+ENV PATH="/app/.venv/bin:$PATH"
+# Data dirs (data/staging, data/curated) are bind-mounted at run time.
+# Invoked via the module path (not the console script) so no project install is
+# required in the image. Default command is a nodes-only load; override the
+# command (e.g. `load` for full nodes+edges) at `docker run` time.
+ENTRYPOINT ["python", "-m", "src.cli"]
+CMD ["load", "--nodes-only"]

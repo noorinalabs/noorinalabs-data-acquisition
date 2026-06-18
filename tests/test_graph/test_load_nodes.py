@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -318,6 +319,81 @@ class TestLoadHadiths:
         hadith_result = results[1]
         assert hadith_result.node_type == "Hadith"
         assert hadith_result.created + hadith_result.merged == 2
+
+    def _hadith_batch_rows(self, mock_client: MockNeo4jClient) -> list[dict[str, Any]]:
+        for _query, batch in mock_client.calls:
+            if (
+                isinstance(batch, list)
+                and batch
+                and isinstance(batch[0], dict)
+                and str(batch[0].get("id", "")).startswith("hdt:")
+            ):
+                return batch
+        return []
+
+    def test_matn_ar_falls_back_to_full_text_ar(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """Sources that only populate full_text_ar (halimbahae/open_hadith/bihar)
+        must not land textless: matn_ar falls back to full_text_ar (da#190)."""
+        write_hadiths(
+            staging_dir,
+            [
+                {"source_id": "h-empty", "matn_ar": "", "full_text_ar": "النص الكامل"},
+                {"source_id": "h-none", "matn_ar": None, "full_text_ar": "نص آخر"},
+            ],
+        )
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        rows = {r["id"]: r["matn_ar"] for r in self._hadith_batch_rows(mock_client)}
+        assert rows["hdt:h-empty"] == "النص الكامل"
+        assert rows["hdt:h-none"] == "نص آخر"
+
+    def test_matn_ar_preserved_when_present(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """A real matn_ar is never overwritten by full_text_ar."""
+        write_hadiths(
+            staging_dir,
+            [{"source_id": "h-1", "matn_ar": "المتن", "full_text_ar": "الإسناد والمتن"}],
+        )
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        rows = {r["id"]: r["matn_ar"] for r in self._hadith_batch_rows(mock_client)}
+        assert rows["hdt:h-1"] == "المتن"
+
+    def test_composition_skips_non_canonical_collections(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """Non-canonical (source, collection) Hadith are skipped at load (da#191):
+        halimbahae keeps only its unique books; mis loads no Hadith nodes."""
+        write_hadiths(
+            staging_dir,
+            [
+                # halimbahae unique book -> kept
+                {
+                    "source_id": "hb-kept",
+                    "source_corpus": "halimbahae",
+                    "collection_name": "musnad_ahmad_ibn-hanbal",
+                    "matn_ar": "متن",
+                },
+                # halimbahae six-book duplicate of lk -> dropped
+                {
+                    "source_id": "hb-drop",
+                    "source_corpus": "halimbahae",
+                    "collection_name": "sahih_al-bukhari",
+                    "matn_ar": "متن",
+                },
+                # mis -> no Hadith nodes at all
+                {
+                    "source_id": "mis-drop",
+                    "source_corpus": "mis",
+                    "collection_name": "Sahih Muslim",
+                    "matn_ar": "متن",
+                },
+            ],
+        )
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        ids = {r["id"] for r in self._hadith_batch_rows(mock_client)}
+        assert ids == {"hdt:hb-kept"}
 
     def test_adds_hdt_prefix(
         self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path

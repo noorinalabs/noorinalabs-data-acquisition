@@ -47,7 +47,17 @@ _ALL_SCHEMA_NAMES = frozenset(
 # Parse modules that are framework, not per-source parsers — excluded from the
 # "every parser emits a provenance-bearing schema" coverage assertion.
 _NON_PARSER_MODULES = frozenset(
-    {"__init__", "base", "schemas", "validate", "narrator_extraction", "identity"}
+    {
+        "__init__",
+        "base",
+        "schemas",
+        "validate",
+        "narrator_extraction",
+        "identity",
+        # da#191: declares the canonical corpus composition (which source/collection
+        # pairs load) — not a per-source parser, emits no parquet.
+        "composition",
+    }
 )
 
 
