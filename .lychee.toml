@@ -22,10 +22,13 @@ exclude = [
   '^#\d+$',
 ]
 
-# Skip generated/vendored trees.
+# Skip generated/vendored trees, and the version-controlled project-memory
+# corpus (da#203) — its [[wikilinks]] and cross-repo soft pointers are not
+# real broken-link signals (same call the parent makes for its corpus).
 exclude_path = [
   ".venv",
   "node_modules",
+  ".claude/memory",
 ]
 
 # A relative link with no matching file is the failure we DO want to surface.
