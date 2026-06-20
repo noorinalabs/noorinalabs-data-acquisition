@@ -51,6 +51,10 @@
   ],
   "ignores": [
     "node_modules/**",
-    ".venv/**"
+    ".venv/**",
+    // .claude/memory/** — the version-controlled project-memory corpus (da#203,
+    // from noorinalabs-main#740). Dense append-only note prose with names, SHAs,
+    // [[wikilinks]] and Arabic; excluded same as the parent excludes its corpus.
+    ".claude/memory/**"
   ]
 }

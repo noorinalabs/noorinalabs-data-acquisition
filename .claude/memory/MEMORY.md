@@ -1,0 +1,28 @@
+# Project Memory — noorinalabs-data-acquisition
+
+This is the **always-loaded index** of this repo's version-controlled project memory (one line per memory). It is auto-loaded into every session via the committed `@.claude/memory/MEMORY.md` import in this repo's `CLAUDE.md`. The individual topic files in `.claude/memory/*.md` are read on demand when a line below looks relevant to the work at hand.
+
+These memories are the **data-acquisition-specific** corpus, split out of the org-level memory in `noorinalabs-main` (org/repo memory split — meta noorinalabs-main#740, driver #732, this repo's seed da#203). Some `[[wikilinks]]` in the files below still point to org-level memories that remain in `noorinalabs-main`; those cross-repo pointers are soft and may dangle — that is acceptable.
+
+Recording convention: create/edit `.claude/memory/<kebab-slug>.md` with the standard frontmatter (`name`, `description`, `metadata.type` = `user` | `feedback` | `project` | `reference`), add a one-line pointer here, and **commit it** so it travels with the branch.
+
+## Pipeline / data findings (project)
+
+- [Bihar not in Thaqalayn](project_bihar_not_in_thaqalayn.md) — da#95 premise false; Owner 2026-06-12: build real bihar adapter vs hubeali.com (PR#134).
+- [hadith number: collection-ref vs in-book ordinal](project_hadith_number_collection_vs_inbook.md) — sunnah.com has 2 numbers; APPEARS_IN uses in-book ordinal; da#72 wrong. da#77.
+- [narrators_canonical two producers ordering](project_narrators_two_producers.md) — disambiguate OVERWRITES (da#99), bio_promote MERGES (da#110); run_all order matters.
+- [Profile-only source needs bio-promote](project_profile_source_bio_promote.md) — rijal-DB source loads 0 Narrators via disambiguator; bio_promote.py promotes bios→canonical.
+- [STUDIED_UNDER network_edge allowlist](project_studied_under_allowlist.md) — load_edges globs network_edges_*.parquet as STUDIED_UNDER; only studentship allowlisted. da#133.
+- [sunnah_scraper named-book truncation](project_sunnah_scraper_truncation.md) — digit-only book enum dropped /introduction; riyad lost 679/1896; others still truncated. da#177.
+- [thaqalayn parser broken vs real schema](project_thaqalayn_parser_schema.md) — parser maps wrong fields → 0% matn, 59-id collision; real clean=33,190 hadiths. da#175.
+- [Itqan license: proceed](project_itqan_license_proceed.md) — Owner 2026-06-12: use Itqan narrator source despite no upstream license (nonprofit + own-schema). PR#110.
+- [P5W5 corpus-load findings](project_p5w5_corpus_load_findings.md) — lk=Sunni not al-Kafi; staging NOT empty; thaqalayn parser fixture-masked; Four Books partial→da#182.
+- [Staging graph-load transport](project_staging_graph_load_transport.md) — Neo4j only on noorinalabs_backend (no host port/egress); bake-deps-then-attach loader. da#174/PR#180.
+
+## Engineering gotchas (feedback)
+
+- [APPEARS_IN MERGE null-property bug](feedback_appears_in_merge_null.md) — _APPEARS_IN_QUERY MERGEs rel w/ hadith_number_in_book in pattern; Neo4j rejects null. main#139.
+- [generate_source_id fail-fast breaks non-corpus keys](feedback_generate_source_id_failfast.md) — raises on non-SourceCorpus namespace; bio/aux adapters crash; latent. da#89.
+- [Neo4j SET null removes property](feedback_neo4j_set_null_removes_property.md) — MERGE {prop:null} aborts; null-safe=property-less MERGE+SET, but SET prop=null REMOVES the key. da#69.
+- [count>=0 masks empty graph](feedback_count_ge_zero_masks_empty_graph.md) — real-DB count(r)>=0 asserts nothing; read back the graph (concrete count + per-row keys).
+- [WSL2 local Docker](feedback_wsl2_no_local_docker.md) — RESOLVED 2026-06-12: local Docker works (neo4j:5 ran locally+CI); keep skip-guard, CI may flake. da#89.

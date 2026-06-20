@@ -1,0 +1,20 @@
+---
+name: feedback_wsl2_no_local_docker
+description: "WSL2 dev env has NO usable local Docker (Windows binary, WSL integration off, no socket) → container/testcontainer/local-Neo4j-Kafka-MinIO work can't run locally; scope PR-time acceptance to no-Docker proofs + skip-guarded live tests + runbook, track live legs."
+metadata:
+  node_type: memory
+  type: feedback
+  originSessionId: 080813cd-f3b8-434d-974c-badf58620c96
+---
+
+**RESOLVED 2026-06-11, re-confirmed 2026-06-12 (P4W3):** owner enabled Docker Desktop WSL integration — `docker info` → Server 29.5.3, socket present (`/var/run/docker.sock` root:docker), `docker run hello-world` OK, `docker compose` v5.1.4, and local images already built incl. `neo4j:5` + `postgres:16-alpine` + `noorinalabs-integration-tests-*` (Docker is in active local use). **Consequence for P4W3: main#631's core premise ("defer live pipeline-E2E + real-Neo4j legs because no Docker") is resolved — re-scope/close it; do NOT brief implementers with "no local Docker."** Acceptance bar for live-load issues can now be live LOCAL Neo4j (neo4j:5) at PR-time. Local testcontainers + local Neo4j/Postgres/Kafka now work. The in-wave story below was the state for the first ~2h of P4W2 kickoff and is retained for the pattern. **Two parts still hold:** (1) **CI runners** may still flake on Docker Hub reachability (Oyunbileg's da#74 Integration job — ryuk pull `context deadline exceeded`), so skip-guarded live tests + in-process proofs remain the right CI-durable design; (2) **staging Neo4j/frontend are cluster-internal** ([[project_staging_unreachable_from_sandbox]]) — for "see data" you can now use a LOCAL Docker Neo4j instead of needing the staging box.
+
+ORIGINAL (pre-resolution): The WSL2 dev distro had no usable Docker: `docker` resolved to the Windows Docker Desktop binary but **WSL integration was OFF** — `docker info` → "could not be found in this WSL 2 distro", no `/var/run/docker.sock`. Confirmed 2026-06-11 (P4W2). It can silently revert after a Docker Desktop update, so re-verify `docker info` if container work suddenly fails. So anything needing local containers cannot run here: `docker compose up` stacks (ingest-platform workers + MinIO/Kafka/Neo4j), **testcontainers** integration tests (Neo4j/Postgres), and live load into a local Neo4j. Also: ingest-platform's RUNBOOK references `noorinalabs-deploy/compose.local.yaml` which does NOT exist; `sunnah_api` acquire needs unset `SUNNAH_API_KEY` (keyless `sunnah_scraper` covers first-light, da#71).
+
+**Why:** this is the standing dev-box reality, not a per-task glitch. Pipeline/integration issues that assume `docker compose up` or testcontainers will hit a hard wall mid-implementation if not scoped up front. P4W2 surfaced it on main#139 (full E2E), and it applies equally to main#136 (integration scenarios), da#69 (real-Neo4j edge test), da#73 (live staging-Neo4j load), and any us auth Postgres-testcontainer tests.
+
+**How to apply** (the runtime-gate-scoping pattern, [[feedback_runtime_gate_scoping]] + charter PR-time-vs-runtime acceptance):
+- **Don't** burn wave time trying to enable Docker-in-WSL2 — that's an env/owner action, out of scope.
+- Deliver the no-Docker proof at PR time: in-process / faithful-fake harness driving the REAL code (e.g. real worker processors + asserted Cypher MERGE output — Nikolaos's main#139 harness; Kwesi's da#73 committed-real-sample + in-process mock client test), plus a **skip-if-unreachable** guard on any real-DB test so it's correct-by-construction and runs in CI / when a box is available.
+- Document the live leg as a clearly-marked "requires Docker/Neo4j" runbook step, and **track it in a follow-up issue** (P4W2 → `noorinalabs-main#631`) referenced by each affected PR. Not a merge blocker.
+- For "see real data" (owner data-first priority [[project_p4_priority_data_first]]): the viable no-local-Docker path to live data is the **staging box** (SSH in, run the load against its compose-stack Neo4j so the deployed frontend renders it) — confirm staging-Neo4j reachability early; if unreachable, that's an owner escalation.

@@ -120,6 +120,18 @@ Copy `.env.example` to `.env`. Key variables:
 - `DATA_RAW_DIR`, `DATA_STAGING_DIR`, `DATA_CURATED_DIR` — data paths
 - `LOG_LEVEL`, `LOG_FORMAT` — logging configuration
 
+## Project Memory
+
+Project memory is **version-controlled in this repo** at `.claude/memory/`, not in the user-space auto-memory directory. This makes the accumulated state **transferable**: a developer who pulls a branch gets the memory with it, with zero per-machine setup. The index below is auto-loaded into every session via this committed import:
+
+@.claude/memory/MEMORY.md
+
+`MEMORY.md` is the always-loaded index (one line per memory); the individual topic files in `.claude/memory/*.md` are read on demand when a line looks relevant. This repo is **self-contained**: it imports only its own `.claude/memory/` and never across repos. The corpus here is the data-acquisition-specific memory split out of `noorinalabs-main` (org/repo split — meta noorinalabs-main#740, seed da#203); a few `[[wikilinks]]` still point at org-level memories that remain in the parent and may dangle — cross-repo soft pointers are acceptable.
+
+**Recording a memory:** create or edit `.claude/memory/<kebab-slug>.md` with the standard frontmatter (`name`, `description`, `metadata.type` = `user` | `feedback` | `project` | `reference`), add a one-line pointer to `MEMORY.md` (`- [Title](file.md) — hook`), and **commit it** so it travels with the branch. Link related memories with `[[other-slug]]`. Before adding, check for an existing file covering the same fact and update it instead of duplicating; delete memories that turn out to be wrong.
+
+> `.claude/memory/**` is excluded from the markdown/cspell/lychee linters (dense append-only note prose with names, SHAs, `[[wikilinks]]`, and Arabic) — the exclusions live in `.markdownlint-cli2.jsonc`, `.cspell.json`, and `.lychee.toml`.
+
 ## Team Workflow
 
 > **Cross-repo session-team note:** The team structure described below is the **per-repo team** — operative when a session is opened isolated in this repo for repo-only work.
