@@ -121,9 +121,10 @@ jobs:
     # Fails the build if a check this CI enforces (ruff/mypy/pytest/…) is NOT
     # mirrored in .pre-commit-config.yaml — the machine-enforcement that keeps
     # the local-hooks mirror from rotting (Phase-3 end-state #6 / main#327).
-    # The gate is scoped to THIS workflow (the code-CI surface); docs.yml gates
-    # a separate artifact class and is intentionally not mirrored by pre-commit
-    # beyond the actionlint hook.
+    # Per noorinalabs-main#684 the gate globs ALL workflows (ci.yml AND
+    # docs.yml), so the docs.yml `Spellcheck (cspell)` + actionlint jobs are
+    # demanded in the pre-commit mirror too — local "clean" must mirror the
+    # COMPLETE CI check-set, not a subset.
     steps:
       - uses: actions/checkout@v6
 
@@ -131,5 +132,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Check pre-commit ⇄ ci.yml drift
-        run: python3 .claude/lib/pre_commit_ci_sync.py . --ci .github/workflows/ci.yml
+      - name: Check pre-commit ⇄ CI drift (all workflows)
+        run: python3 .claude/lib/pre_commit_ci_sync.py .
+
+      - name: Sync-gate unit tests
+        # Lock the classifier behaviour (incl. the #684 cspell kind) and guard
+        # docs.yml's cspell job from silent removal. unittest avoids a pytest
+        # dependency in this lightweight job.
+        run: python3 -m unittest discover -s .claude/lib/tests -p "test_*.py" -v

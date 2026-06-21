@@ -10,7 +10,8 @@
 #
 # Stage split:
 #   pre-commit (fast, every commit) — ruff-format, ruff-lint over the repo, plus
-#     gitleaks secret-scan and pinned actionlint on workflows.
+#     gitleaks secret-scan, pinned actionlint on workflows, and pinned cspell
+#     over the authored-prose set.
 #   pre-push   (heavier, every push) — mypy strict + the pytest suite. These run
 #     the whole src/ + tests surface, so they're push-time not commit-time to
 #     keep the commit loop snappy while still catching everything before the
@@ -28,12 +29,21 @@
 #     here mirrors ci.yml's unit `test` job).
 #   * actionlint runs via the rhysd/actionlint pre-commit mirror pinned to
 #     v1.7.12 so the same workflow-lint runs locally that docs.yml runs in CI.
+#   * cspell runs via the streetsidesoftware/cspell-cli mirror pinned to v8.4.0
+#     to match the exact cspell the `streetsidesoftware/cspell-action@…v8.4.0`
+#     CI step (docs.yml `Spellcheck (cspell)`) bundles — same engine +
+#     dictionaries on both sides. `--config .cspell.json` reuses the same
+#     dictionaries + ignore rules CI loads; the `files` regex is the equivalent
+#     of the CI action's authored-prose glob set.
 #
-# The kind-level mirror (ruff-lint, ruff-format, mypy, pytest present on both
-# sides) is enforced in CI by `.claude/lib/pre_commit_ci_sync.py` — if a future
-# edit drops one side, that gate fails the build. The gate is scoped to ci.yml
-# (the code-CI workflow); docs.yml gates a separate artifact class (markdown/
-# config/actionlint) that pre-commit covers via the actionlint mirror.
+# The kind-level mirror (ruff-lint, ruff-format, mypy, pytest, actionlint, and
+# now cspell present on both sides) is enforced in CI by
+# `.claude/lib/pre_commit_ci_sync.py` — if a future edit drops one side, that
+# gate fails the build. Per noorinalabs-main#684 the gate now globs ALL
+# workflows (ci.yml AND docs.yml), so the docs.yml cspell + actionlint jobs are
+# demanded here too — local "clean" must mirror the COMPLETE CI check-set, not a
+# subset. (The remaining docs.yml jobs — markdownlint, lychee, YAML/JSON
+# syntax — are not yet classified kinds, so the gate stays silent on them.)
 
 repos:
   # --- Ruff formatter & linter (mirror of ci.yml Lint job) ---
@@ -60,6 +70,23 @@ repos:
     hooks:
       - id: actionlint
         name: actionlint
+
+  # --- Spellcheck (pinned cspell mirror of docs.yml `Spellcheck (cspell)`) ---
+  # Pinned to v8.4.0 of cspell-cli to match the exact cspell the
+  # `streetsidesoftware/cspell-action@…v8.4.0` CI step bundles (same engine +
+  # dictionaries). `language: node`, so pre-commit provisions its own node/cspell
+  # env (no system cspell required). `--config .cspell.json` reuses the CI
+  # dictionaries + ignore rules; `files` is the regex equivalent of the CI
+  # action's authored-prose glob set (docs/, CLAUDE.md, RUNBOOK.md, the team
+  # charter). New domain vocabulary then fails `pre-commit run` locally instead
+  # of only surfacing as a CI red after push (#684).
+  - repo: https://github.com/streetsidesoftware/cspell-cli
+    rev: v8.4.0
+    hooks:
+      - id: cspell
+        name: cspell
+        args: ["--no-must-find-files", "--no-progress", "--no-summary", "--config", ".cspell.json"]
+        files: ^(docs/.*\.md|CLAUDE\.md|RUNBOOK\.md|\.claude/team/charter\.md)$
 
   # --- Heavier checks run at pre-push (mirror CI's Type Check + Test jobs).
   #     Run as `local`/`system` hooks via `uv run` so the pinned tools from
