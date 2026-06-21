@@ -104,6 +104,10 @@ make clean              # Remove staging data and caches
 - Arabic text utilities are pure Python: diacritics stripping, alif/hamza/taa marbuta normalization
 - Staging data uses PyArrow schemas as intermediate between raw data and graph nodes
 
+### Shell environment
+
+The development shell is **zsh** (not bash). Write zsh-safe terminal commands and avoid bash-only idioms (`declare -A`, `${!arr[@]}`, and unquoted `?`/`*` globs such as `…?ref=main` URLs, which zsh pathname-expands). Prefer POSIX-portable constructs; use `bash -c '...'` explicitly when bash is genuinely required. Canonical do/don't list: org `docs/TOOLCHAIN.md` "Shell environment" section + `ontology/conventions.md` in `noorinalabs-main`.
+
 ## Configuration
 
 Copy `.env.example` to `.env`. Key variables:
