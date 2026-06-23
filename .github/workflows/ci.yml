@@ -115,6 +115,40 @@ jobs:
         env:
           ENVIRONMENT: test
 
+  base-pin-and-fixture-realism:
+    name: Base-image pin + fixture realism
+    runs-on: ubuntu-latest
+    # Charter-prose→code gates rolled in by #744 (built in noorinalabs-main#735).
+    # Both invoke a stdlib-only `.claude/lib/check_*.py` (no uv/node needed) and
+    # are mirrored by the `dockerfile-base-pin` / `fixture-realism` pre-commit
+    # hooks; the sync-drift gate classifies both kinds, so dropping either the CI
+    # step or the local hook is harmful drift. Each check is kept a single-line
+    # `run:` so the line-scanner sync classifier registers the script name.
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      # Every Dockerfile FROM must be digest-pinned + carry the matching distro
+      # upgrade (charter § Base Image Pinning). Dockerfile.load is the only image.
+      - name: Dockerfile base-image pin + upgrade
+        run: python3 .claude/lib/check_dockerfile_base_pin.py Dockerfile.load
+      # Arabic hadith/isnad TEXT fixtures must be production-realistic — voweled
+      # and carrying the عن transmission particle (charter § Production-Realistic
+      # Input). Scoped to the curated text corpus (json/csv/txt under any tests
+      # `fixtures/` dir); the check skips non-Arabic files and `find` keeps new
+      # curated fixtures covered. Deliberately OUT of scope (documented exemption,
+      # not toy fixtures): raw scraped page captures — the `.html` under
+      # test_acquire/ and the `tusi_raw/` thaqalayn clone tree (verbatim upstream
+      # bytes; the rawest realism, judged by parse-ability, cannot be "greener
+      # than real data"); and two name-only NER fixtures — itqan_rijal_sample.json
+      # (rijal biographical NAMES, unvoweled in real rijal DBs) and
+      # cluster_precision_gold.json (clustering gold of narrator names) — which
+      # carry no isnad string, so the عن/vocalization floor (charter-scoped to
+      # isnad text) does not apply.
+      - name: Fixture realism (Arabic hadith/isnad text fixtures)
+        run: find tests -type d -path 'tests/test_parse/fixtures/tusi_raw' -prune -o -type f \( -name '*.json' -o -name '*.csv' -o -name '*.txt' \) -path '*/fixtures/*' ! -name 'itqan_rijal_sample.json' ! -name 'cluster_precision_gold.json' -print0 | xargs -0 -r python3 .claude/lib/check_fixture_realism.py
+
   precommit-sync:
     name: Pre-commit ⇄ CI sync-drift gate
     runs-on: ubuntu-latest
