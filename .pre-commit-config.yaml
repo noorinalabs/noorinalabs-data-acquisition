@@ -126,7 +126,15 @@ repos:
         entry: bash -c 'find tests -type d -path "tests/test_parse/fixtures/tusi_raw" -prune -o -type f \( -name "*.json" -o -name "*.csv" -o -name "*.txt" \) -path "*/fixtures/*" ! -name "itqan_rijal_sample.json" ! -name "cluster_precision_gold.json" -print0 | xargs -0 -r python3 .claude/lib/check_fixture_realism.py'
         language: system
         pass_filenames: false
-        files: ^tests/.*/fixtures/.*\.(json|csv|txt)$
+        # `(.*/)?` so BOTH the top-level curated corpus (tests/fixtures/<source>/
+        # …) AND the deeper per-area fixtures (tests/<area>/fixtures/…) trigger the
+        # hook. The first regex required an intermediate segment, so it never fired
+        # on the voweled corpus it most needs to guard (fawaz/halimbahae/lk/
+        # open_hadith) — only on the deeper EXEMPTED paths — letting a local
+        # toy-ification of a corpus fixture slip past pre-commit (CI's
+        # unconditional `find` still caught it). The entry's own `find` applies the
+        # exemptions regardless of which file triggered (pass_filenames: false).
+        files: ^tests/(.*/)?fixtures/.*\.(json|csv|txt)$
         stages: [pre-commit]
 
   # --- Heavier checks run at pre-push (mirror CI's Type Check + Test jobs).
