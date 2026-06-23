@@ -12,8 +12,17 @@
 # Driven by ``scripts/load_staging.sh`` (the runbook). The deployed isnad-graph
 # API image cannot be reused for this: it ships the neo4j driver but not pyarrow,
 # which the Parquet node/edge loaders require.
-FROM python:3.14-slim AS base
+# Base pinned to python:3.14-slim by digest for supply-chain reproducibility
+# (charter tech-decisions.md § Base Image Pinning, noorinalabs-main#735 / #744).
+# The digest freezes the starting layer; the `apt-get -y upgrade` in the RUN
+# below then pulls the latest Debian patches at build time so the slim base does
+# not ship known-fixed OS CVEs — the two failure modes the section names
+# (floating-tag drift + within-tag package drift). The digest is the multi-arch
+# OCI index (amd64 + arm64), so it resolves on both build platforms. Re-pin to a
+# newer digest on each python minor bump.
+FROM python:3.14-slim@sha256:44dd04494ee8f3b538294360e7c4b3acb87c8268e4d0a4828a6500b1eff50061 AS base
 RUN apt-get update \
+    && apt-get -y upgrade \
     && apt-get install -y --no-install-recommends gcc libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 

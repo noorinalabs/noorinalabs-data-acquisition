@@ -36,8 +36,9 @@
 #     dictionaries + ignore rules CI loads; the `files` regex is the equivalent
 #     of the CI action's authored-prose glob set.
 #
-# The kind-level mirror (ruff-lint, ruff-format, mypy, pytest, actionlint, and
-# now cspell present on both sides) is enforced in CI by
+# The kind-level mirror (ruff-lint, ruff-format, mypy, pytest, actionlint,
+# cspell, and the #744 dockerfile-base-pin + fixture-realism gates present on
+# both sides) is enforced in CI by
 # `.claude/lib/pre_commit_ci_sync.py` — if a future edit drops one side, that
 # gate fails the build. Per noorinalabs-main#684 the gate now globs ALL
 # workflows (ci.yml AND docs.yml), so the docs.yml cspell + actionlint jobs are
@@ -87,6 +88,54 @@ repos:
         name: cspell
         args: ["--no-must-find-files", "--no-progress", "--no-summary", "--config", ".cspell.json"]
         files: ^(docs/.*\.md|CLAUDE\.md|RUNBOOK\.md|\.claude/team/charter\.md)$
+
+  # --- Charter-prose→code gates (mirror ci.yml `Base-image pin + fixture
+  #     realism` job; rolled in by #744 / noorinalabs-main#735). Both invoke a
+  #     stdlib-only `.claude/lib/check_*.py` via `language: system` python3 — no
+  #     uv/node env needed. The sync-drift gate classifies the `dockerfile-base-
+  #     pin` / `fixture-realism` kinds, so dropping either side is harmful drift
+  #     (#684 parity). Run at the fast commit stage, scoped via `files:` so they
+  #     only fire when a Dockerfile / fixture changes. ---
+  - repo: local
+    hooks:
+      # Every Dockerfile FROM must be digest-pinned (image:tag@sha256:<digest>)
+      # AND carry the matching distro upgrade (charter tech-decisions.md § Base
+      # Image Pinning). Dockerfile.load is the repo's only image.
+      - id: dockerfile-base-pin
+        name: dockerfile-base-pin
+        entry: python3 .claude/lib/check_dockerfile_base_pin.py Dockerfile.load
+        language: system
+        pass_filenames: false
+        files: ^Dockerfile\.load$
+        stages: [pre-commit]
+      # Arabic hadith/isnad TEXT fixtures must be production-realistic — voweled
+      # and carrying the عن transmission particle (charter pull-requests.md §
+      # Production-Realistic Input). Scoped to the curated text corpus (json/csv/
+      # txt under any tests `fixtures/` dir); the check skips non-Arabic files and
+      # `find` keeps new curated fixtures covered. Deliberately OUT of scope
+      # (documented exemption, not toy fixtures): raw scraped page captures — the
+      # `.html` under test_acquire/ and the `tusi_raw/` thaqalayn clone tree
+      # (verbatim upstream bytes — the rawest realism, judged by parse-ability,
+      # cannot be "greener than real data"); and two name-only NER fixtures,
+      # itqan_rijal_sample.json (rijal biographical NAMES, unvoweled in real rijal
+      # DBs) + cluster_precision_gold.json (clustering gold of narrator names),
+      # which carry no isnad string so the عن/vocalization floor (charter-scoped
+      # to isnad text) does not apply. Mirrors the ci.yml step's `find` exactly.
+      - id: fixture-realism
+        name: fixture-realism
+        entry: bash -c 'find tests -type d -path "tests/test_parse/fixtures/tusi_raw" -prune -o -type f \( -name "*.json" -o -name "*.csv" -o -name "*.txt" \) -path "*/fixtures/*" ! -name "itqan_rijal_sample.json" ! -name "cluster_precision_gold.json" -print0 | xargs -0 -r python3 .claude/lib/check_fixture_realism.py'
+        language: system
+        pass_filenames: false
+        # `(.*/)?` so BOTH the top-level curated corpus (tests/fixtures/<source>/
+        # …) AND the deeper per-area fixtures (tests/<area>/fixtures/…) trigger the
+        # hook. The first regex required an intermediate segment, so it never fired
+        # on the voweled corpus it most needs to guard (fawaz/halimbahae/lk/
+        # open_hadith) — only on the deeper EXEMPTED paths — letting a local
+        # toy-ification of a corpus fixture slip past pre-commit (CI's
+        # unconditional `find` still caught it). The entry's own `find` applies the
+        # exemptions regardless of which file triggered (pass_filenames: false).
+        files: ^tests/(.*/)?fixtures/.*\.(json|csv|txt)$
+        stages: [pre-commit]
 
   # --- Heavier checks run at pre-push (mirror CI's Type Check + Test jobs).
   #     Run as `local`/`system` hooks via `uv run` so the pinned tools from
