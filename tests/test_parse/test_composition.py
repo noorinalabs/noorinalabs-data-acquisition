@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.parse.composition import HADITH_COMPOSITION, is_canonical_hadith
 
 
@@ -42,3 +44,15 @@ class TestIsCanonicalHadith:
         # parquet is a no-op here.
         assert not is_canonical_hadith("open_hadith", "sahih_al-bukhari")
         assert HADITH_COMPOSITION["open_hadith"] == frozenset()
+
+    def test_explicit_none_value_loads_all_collections(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # da#196: an explicit ``None`` value means "load all collections" — the same
+        # as an absent key — matching the documented map semantics. Guards against a
+        # regression to the old drop-all behaviour (``allowed is None`` returning
+        # ``source_corpus not in HADITH_COMPOSITION``, i.e. False, when the key was
+        # present with value None).
+        monkeypatch.setitem(HADITH_COMPOSITION, "explicit_none_source", None)
+        assert is_canonical_hadith("explicit_none_source", "any_collection")
+        assert is_canonical_hadith("explicit_none_source", "another_collection")
