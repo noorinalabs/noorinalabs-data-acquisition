@@ -90,6 +90,7 @@
 {"id":"queries/validation/chain_integrity.cypher","kind":"file","path":"queries/validation/chain_integrity.cypher","line":1,"lang":"cypher"},
 {"id":"queries/validation/collection_coverage.cypher","kind":"file","path":"queries/validation/collection_coverage.cypher","line":1,"lang":"cypher"},
 {"id":"queries/validation/orphan_narrators.cypher","kind":"file","path":"queries/validation/orphan_narrators.cypher","line":1,"lang":"cypher"},
+{"id":"queries/validation/sanadset_orphan_inventory.cypher","kind":"file","path":"queries/validation/sanadset_orphan_inventory.cypher","line":1,"lang":"cypher"},
 {"id":"scripts/check_source_id_corpus.py","kind":"module","path":"scripts/check_source_id_corpus.py","line":1,"lang":"python"},
 {"id":"scripts/check_source_id_corpus.py::Violation","kind":"class","path":"scripts/check_source_id_corpus.py","line":77,"lang":"python"},
 {"id":"scripts/check_source_id_corpus.py::Violation.__str__","kind":"method","path":"scripts/check_source_id_corpus.py","line":86,"lang":"python"},
