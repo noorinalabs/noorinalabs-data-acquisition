@@ -137,6 +137,26 @@ repos:
         files: ^tests/(.*/)?fixtures/.*\.(json|csv|txt)$
         stages: [pre-commit]
 
+
+      # Structural ontology staleness gate (#214). Mirrors the
+      # `structural-ontology` CI workflow's `check` step: regenerates the
+      # committed structural index (ontology/structural/{code-graph.json,
+      # llms.txt}) with the OWNED generator in noorinalabs-main and fails if it
+      # has drifted from the source tree. The generator is consumed from the
+      # sibling noorinalabs-main checkout (auto-discovered via the standard org
+      # layout, or $ONTOLOGY_GEN_LIB) -- it is NOT vendored here. Both the
+      # generator and this wrapper are stdlib-only, so `python3` runs it with no
+      # uv/pip install. The `structural-ontology` sync-gate kind DEMANDS this
+      # mirror exist (noorinalabs-main#684 parity contract). Regenerate with
+      # `python3 scripts/structural_ontology.py emit` and commit the result.
+      - id: structural-ontology-staleness
+        name: structural-ontology-staleness
+        entry: python3 scripts/structural_ontology.py check
+        language: system
+        pass_filenames: false
+        files: ^(src/.*\.py|scripts/structural_ontology\.py|ontology/structural/.*)$
+        stages: [pre-commit]
+
   # --- Heavier checks run at pre-push (mirror CI's Type Check + Test jobs).
   #     Run as `local`/`system` hooks via `uv run` so the pinned tools from
   #     uv.lock are used and never drift from CI. ---
