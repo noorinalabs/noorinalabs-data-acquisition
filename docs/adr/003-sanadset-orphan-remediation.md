@@ -1,11 +1,41 @@
 # ADR-003: `sanadset` orphan-node + narrator-pollution remediation
 
-## Status: Proposed — awaiting owner A/B decision (P7W19, da#202)
+## Status: Accepted — Path B (owner decision, 2026-06-25, P7W19, da#202)
 
-> This ADR is an **investigation + A/B recommendation**, not an accepted
-> decision. The remediation it scopes (a per-source purge) is irreversible on
-> live graph state and is **owner-run only**. Nothing here has been executed.
-> Meta-issue: noorinalabs/noorinalabs-main#723. Keystone: da#202.
+> The owner has chosen **Path B** (parse, segment, and link `sanadset`) over the
+> investigation's lean Path-A recommendation, and **deferred** it to a later wave
+> — see § Decision Outcome below. The body that follows is the original
+> investigation + A/B analysis (verified by two reviewers at the Proposed head);
+> it is retained unedited as the decision's rationale. **No remediation executes
+> on the basis of this ADR**: Path A's live-graph purge is *not* taken, and Path
+> B's pipeline work is sequenced into separate, owner-tracked sub-issues. Any
+> future per-source purge remains irreversible on live state and **owner-run
+> only**. Meta-issue: noorinalabs/noorinalabs-main#723. Keystone: da#202.
+
+## Decision Outcome (owner, 2026-06-25)
+
+**Decision: Path B — parse, segment, and link `sanadset`, deferred to W3+ of
+Phase 7.** The owner elected to *preserve* the corpus's collection breadth by
+re-linking it, rather than purge it (Path A). The investigation's lean
+recommendation was Path A; this decision overrides it deliberately, accepting the
+higher effort/risk in exchange for not discarding `sanadset`'s collection
+coverage beyond the canonical six books.
+
+Path B is **not** undertaken in P7W19. It is decomposed into three sequenced
+sub-issues in `noorinalabs-data-acquisition`, tracked under keystone da#202 (which
+remains open as the Path-B epic):
+
+| Order | Issue | Work | Note |
+|------:|-------|------|------|
+| 1 | da#220 (B2) | Cross-edition canonical-identity dedup | **Prerequisite** — must land before B1 loads to prod, else the 650k raw hadiths double-count the canonical spine |
+| 2 | da#219 (B1) | Emit `collections_sanadset.parquet` (`book_id` → collection linkage) | Mechanically feasible from the already-acquired `books.csv` |
+| 3 | da#221 (B3) | Narrator re-segmentation of the `<NAR>` mention firehose | Addresses the polluted `Narrator` table / near-absent `STUDIED_UNDER` |
+
+The read-only blast-radius inventory query shipped here
+(`queries/validation/sanadset_orphan_inventory.cypher`) stays useful for sizing
+that future work. Until Path B lands, the `sanadset` orphans remain in the live
+graph (no purge); the orphan condition is a known, owner-accepted state tracked
+by da#202.
 
 ## Context
 
