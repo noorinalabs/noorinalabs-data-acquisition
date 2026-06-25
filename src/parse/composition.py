@@ -32,8 +32,9 @@ produces the deduped graph without manual surgery.
 from __future__ import annotations
 
 # source_corpus -> allowed collection slugs.
-#   None           = load all collections for this source (the default for any
-#                    source not listed here).
+#   None           = load all collections for this source. Equivalent to the
+#                    default for any source not listed here, so an explicit
+#                    ``"x": None`` entry and an absent key behave identically.
 #   frozenset(...) = load only these collections.
 #   frozenset()    = load NO Hadith nodes for this source (e.g. ``mis``: its
 #                    chains/edges still load via the edge loader).
@@ -51,9 +52,14 @@ def is_canonical_hadith(source_corpus: str, collection_name: str) -> bool:
     """Return True if a ``(source_corpus, collection_name)`` Hadith belongs in the
     canonical (production) graph, per :data:`HADITH_COMPOSITION`.
 
-    A source not present in the composition map loads all of its collections.
+    A source not present in the composition map — or present with an explicit
+    ``None`` value — loads all of its collections (da#196). Only a non-empty
+    ``frozenset`` restricts to an allowlist, and an empty ``frozenset`` drops
+    all Hadith nodes for that source.
     """
-    allowed = HADITH_COMPOSITION.get(source_corpus)
+    if source_corpus not in HADITH_COMPOSITION:
+        return True
+    allowed = HADITH_COMPOSITION[source_corpus]
     if allowed is None:
-        return source_corpus not in HADITH_COMPOSITION
+        return True
     return collection_name in allowed
