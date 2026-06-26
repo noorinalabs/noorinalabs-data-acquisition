@@ -206,6 +206,46 @@ class TestLoadNarrated:
         assert narrated_result.edge_type == "NARRATED"
         assert narrated_result.created == 1
 
+    def test_unresolved_chain_emits_no_narrated_no_fabrication(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """da#153 item #2 / ADR-004: a hadith with no resolved position-0 narrator
+        gets ZERO NARRATED edges — the load layer never fabricates one.
+
+        The 51 NARRATED-less hadiths are an upstream NER/mention-coverage gap: a
+        hadith whose mentions carry no ``canonical_narrator_id`` has no resolved
+        narrator to attribute narration to. The contract is that ``_load_narrated``
+        skips such rows (no fabricated/synthetic narrator) rather than inventing a
+        position-0 endpoint — closing the gap is producer-side NER work, not a load
+        guard. This pins the no-fabrication behaviour.
+        """
+        write_narrator_mentions_resolved(
+            curated_dir,
+            [
+                # Mentions exist, but none resolved to a canonical narrator id.
+                {
+                    "mention_id": "m1",
+                    "hadith_id": "h1",
+                    "position_in_chain": 0,
+                    "canonical_narrator_id": None,
+                },
+                {
+                    "mention_id": "m2",
+                    "hadith_id": "h1",
+                    "position_in_chain": 1,
+                    "canonical_narrator_id": None,
+                },
+            ],
+        )
+        results = load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
+        narrated_result = next(r for r in results if r.edge_type == "NARRATED")
+        # No fabricated narrator: zero edges created, and nothing counted as a
+        # missing-endpoint either (the row never enters the batch at all).
+        assert narrated_result.created == 0
+        assert narrated_result.missing_endpoints == 0
+        # And no NARRATED write was ever issued to the client.
+        assert not any("NARRATED" in str(q) for q, _ in mock_client.calls)
+
 
 class TestChainEdgesReadResolvedFromCurated:
     """Regression for da#141 / main#601 criterion #1 — NARRATED/TRANSMITTED_TO = 0.
