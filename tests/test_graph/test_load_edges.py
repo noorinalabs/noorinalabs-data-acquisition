@@ -247,6 +247,83 @@ class TestLoadNarrated:
         assert not any("NARRATED" in str(q) for q, _ in mock_client.calls)
 
 
+class TestNarratedProvenance:
+    """da#228 / ADR-004 item #3 — curated muhaddithat orphan-links land as NARRATED
+    edges carrying first-class ``provenance``.
+
+    The curated mention-link producer (``src.resolve.muhaddithat_links``) writes a
+    superset resolved-mentions file the existing NARRATED loader reads unchanged;
+    the loader propagates the link's ``provenance`` onto the edge via a property-
+    less MERGE + coalesce-preserve SET (null-safe, idempotent).
+    """
+
+    def test_orphan_links_load_with_provenance(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        from src.graph.load_edges import _load_narrated
+        from src.resolve.muhaddithat_links import (
+            MUHADDITHAT_ORPHAN_LINKS,
+            build_muhaddithat_mention_links,
+        )
+
+        # Producer writes the curated links into the curated dir (no canonical
+        # guard here — all 8 emitted), which the loader globs alongside any main
+        # resolved-mentions file.
+        build_muhaddithat_mention_links(curated_dir)
+
+        n = len(MUHADDITHAT_ORPHAN_LINKS)
+        mock_client.set_read_results(
+            [{"narrator_exists": True, "hadith_exists": True} for _ in range(n)]
+        )
+
+        result = _load_narrated(mock_client, staging_dir, curated_dir=curated_dir, strict=False)
+        assert result.edge_type == "NARRATED"
+        assert result.created == n  # one NARRATED edge per orphan link
+
+        # The single write call carries provenance on every row, and the query SETs
+        # it onto the edge.
+        write_calls = [
+            (q, b) for q, b in mock_client.calls if isinstance(b, list) and "[r:NARRATED]" in str(q)
+        ]
+        assert len(write_calls) == 1
+        query, batch = write_calls[0]
+        assert "SET r.provenance = coalesce(row.provenance, r.provenance)" in query
+        assert len(batch) == n
+        assert all(item["provenance"] for item in batch)
+        assert {item["provenance"] for item in batch} == {
+            link.provenance for link in MUHADDITHAT_ORPHAN_LINKS
+        }
+
+    def test_chain_mention_without_provenance_is_null_safe(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        # An ordinary resolved chain mention carries no provenance column → the
+        # batch row's provenance is None and the coalesce-preserve SET leaves the
+        # edge property absent rather than failing.
+        from src.graph.load_edges import _load_narrated
+
+        write_narrator_mentions_resolved(
+            curated_dir,
+            [
+                {
+                    "mention_id": "m1",
+                    "hadith_id": "h1",
+                    "position_in_chain": 0,
+                    "canonical_narrator_id": "nar:1",
+                },
+            ],
+        )
+        mock_client.set_read_results([{"narrator_exists": True, "hadith_exists": True}])
+        result = _load_narrated(mock_client, staging_dir, curated_dir=curated_dir, strict=False)
+        assert result.created == 1
+        write_calls = [
+            (q, b) for q, b in mock_client.calls if isinstance(b, list) and "[r:NARRATED]" in str(q)
+        ]
+        assert len(write_calls) == 1
+        _query, batch = write_calls[0]
+        assert batch[0]["provenance"] is None
+
+
 class TestChainEdgesReadResolvedFromCurated:
     """Regression for da#141 / main#601 criterion #1 — NARRATED/TRANSMITTED_TO = 0.
 

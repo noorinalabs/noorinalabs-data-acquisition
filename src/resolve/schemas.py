@@ -7,6 +7,7 @@ import pyarrow as pa
 __all__ = [
     "RESOLVE_SCHEMA_VERSION",
     "NARRATOR_MENTIONS_RESOLVED_SCHEMA",
+    "MUHADDITHAT_MENTION_LINKS_SCHEMA",
     "NARRATORS_CANONICAL_SCHEMA",
     "AMBIGUOUS_NARRATORS_SCHEMA",
     "PARALLEL_LINKS_SCHEMA",
@@ -26,6 +27,22 @@ NARRATOR_MENTIONS_RESOLVED_SCHEMA = pa.schema(
         pa.field("transmission_method", pa.string(), nullable=True),
         pa.field("confidence", pa.float32(), nullable=True),
     ]
+)
+
+# Curated mention-links for the bio-only orphan narrators (da#228 / ADR-004 item
+# #3). A SUPERSET of NARRATOR_MENTIONS_RESOLVED_SCHEMA — the standard resolved-
+# mention columns the chain-edge loaders (NARRATED / TRANSMITTED_TO) already read,
+# PLUS a first-class, NON-NULL ``provenance`` field. Because it is a superset the
+# file it produces (``narrator_mentions_resolved_muhaddithat.parquet``) is read by
+# the existing ``_resolved_mentions_files`` glob unchanged; the loaders ``.get``
+# each column, so the extra ``provenance`` rides through to the NARRATED edge while
+# the chain mechanics are identical to a normal resolved-mention row.
+#
+# ``provenance`` is non-nullable on purpose: an orphan-link with no source of the
+# link is exactly the "auto-link blindly" failure ADR-004 forbids — every curated
+# link MUST carry the source that attests it.
+MUHADDITHAT_MENTION_LINKS_SCHEMA = pa.schema(
+    [*NARRATOR_MENTIONS_RESOLVED_SCHEMA, pa.field("provenance", pa.string(), nullable=False)]
 )
 
 NARRATORS_CANONICAL_SCHEMA = pa.schema(

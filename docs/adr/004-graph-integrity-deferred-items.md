@@ -77,8 +77,17 @@ wrong attribution). The existing `queries/validation/orphan_narrators.cypher`
 already detects them; block #3/#3b of the new inventory query enumerates them with
 a bounded sample for the decision.
 
-- **Status:** escalated to the owner in the PR body. No fabrication; no drop; no
-  auto-link until decided.
+- **Status (updated da#228, 2026-06-26): RESOLVED — owner chose LINK (preserve).**
+  The eight orphans are mention-linked by a curated, provenance-bearing producer
+  (`src/resolve/muhaddithat_links.py`), wired into `resolve.run_all` after
+  `bio_promote`. Each link targets **exactly** the named set (no bulk-link),
+  resolves to the same canonical id `bio_promote` minted, and is emitted only when
+  that narrator exists in the canonical master (no link to a non-promoted
+  narrator). Provenance — the source that attests the link — is a non-null,
+  first-class column on the mention-link (`MUHADDITHAT_MENTION_LINKS_SCHEMA`) and
+  is propagated onto the `NARRATED` graph edge (`_NARRATED_QUERY`, coalesce-
+  preserve). No fabrication: a curated `hadith_id` that does not reconcile to a
+  loaded `Hadith` node is counted as a missing endpoint, never a dangling edge.
 
 ### Item #4 — `grade_normalized` parity in the streaming path
 
