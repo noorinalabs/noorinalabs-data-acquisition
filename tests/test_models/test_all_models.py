@@ -632,3 +632,23 @@ class TestNarratorDateBounds:
         n = _narrator()
         with pytest.raises(ValidationError):
             n.death_date_precision = DatePrecision.EXACT  # type: ignore[misc]
+
+    def test_inverted_death_bounds_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="must not be greater than"):
+            _narrator(death_year_ah_earliest=135, death_year_ah_latest=130)
+
+    def test_inverted_birth_bounds_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="must not be greater than"):
+            _narrator(birth_year_ah_earliest=50, birth_year_ah_latest=30)
+
+    def test_equal_bounds_allowed(self) -> None:
+        """earliest == latest is a valid (single-year) range."""
+        n = _narrator(death_year_ah_earliest=241, death_year_ah_latest=241)
+        assert n.death_year_ah_earliest == n.death_year_ah_latest == 241
+
+    def test_one_sided_bounds_not_ordering_checked(self) -> None:
+        """A lone earliest or latest (the AFTER/BEFORE shape) is never rejected."""
+        after = _narrator(death_year_ah_earliest=200, death_date_precision=DatePrecision.AFTER)
+        before = _narrator(death_year_ah_latest=200, death_date_precision=DatePrecision.BEFORE)
+        assert after.death_year_ah_earliest == 200
+        assert before.death_year_ah_latest == 200
