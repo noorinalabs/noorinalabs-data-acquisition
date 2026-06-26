@@ -105,6 +105,15 @@ def test_circa_single_year_stays_point() -> None:
     assert (parsed.earliest, parsed.latest) == (150, 150)
 
 
+def test_circa_with_ah_ce_slash_does_not_spuriously_widen() -> None:
+    # A slash is an AH/CE separator, not an alternative marker (Kavitha): the CE
+    # mirror (795م) must not be mistaken for a 2nd candidate AH year.
+    parsed = parse_source_notation("circa 180هـ/795م")
+    assert parsed is not None
+    assert parsed.precision is DatePrecision.CIRCA
+    assert (parsed.earliest, parsed.latest) == (180, 180)
+
+
 def test_circa_only_sources_reconcile_as_circa_band() -> None:
     rec = reconcile_event(
         [
@@ -135,6 +144,38 @@ def test_lone_outlier_point_is_downweighted() -> None:
     assert rec.earliest == 255
     assert rec.latest == 256
     assert rec.conflict is True  # raw spread still recorded as a conflict
+
+
+def test_widening_is_order_independent() -> None:
+    # MUST-FIX 1 (Jean-Claude): with a competing point cluster, the NOISE_GAP gate
+    # is anchored on the FIXED consensus band, so a chain of in-band bounds cannot
+    # walk the envelope past consensus and the result is independent of iteration
+    # order. Consensus points {100, 101}; lower bounds 92 (within NOISE_GAP of
+    # core_lo=100) and 83 (beyond it) must reconcile identically either way.
+    obs = [
+        _exact(100),
+        _exact(101),
+        _obs(point=100, earliest=92, latest=100, precision=DatePrecision.RANGE),
+        _obs(point=101, earliest=83, latest=101, precision=DatePrecision.RANGE),
+    ]
+    forward = reconcile_event(obs)
+    backward = reconcile_event(list(reversed(obs)))
+    assert forward == backward
+    # 92 is supported (gap 8 ≤ NOISE_GAP); 83 is noise (gap 17 > NOISE_GAP).
+    assert forward.earliest == 92
+
+
+def test_single_source_wide_range_is_preserved_not_collapsed() -> None:
+    # MUST-FIX 2 (Kavitha): da#164 emits a closed RANGE for "between 200 and 230
+    # AH" (point=200, earliest=200, latest=230). With no competing source, the
+    # source's own span must survive in full as RANGE [200, 230] — never clipped
+    # against its own point into a spurious EXACT 200.
+    rec = reconcile_event(
+        [_obs(point=200, earliest=200, latest=230, precision=DatePrecision.RANGE)]
+    )
+    assert rec.precision is DatePrecision.RANGE
+    assert (rec.earliest, rec.latest) == (200, 230)
+    assert rec.point == 200
 
 
 # --------------------------------------------------------------------------- #
@@ -172,6 +213,8 @@ def test_after_and_before_bracket_a_range() -> None:
     )
     assert rec.precision is DatePrecision.RANGE
     assert (rec.earliest, rec.latest) == (130, 170)
+    # A bracketed open range is legitimate, not a disagreement (Jean-Claude).
+    assert rec.conflict is False
 
 
 def test_contradictory_open_bounds_flag_conflict() -> None:

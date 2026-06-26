@@ -29,12 +29,16 @@ Reconciliation rules (documented so the behaviour is auditable, not magic):
 * **Noise robustness.** A single source's bound can be widened by a stray
   plausible integer leaking into a free-text date field. Reconciliation anchors
   on the **agreement among point estimates** and widens the envelope only as far
-  as a *supported* bound reaches: a per-source bound more than
-  :data:`NOISE_GAP` AH years beyond the consensus point cluster is treated as
-  noise and is **not** allowed to expand the envelope. With ≥3 sources, a lone
-  point more than :data:`OUTLIER_GAP` years (≈ a generation) from the median is
-  down-weighted out of the consensus entirely ("prefer agreement, down-weight a
-  lone outlier").
+  as a *supported* bound reaches: when a **competing** point cluster exists
+  (≥2 distinct in-band points), a per-source bound more than :data:`NOISE_GAP` AH
+  years beyond the **fixed** consensus band is treated as noise and is **not**
+  allowed to expand the envelope. The gate is measured against the fixed
+  consensus band (not the running envelope), so it is independent of the order
+  the observations are processed in. A lone source's *own* coherent span (no
+  competing cluster) is preserved in full — it is never clipped against its own
+  point. With ≥3 sources, a lone point more than :data:`OUTLIER_GAP` years (≈ a
+  generation) from the median is down-weighted out of the consensus entirely
+  ("prefer agreement, down-weight a lone outlier").
 
 * **circa + multi-alternative.** da#164's parser collapses a ``تقريبا/circa``
   marker co-occurring with a multi-alternative (``أو/وقيل``) field to a single
@@ -117,7 +121,11 @@ OUTLIER_GAP = 25
 
 # Multi-alternative markers ("or", "and it is said") that, combined with a circa
 # marker, indicate the parser collapsed an envelope to a point (Nikolaos's case).
-_ALT_MARKERS = ("أو", "او", "وقيل", "وقئل", " or ", "/", "،")
+# Deliberately word-form markers only — a bare "/" or Arabic comma is NOT treated
+# as an alternative separator, so a circa field with an AH/CE slash
+# ("circa 180هـ/795م") does not spuriously widen to a [180, 795] band (Kavitha,
+# da#165 review).
+_ALT_MARKERS = ("أو", "او", "وقيل", "وقئل", " or ")
 
 # Closed (two-sided / point) precisions: they assert a central estimate.
 _CLOSED_PRECISIONS = frozenset(
@@ -320,8 +328,11 @@ def _reconcile_open(afters: Sequence[_Eff], befores: Sequence[_Eff], n: int) -> 
     hi = min((e.hi for e in befores if e.hi is not None), default=None)
     if lo is not None and hi is not None:
         if lo <= hi:
+            # A bracketed "after X .. before Y" is a legitimate range, not a
+            # disagreement — reserve ``conflict`` for the genuinely contradictory
+            # ``after > before`` case below (Jean-Claude, da#165 review).
             precision = DatePrecision.EXACT if lo == hi else DatePrecision.RANGE
-            return ReconciledDate(lo, lo, hi, precision, n, conflict=lo != hi)
+            return ReconciledDate(lo, lo, hi, precision, n)
         # "after X" later than "before Y" → contradictory; keep the lower bound.
         return ReconciledDate(lo, lo, None, DatePrecision.AFTER, n, conflict=True)
     if lo is not None:
@@ -365,11 +376,23 @@ def reconcile_event(observations: Iterable[DateObservation]) -> ReconciledDate:
         if e.point is None
         or core_lo - AGREEMENT_TOLERANCE <= e.point <= core_hi + AGREEMENT_TOLERANCE
     ]
-    # Widen only by SUPPORTED, non-noisy bounds (anchored on the consensus).
+    # Widen the envelope by SUPPORTED bounds. Two rules keep this honest and
+    # order-independent (da#165 review):
+    #   * The NOISE_GAP gate is anchored on the FIXED consensus band
+    #     (``core_lo``/``core_hi``), never the running ``lo``/``hi`` — so a chain
+    #     of admitted bounds cannot walk the envelope arbitrarily far past
+    #     consensus, and the result does not depend on observation iteration
+    #     order (Jean-Claude).
+    #   * A bound is clipped only when a COMPETING point cluster contradicts it.
+    #     With a single distinct in-band point there is no competition, so a
+    #     source's own coherent self-band (e.g. da#164's "between 200 and 230"
+    #     RANGE) is preserved in full rather than collapsed against its own point
+    #     into a spurious EXACT (Kavitha).
+    competing = len({e.point for e in in_band if e.point is not None}) > 1
     for e in in_band:
-        if e.lo is not None and e.lo < lo and (lo - e.lo) <= NOISE_GAP:
+        if e.lo is not None and e.lo < lo and (not competing or (core_lo - e.lo) <= NOISE_GAP):
             lo = e.lo
-        if e.hi is not None and e.hi > hi and (e.hi - hi) <= NOISE_GAP:
+        if e.hi is not None and e.hi > hi and (not competing or (e.hi - core_hi) <= NOISE_GAP):
             hi = e.hi
     # Fold consistent open bounds — tighten only, never fabricate beyond the band.
     for e in afters:
