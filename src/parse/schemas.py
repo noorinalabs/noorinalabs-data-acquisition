@@ -86,6 +86,20 @@ NARRATOR_BIO_SCHEMA = pa.schema(
         pa.field("laqab", pa.string(), nullable=True),
         pa.field("birth_year_ah", pa.int32(), nullable=True),
         pa.field("death_year_ah", pa.int32(), nullable=True),
+        # Date uncertainty bounds + precision parsed from the source's free-text
+        # life-date notation (da#164). The *_year_ah point estimates above stay the
+        # "best single value"; these express the attested span/openness ("بين 161
+        # إلى 170", "بعد 130", "circa 150"). All nullable: a source silent on dates
+        # leaves the three int bounds None and the precision string "unknown" (a
+        # concrete value — never null — so no downstream DatePrecision(None) can
+        # arise). The resolve stage (bio_promote / disambiguate, da#165) carries
+        # these onto NARRATORS_CANONICAL_SCHEMA and reconciles across sources.
+        pa.field("birth_year_ah_earliest", pa.int32(), nullable=True),
+        pa.field("birth_year_ah_latest", pa.int32(), nullable=True),
+        pa.field("birth_date_precision", pa.string(), nullable=True),
+        pa.field("death_year_ah_earliest", pa.int32(), nullable=True),
+        pa.field("death_year_ah_latest", pa.int32(), nullable=True),
+        pa.field("death_date_precision", pa.string(), nullable=True),
         pa.field("birth_location", pa.string(), nullable=True),
         pa.field("death_location", pa.string(), nullable=True),
         pa.field("generation", pa.string(), nullable=True),
