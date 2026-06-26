@@ -19,6 +19,7 @@ from src.parse.base import (
     safe_str,
     write_parquet,
 )
+from src.parse.collection_metadata import apply_collection_metadata
 from src.parse.schemas import COLLECTION_SCHEMA, HADITH_SCHEMA
 from src.utils.logging import get_logger
 
@@ -198,6 +199,8 @@ def run(raw_dir: Path, staging_dir: Path) -> list[Path]:
         }
         for collection, count in collection_counts.items()
     ]
+    # Fill sourced name_ar + expected_count where curated (da#230).
+    collection_rows = [apply_collection_metadata(r) for r in collection_rows]
     collection_arrays = {
         field.name: [r[field.name] for r in collection_rows] for field in COLLECTION_SCHEMA
     }

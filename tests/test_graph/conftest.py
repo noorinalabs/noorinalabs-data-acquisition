@@ -151,6 +151,7 @@ def write_collections(staging: Path, rows: list[dict[str, Any]], suffix: str = "
         ),
         "sect": pa.array([r.get("sect", "sunni") for r in rows], type=pa.string()),
         "total_hadiths": pa.array([r.get("total_hadiths") for r in rows], type=pa.int32()),
+        "expected_count": pa.array([r.get("expected_count") for r in rows], type=pa.int32()),
         "source_corpus": pa.array(
             [r.get("source_corpus", "sunnah") for r in rows], type=pa.string()
         ),

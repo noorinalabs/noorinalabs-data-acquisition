@@ -14,6 +14,7 @@ from typing import Any
 import pyarrow as pa
 
 from src.parse.base import generate_source_id, safe_int, safe_str, write_parquet
+from src.parse.collection_metadata import apply_collection_metadata
 from src.parse.schemas import COLLECTION_SCHEMA, HADITH_SCHEMA
 from src.utils.logging import get_logger
 
@@ -113,6 +114,8 @@ def run(raw_dir: Path, staging_dir: Path) -> list[Path]:
         logger.info("sunnah_scraped_hadiths_parsed", count=len(hadith_rows))
 
     if collection_rows:
+        # Fill sourced name_ar + expected_count (e.g. riyadussalihin) — da#230.
+        collection_rows = [apply_collection_metadata(r) for r in collection_rows]
         collection_table = pa.table(
             {field.name: [r[field.name] for r in collection_rows] for field in COLLECTION_SCHEMA},
         )

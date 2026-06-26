@@ -57,6 +57,9 @@ _NON_PARSER_MODULES = frozenset(
         # da#191: declares the canonical corpus composition (which source/collection
         # pairs load) — not a per-source parser, emits no parquet.
         "composition",
+        # da#230: curated sourced name_ar/expected_count fill applied by parsers —
+        # a metadata table, not a per-source parser, emits no parquet.
+        "collection_metadata",
     }
 )
 
