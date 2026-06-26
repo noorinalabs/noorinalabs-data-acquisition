@@ -5,10 +5,26 @@ The hadith dataset uses XML-style inline tags:
 - ``<MATN>...</MATN>`` — matn (hadith text body)
 - ``<NAR>...</NAR>`` — narrator name within the SANAD
 
-Produces three Parquet files:
+Produces four Parquet files:
 - ``hadiths_sanadset.parquet`` — hadith records
 - ``narrator_mentions_sanadset.parquet`` — narrator mentions per chain
 - ``narrators_bio_kaggle.parquet`` — narrator biographies from narrators dataset
+- ``collections_sanadset.parquet`` — one Collection per book (da#219 / Path B-B1)
+
+Collection emission (da#219, Path B / B1)
+-----------------------------------------
+Before B1 ``parse_sanadset`` emitted no ``collections_*`` file, so
+``load_nodes._load_collections`` created zero sanadset ``Collection`` nodes and
+``load_edges._APPEARS_IN_QUERY`` — a *non-creating* ``MATCH (c:Collection)`` —
+silently dropped every sanadset ``APPEARS_IN`` edge (the headline orphan defect,
+ADR-003). B1 reads the already-acquired ``books.csv`` and emits one ``Collection``
+per book so each hadith links to its book's collection. The APPEARS_IN endpoint is
+keyed ``col:<corpus>:<collection_name>`` (``load_edges._load_appears_in``), so the
+join key is the hadith's ``collection_name``: when ``books.csv`` is present it is
+the ``book_id`` (per-book breadth — the reason Path B was chosen over a purge);
+otherwise it falls back to the per-CSV-stem name (pre-B1 behavior). Cross-edition
+dedup (B2 / da#220) and narrator re-segmentation (B3 / da#221) are deliberately
+out of scope here.
 """
 
 from __future__ import annotations
@@ -27,7 +43,12 @@ from src.parse.base import (
     write_parquet,
 )
 from src.parse.identity import ID_DELIMITER
-from src.parse.schemas import HADITH_SCHEMA, NARRATOR_BIO_SCHEMA, NARRATOR_MENTION_SCHEMA
+from src.parse.schemas import (
+    COLLECTION_SCHEMA,
+    HADITH_SCHEMA,
+    NARRATOR_BIO_SCHEMA,
+    NARRATOR_MENTION_SCHEMA,
+)
 from src.utils.arabic import extract_transmission_phrases, normalize_arabic
 from src.utils.logging import get_logger
 
@@ -45,7 +66,12 @@ _NAR_RE: re.Pattern[str] = re.compile(r"<NAR>(.*?)</NAR>", re.DOTALL)
 
 _CHUNK_SIZE = 50_000
 _SOURCE_CORPUS = "sanadset"
+_SECT = "sunni"
 _BIO_SOURCE = "kaggle_narrators"
+# books.csv (Mendeley 5xth87zwb5) sits alongside sanadset.csv in the raw dir and
+# maps each hadith's ``book_id`` to its collection. It is NOT a hadith CSV, so it
+# is excluded from the hadith glob and consumed as the book→collection mapping.
+_BOOKS_FILENAME = "books.csv"
 
 
 def _extract_tag(pattern: re.Pattern[str], text: str) -> str | None:
@@ -105,10 +131,112 @@ def _extract_narrator_mentions(
     return mentions
 
 
+def _parse_books(raw_dir: Path) -> dict[str, dict[str, object]]:
+    """Read ``books.csv`` into a ``{book_id: collection-metadata}`` mapping (da#219).
+
+    ``books.csv`` (Mendeley 5xth87zwb5) is the book→collection table acquired
+    alongside ``sanadset.csv``. Columns are matched case-insensitively and
+    flexibly because the upstream header spelling is not contractually fixed; an
+    absent / id-less / unreadable file yields an empty mapping, in which case the
+    parser falls back to the per-CSV-stem collection name (pre-B1 behavior). The
+    keys are the stringified integer ``book_id`` so they JOIN to the hadith's
+    ``collection_name`` (also the ``book_id``) for APPEARS_IN.
+    """
+    books_path = raw_dir / _BOOKS_FILENAME
+    if not books_path.exists():
+        return {}
+    table, _enc = read_csv_robust(books_path)
+    cols: dict[str, str] = {str(c).lower(): str(c) for c in table.column_names}
+
+    def pick(*candidates: str) -> str | None:
+        for cand in candidates:
+            if cand in cols:
+                return cols[cand]
+        return None
+
+    id_col = pick("book_id", "id", "bookid")
+    if id_col is None:
+        logger.warning("books_csv_no_id_column", available=sorted(cols))
+        return {}
+    name_ar_col = pick("name_ar", "book_name", "name", "title", "arabic_name", "book")
+    name_en_col = pick("name_en", "english_name", "name_english", "title_en")
+    compiler_col = pick("author", "compiler", "compiler_name", "writer", "musannif")
+    count_col = pick(
+        "number_of_hadith", "hadith_count", "num_hadith", "count", "total_hadiths", "hadiths"
+    )
+
+    books: dict[str, dict[str, object]] = {}
+    for i in range(table.num_rows):
+        row = {c: table.column(c)[i].as_py() for c in table.column_names}
+        book_id = safe_int(row.get(id_col))
+        if book_id is None:
+            continue
+        key = str(book_id)
+        name_ar = safe_str(row.get(name_ar_col)) if name_ar_col else None
+        name_en = safe_str(row.get(name_en_col)) if name_en_col else None
+        books[key] = {
+            "name_ar": name_ar,
+            # COLLECTION_SCHEMA.name_en is non-nullable: fall back to the Arabic
+            # title, then to a deterministic per-book label, so it is never empty.
+            "name_en": name_en or name_ar or f"Sanadset book {key}",
+            "compiler_name": safe_str(row.get(compiler_col)) if compiler_col else None,
+            "total_hadiths": safe_int(row.get(count_col)) if count_col else None,
+        }
+    logger.info("books_csv_parsed", books=len(books))
+    return books
+
+
+def _resolve_collection_name(book_num: int | None, default_name: str, has_books: bool) -> str:
+    """Collection name (APPEARS_IN join key) for a hadith row (da#219).
+
+    With ``books.csv`` present the per-book ``book_id`` is the collection (so the
+    corpus keeps its collection breadth — the reason Path B was chosen over a
+    purge); without it, the pre-B1 per-CSV-stem ``default_name`` is kept.
+    """
+    if has_books and book_num is not None:
+        return str(book_num)
+    return default_name
+
+
+def _collection_row(
+    collection_name: str, total_hadiths: int, books: dict[str, dict[str, object]], has_books: bool
+) -> dict[str, object]:
+    """Build one ``COLLECTION_SCHEMA`` row for a distinct ``collection_name``.
+
+    ``collection_id`` is ``generate_source_id(corpus, collection_name)`` —
+    identical to the key ``load_edges._load_appears_in`` rebuilds from the hadith
+    (``f"{corpus}:{collection_name}"``), so ``collection_node_id`` agrees on both
+    endpoints and the APPEARS_IN MATCH resolves.
+    """
+    meta = books.get(collection_name)
+    if meta is not None:
+        name_ar = meta["name_ar"]
+        name_en = meta["name_en"]
+        compiler_name = meta["compiler_name"]
+    else:
+        name_ar = None
+        # A book_id with no books.csv row (has_books) gets a deterministic label;
+        # the per-CSV-stem fallback keeps the stem itself as a human name.
+        name_en = f"Sanadset book {collection_name}" if has_books else collection_name
+        compiler_name = None
+    return {
+        "collection_id": generate_source_id(_SOURCE_CORPUS, collection_name),
+        "name_ar": name_ar,
+        "name_en": name_en,
+        "compiler_name": compiler_name,
+        "compilation_year_ah": None,
+        "sect": _SECT,
+        "total_hadiths": total_hadiths,
+        "source_corpus": _SOURCE_CORPUS,
+    }
+
+
 def _process_chunk(
     rows: list[dict[str, object]],
     collection_name: str,
     row_offset: int = 0,
+    *,
+    has_books: bool = False,
 ) -> tuple[list[dict[str, object]], list[dict[str, str | int | None]], int]:
     """Process a chunk of rows, returning hadith records, narrator mentions, and malformed count."""
     hadiths: list[dict[str, object]] = []
@@ -122,10 +250,11 @@ def _process_chunk(
 
         hadith_num = safe_int(row.get("hadith_id") or row.get("id") or row.get("Hadith_ID"))
         book_num = safe_int(row.get("book_id") or row.get("book") or row.get("Book_ID"))
+        row_collection = _resolve_collection_name(book_num, collection_name, has_books)
 
         source_id = generate_source_id(
             _SOURCE_CORPUS,
-            collection_name,
+            row_collection,
             str(book_num or 0),
             str(hadith_num or 0),
             str(row_offset + idx),
@@ -144,7 +273,7 @@ def _process_chunk(
             {
                 "source_id": source_id,
                 "source_corpus": _SOURCE_CORPUS,
-                "collection_name": collection_name,
+                "collection_name": row_collection,
                 "book_number": book_num,
                 "chapter_number": None,
                 "hadith_number": hadith_num,
@@ -304,7 +433,13 @@ def parse_sanadset(
 
     staging_dir.mkdir(parents=True, exist_ok=True)
 
-    csv_files = sorted(raw_dir.glob("*.csv"))
+    # books.csv is the book→collection mapping, not a hadith CSV — consume it
+    # separately (da#219) and exclude it from the hadith glob so it is never
+    # mis-parsed as hadith rows.
+    books = _parse_books(raw_dir)
+    has_books = bool(books)
+
+    csv_files = sorted(p for p in raw_dir.glob("*.csv") if p.name.lower() != _BOOKS_FILENAME)
     if not csv_files:
         msg = f"No CSV files found in {raw_dir}"
         raise FileNotFoundError(msg)
@@ -331,7 +466,10 @@ def parse_sanadset(
         for chunk_start in range(0, len(rows), _CHUNK_SIZE):
             chunk = rows[chunk_start : chunk_start + _CHUNK_SIZE]
             hadiths, mentions, malformed = _process_chunk(
-                chunk, collection_name, row_offset=global_row_offset + chunk_start
+                chunk,
+                collection_name,
+                row_offset=global_row_offset + chunk_start,
+                has_books=has_books,
             )
             all_hadiths.extend(hadiths)
             all_mentions.extend(mentions)
@@ -370,6 +508,31 @@ def parse_sanadset(
         hadith_table,
         staging_dir / "hadiths_sanadset.parquet",
         schema=HADITH_SCHEMA,
+    )
+
+    # Write collections Parquet (da#219 / Path B-B1): one Collection per distinct
+    # collection_name actually present on the parsed hadiths, so every hadith has a
+    # matching Collection node and its APPEARS_IN edge loads (the headline orphan
+    # defect). total_hadiths reflects what was parsed here, not books.csv's count.
+    collection_counts: dict[str, int] = {}
+    for hadith in all_hadiths:
+        cname = str(hadith["collection_name"])
+        collection_counts[cname] = collection_counts.get(cname, 0) + 1
+
+    collection_rows = [
+        _collection_row(cname, count, books, has_books)
+        for cname, count in sorted(collection_counts.items())
+    ]
+    collections_table = pa.Table.from_pylist(collection_rows, schema=COLLECTION_SCHEMA)
+    outputs["collections"] = write_parquet(
+        collections_table,
+        staging_dir / "collections_sanadset.parquet",
+        schema=COLLECTION_SCHEMA,
+    )
+    logger.info(
+        "sanadset_collections_emitted",
+        collections=len(collection_rows),
+        from_books_csv=has_books,
     )
 
     # Write narrator mentions Parquet
