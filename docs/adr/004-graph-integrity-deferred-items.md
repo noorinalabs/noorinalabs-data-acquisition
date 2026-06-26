@@ -119,9 +119,10 @@ remediation trigger.
 no-fabrication stance is pinned by tests at both the staging (`hadith_number`
 coverage) and load (`NARRATED` no-fabrication, `APPEARS_IN` explicit-null) layers,
 so a future change cannot silently turn an explicit-null into a fabricated value or
-a hard failure that pressures fabrication. The owner decisions (#3 link-vs-drop,
-#1 per-source derivation, #5 enrichment) and the cross-repo parity (#4) are
-surfaced rather than buried.
+a hard failure that pressures fabrication. The owner decisions (orphan
+link-vs-drop in item #3, per-source ordinal derivation in item #1, collection
+enrichment in item #5) and the cross-repo grade parity (item #4) are surfaced
+rather than buried.
 
 **Negative / trade-offs.** The three owner-decision items remain open data
 decisions — the graph keeps the null/orphan state until the owner picks a
