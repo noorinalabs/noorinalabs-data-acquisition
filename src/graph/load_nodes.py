@@ -410,6 +410,7 @@ SET n.name_ar            = row.name_ar,
     n.compilation_year_ah = row.compilation_year_ah,
     n.sect               = row.sect,
     n.total_hadiths      = row.total_hadiths,
+    n.expected_count     = row.expected_count,
     n.source_corpus      = row.source_corpus
 """
 
@@ -462,6 +463,7 @@ def _load_collections(
                     "compilation_year_ah": _val(row, "compilation_year_ah"),
                     "sect": _val(row, "sect", ""),
                     "total_hadiths": _val(row, "total_hadiths"),
+                    "expected_count": _val(row, "expected_count"),
                     "source_corpus": _val(row, "source_corpus", ""),
                 }
             )

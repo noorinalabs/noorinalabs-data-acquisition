@@ -63,6 +63,7 @@ from src.parse.base import (
     safe_str,
     write_parquet,
 )
+from src.parse.collection_metadata import apply_collection_metadata
 from src.parse.identity import ID_DELIMITER
 from src.parse.narrator_extraction import (
     IsnadSegmentationError,
@@ -695,6 +696,8 @@ def parse_sanadset(
         _collection_row(cname, count, books, has_books)
         for cname, count in sorted(collection_counts.items())
     ]
+    # Fill sourced name_ar + expected_count where curated (da#230).
+    collection_rows = [apply_collection_metadata(r) for r in collection_rows]
     collections_table = pa.Table.from_pylist(collection_rows, schema=COLLECTION_SCHEMA)
     outputs["collections"] = write_parquet(
         collections_table,

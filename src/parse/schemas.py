@@ -105,6 +105,12 @@ COLLECTION_SCHEMA = pa.schema(
         pa.field("compilation_year_ah", pa.int32(), nullable=True),
         pa.field("sect", pa.string(), nullable=False),
         pa.field("total_hadiths", pa.int32(), nullable=True),
+        # Canonical expected hadith count from sourced metadata (da#230) — the
+        # authoritative reference total used by collection_coverage.cypher,
+        # distinct from ``total_hadiths`` (the source's own reported count).
+        # Filled by :func:`src.parse.collection_metadata.apply_collection_metadata`;
+        # null when no sourced value exists (never guessed).
+        pa.field("expected_count", pa.int32(), nullable=True),
         pa.field("source_corpus", pa.string(), nullable=False),
     ]
 )

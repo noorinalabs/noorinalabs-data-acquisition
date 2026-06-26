@@ -16,6 +16,7 @@ from typing import Any
 import pyarrow as pa
 
 from src.parse.base import generate_source_id, safe_int, write_parquet
+from src.parse.collection_metadata import apply_collection_metadata
 from src.parse.schemas import COLLECTION_SCHEMA, HADITH_SCHEMA
 from src.utils.logging import get_logger
 
@@ -233,6 +234,8 @@ def run(raw_dir: Path, staging_dir: Path) -> tuple[Path, Path]:
     hadiths_path = write_parquet(hadiths_table, staging_dir / "hadiths_fawaz.parquet")
 
     # Write collections parquet
+    # Fill sourced name_ar + expected_count where curated (da#230).
+    all_collections = [apply_collection_metadata(r) for r in all_collections]
     collections_table = pa.table(
         {field.name: [r[field.name] for r in all_collections] for field in COLLECTION_SCHEMA},
         schema=COLLECTION_SCHEMA,

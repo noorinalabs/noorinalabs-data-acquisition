@@ -15,6 +15,7 @@ import pyarrow as pa
 import pyarrow.csv as pcsv
 
 from src.parse.base import generate_source_id, read_csv_robust, safe_int, safe_str, write_parquet
+from src.parse.collection_metadata import apply_collection_metadata
 from src.parse.narrator_extraction import extract_narrator_mentions
 from src.parse.schemas import COLLECTION_SCHEMA, HADITH_SCHEMA, NARRATOR_MENTION_SCHEMA
 from src.utils.arabic import normalize_arabic
@@ -308,7 +309,9 @@ def run(raw_dir: Path, staging_dir: Path) -> list[Path]:
         )
 
     if collection_rows:
-        coll_table = pa.Table.from_pylist(collection_rows)
+        # Fill sourced name_ar + expected_count where curated (da#230).
+        collection_rows = [apply_collection_metadata(r) for r in collection_rows]
+        coll_table = pa.Table.from_pylist(collection_rows, schema=COLLECTION_SCHEMA)
         output_paths.append(
             write_parquet(
                 coll_table,

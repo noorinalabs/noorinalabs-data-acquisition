@@ -93,6 +93,7 @@ class TestSampleData:
             "compilation_year_ah": [256],
             "sect": ["sunni"],
             "total_hadiths": [7563],
+            "expected_count": [None],
             "source_corpus": ["lk"],
         }
         table = pa.table(data).cast(COLLECTION_SCHEMA)
