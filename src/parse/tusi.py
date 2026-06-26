@@ -46,6 +46,7 @@ from typing import Any
 import pyarrow as pa
 
 from src.parse.base import generate_source_id, safe_str, write_parquet
+from src.parse.collection_metadata import apply_collection_metadata
 from src.parse.schemas import COLLECTION_SCHEMA, HADITH_SCHEMA
 from src.utils.logging import get_logger
 
@@ -232,6 +233,8 @@ def run(raw_dir: Path, staging_dir: Path) -> tuple[Path, Path]:
         hadith_table, Path(staging_dir) / "hadiths_tusi.parquet", schema=HADITH_SCHEMA
     )
 
+    # Fill sourced name_ar + expected_count where curated (da#230).
+    coll_rows = [apply_collection_metadata(r) for r in coll_rows]
     coll_table = pa.table(
         {field.name: [r[field.name] for r in coll_rows] for field in COLLECTION_SCHEMA},
         schema=COLLECTION_SCHEMA,
