@@ -246,13 +246,26 @@ def run_all(raw_dir: Path, staging_dir: Path, output_dir: Path) -> dict[str, lis
     """
     logger.info("resolve_pipeline_start")
 
-    from src.resolve import bio_promote, dedup, disambiguate, fuzzy_cluster, ner, parallels
+    from src.resolve import (
+        bio_promote,
+        date_reconcile,
+        dedup,
+        disambiguate,
+        fuzzy_cluster,
+        muhaddithat_links,
+        ner,
+        parallels,
+        tabaqa_dates,
+    )
 
     results: dict[str, list[Path]] = {
         "ner": [],
         "disambiguate": [],
         "bio_promote": [],
         "cluster": [],
+        "reconcile": [],
+        "tabaqa_dates": [],
+        "muhaddithat_links": [],
         "dedup": [],
         "parallels": [],
     }
@@ -345,6 +358,74 @@ def run_all(raw_dir: Path, staging_dir: Path, output_dir: Path) -> dict[str, lis
         )
     except Exception:  # noqa: BLE001
         logger.error("resolve_step_failed", step="cluster", traceback=traceback.format_exc())
+
+    # Step 3.6: Multi-source date reconciliation (da#165). After bio_promote and
+    # cluster have built the final canonical set, fold each narrator's per-source
+    # parsed life-dates (da#164) into one canonical birth/death envelope + a
+    # concrete precision, written onto the canonical date columns. Runs AFTER
+    # cluster so it keys on final canonical ids and its always-concrete-precision
+    # invariant holds on the emitted table; a no-op if no canonical table exists.
+    try:
+        logger.info("resolve_step", step="reconcile_dates", status="running")
+        reconciled = date_reconcile.reconcile_canonical_dates(staging_dir, output_dir)
+        results["reconcile"] = [reconciled] if reconciled is not None else []
+        logger.info(
+            "resolve_step",
+            step="reconcile_dates",
+            status="complete",
+            files=len(results["reconcile"]),
+        )
+    except Exception:  # noqa: BLE001
+        logger.error(
+            "resolve_step_failed", step="reconcile_dates", traceback=traceback.format_exc()
+        )
+
+    # Step 3.65: ṭabaqa → estimated-window fallback (da#166). The LAST date stage:
+    # after reconciliation has folded every *attested* dating into the canonical
+    # envelope, some narrators still have no death date. For exactly those — death
+    # still undated AND a known ṭabaqa class (``generation``) — derive an estimated
+    # death window tagged ``tabaqa_estimate`` so the timeline isn't blank where the
+    # rijāl sources are silent. Runs AFTER reconcile so it only ever fills the gaps
+    # reconcile left; never overwrites a reconciled/parsed date; idempotent.
+    try:
+        logger.info("resolve_step", step="tabaqa_dates", status="running")
+        estimated = tabaqa_dates.apply_tabaqa_fallback(output_dir)
+        results["tabaqa_dates"] = [estimated] if estimated is not None else []
+        logger.info(
+            "resolve_step",
+            step="tabaqa_dates",
+            status="complete",
+            files=len(results["tabaqa_dates"]),
+        )
+    except Exception:  # noqa: BLE001
+        logger.error("resolve_step_failed", step="tabaqa_dates", traceback=traceback.format_exc())
+
+    # Step 3.7: Curated muhaddithat orphan mention-links (da#228 / ADR-004 item #3).
+    # The 8 bio-only muhaddithat narrators promoted by bio_promote carry no chain
+    # mention, so they sit orphaned with no graph edges. This emits a curated,
+    # provenance-bearing NARRATED mention-link for exactly those 8 (no bulk-link),
+    # resolving each to the SAME canonical id bio_promote minted and verifying it
+    # exists in the canonical master first (no link to a non-promoted narrator).
+    # Runs after bio_promote + cluster so the canonical master is final; the output
+    # rides the existing resolved-mentions glob into the NARRATED loader.
+    try:
+        logger.info("resolve_step", step="muhaddithat_links", status="running")
+        canonical_path = output_dir / "narrators_canonical.parquet"
+        link_path = muhaddithat_links.build_muhaddithat_mention_links(
+            output_dir,
+            canonical_path=canonical_path if canonical_path.exists() else None,
+        )
+        results["muhaddithat_links"] = [link_path] if link_path is not None else []
+        logger.info(
+            "resolve_step",
+            step="muhaddithat_links",
+            status="complete",
+            files=len(results["muhaddithat_links"]),
+        )
+    except Exception:  # noqa: BLE001
+        logger.error(
+            "resolve_step_failed", step="muhaddithat_links", traceback=traceback.format_exc()
+        )
 
     # Step 4: Dedup (semantic; degrades to an empty table without the embedding
     # model). Runs independently of NER/disambiguation. Capture its output before

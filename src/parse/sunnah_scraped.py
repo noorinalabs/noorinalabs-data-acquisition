@@ -14,6 +14,8 @@ from typing import Any
 import pyarrow as pa
 
 from src.parse.base import generate_source_id, safe_int, safe_str, write_parquet
+from src.parse.collection_metadata import apply_collection_metadata
+from src.parse.in_book_ordinal import derive_in_book_ordinals
 from src.parse.schemas import COLLECTION_SCHEMA, HADITH_SCHEMA
 from src.utils.logging import get_logger
 
@@ -100,6 +102,17 @@ def run(raw_dir: Path, staging_dir: Path) -> list[Path]:
                 }
             )
 
+    # Derive the in-book ordinal (``hadith_number``) from page order for the
+    # sunnah.com scrape, which is order-reliable: the scraper walks each book
+    # page's hadiths in reading order, so a hadith's position on its book page is
+    # its in-book ordinal (da#229 / ADR-004 item #1). This only fills a book that
+    # carries NO per-hadith ordinal at all; books the scraper already numbered,
+    # and the explicit-null floor for everything else, are left untouched.
+    # ``source_id`` is intentionally keyed on the original extraction (it is the
+    # node identity and must stay stable); the derived ordinal feeds only the
+    # downstream ``APPEARS_IN.hadith_number_in_book`` edge property.
+    derive_in_book_ordinals(hadith_rows, source_corpus=SOURCE_CORPUS)
+
     output_files: list[Path] = []
 
     if hadith_rows:
@@ -113,6 +126,8 @@ def run(raw_dir: Path, staging_dir: Path) -> list[Path]:
         logger.info("sunnah_scraped_hadiths_parsed", count=len(hadith_rows))
 
     if collection_rows:
+        # Fill sourced name_ar + expected_count (e.g. riyadussalihin) — da#230.
+        collection_rows = [apply_collection_metadata(r) for r in collection_rows]
         collection_table = pa.table(
             {field.name: [r[field.name] for r in collection_rows] for field in COLLECTION_SCHEMA},
         )

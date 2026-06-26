@@ -191,7 +191,22 @@ def _load_transmitted_to(
         logger.warning("transmitted_to_files_missing", dir=str(staging_dir))
         return EdgeLoadResult("TRANSMITTED_TO", 0, 0, 0)
 
-    # Group mentions by hadith
+    # Group mentions by hadith.
+    #
+    # Curated mention-links (provenance-bearing rows from the muhaddithat orphan
+    # producer, da#228) are NARRATED-ONLY by contract and MUST NOT enter chain-pair
+    # construction. _resolved_mentions_files is a PREFIX glob, so the curated
+    # ``narrator_mentions_resolved_muhaddithat.parquet`` is read here alongside the
+    # main resolved-mentions file; a curated link's ``hadith_id`` is a real
+    # ``sunnah`` hadith id, which that hadith's own NER chain mention also carries
+    # (same id grammar). Without this guard, _build_chain_pairs would pair the
+    # orphan narrator with that hadith's Companion narrator into a FABRICATED
+    # TRANSMITTED_TO edge — a wrong attribution ADR-004 forbids, which the
+    # narrator-only _TRANSMITTED_TO_CHECK cannot catch (both endpoints are real
+    # nodes). Dropping provenance-bearing rows here keeps them flowing to NARRATED
+    # (the correct edge) while never fabricating a transmission pair. A normal
+    # chain mention has no ``provenance`` column (row.get → None), so this only
+    # ever excludes curated links.
     by_hadith: dict[str, list[dict[str, Any]]] = {}
     for fp in files:
         rows = _read_parquet_rows(fp)
@@ -199,6 +214,8 @@ def _load_transmitted_to(
             hid = row.get("hadith_id") or row.get("source_hadith_id")
             if not hid:
                 continue
+            if row.get("provenance"):
+                continue  # curated NARRATED-only link — never a transmission pair
             by_hadith.setdefault(hid, []).append(row)
 
     # Build all chain pairs
@@ -242,11 +259,22 @@ def _load_transmitted_to(
 # 2. NARRATED — first narrator in each chain -> hadith
 # ---------------------------------------------------------------------------
 
+# Identity of a NARRATED edge is the (narrator, hadith) PAIR. ``provenance`` — the
+# source that attests this narrator transmitted this hadith — is an *attribute* of
+# that one edge, not part of its key, so it is SET after a property-less MERGE
+# (never inside the MERGE pattern: Neo4j refuses to MERGE a relationship with a
+# null property, and an ordinary chain-derived NARRATED carries no provenance).
+# The coalesce-preserve form mirrors the APPEARS_IN / PARALLEL_OF contract (da#77):
+# a row with a null provenance keeps any value already on the edge rather than
+# clearing it, so a re-load is idempotent and null-safe. The curated muhaddithat
+# orphan-links (da#228, ``src/resolve/muhaddithat_links.py``) are the producer that
+# populates it; chain-derived mentions leave it null (the property stays absent).
 _NARRATED_QUERY = """\
 UNWIND $batch AS row
 MATCH (n:Narrator {id: row.narrator_id})
 MATCH (h:Hadith {id: row.hadith_id})
-MERGE (n)-[:NARRATED]->(h)
+MERGE (n)-[r:NARRATED]->(h)
+SET r.provenance = coalesce(row.provenance, r.provenance)
 """
 
 _NARRATED_CHECK = """\
@@ -277,8 +305,10 @@ def _load_narrated(
         logger.warning("narrated_files_missing", dir=str(staging_dir))
         return EdgeLoadResult("NARRATED", 0, 0, 0)
 
-    # Find position-0 narrator per hadith (lowest position_in_chain)
-    first_narrators: dict[str, tuple[int, str]] = {}  # hid -> (pos, narrator_id)
+    # Find position-0 narrator per hadith (lowest position_in_chain). The winning
+    # mention's ``provenance`` (present only on curated orphan-links, da#228; null
+    # for ordinary chain mentions) rides along so it lands on the NARRATED edge.
+    first_narrators: dict[str, tuple[int, str, str | None]] = {}  # hid -> (pos, nid, provenance)
     for fp in files:
         rows = _read_parquet_rows(fp)
         for row in rows:
@@ -288,12 +318,12 @@ def _load_narrated(
             if not hid or not nid:
                 continue
             if hid not in first_narrators or pos < first_narrators[hid][0]:
-                first_narrators[hid] = (pos, nid)
+                first_narrators[hid] = (pos, nid, row.get("provenance"))
 
     batch: list[dict[str, Any]] = []
-    for hid, (_pos, nid) in first_narrators.items():
+    for hid, (_pos, nid, provenance) in first_narrators.items():
         full_hid = hadith_node_id(hid)
-        batch.append({"narrator_id": nid, "hadith_id": full_hid})
+        batch.append({"narrator_id": nid, "hadith_id": full_hid, "provenance": provenance})
 
     if not batch:
         logger.info("narrated_no_edges")

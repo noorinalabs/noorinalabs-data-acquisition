@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pyarrow as pa
 import pytest
 
@@ -54,6 +56,12 @@ class TestSampleData:
             "aliases": pa.array([["Ali ibn Abi Talib"]], type=pa.list_(pa.string())),
             "birth_year_ah": pa.array([None], type=pa.int32()),
             "death_year_ah": pa.array([40], type=pa.int32()),
+            "birth_year_ah_earliest": pa.array([None], type=pa.int32()),
+            "birth_year_ah_latest": pa.array([None], type=pa.int32()),
+            "birth_date_precision": pa.array(["unknown"], type=pa.string()),
+            "death_year_ah_earliest": pa.array([38], type=pa.int32()),
+            "death_year_ah_latest": pa.array([41], type=pa.int32()),
+            "death_date_precision": pa.array(["range"], type=pa.string()),
             "generation": pa.array(["sahabi"], type=pa.string()),
             "gender": pa.array(["male"], type=pa.string()),
             "trustworthiness": pa.array(["thiqa"], type=pa.string()),
@@ -69,6 +77,77 @@ class TestSampleData:
         assert {"source_corpus", "source_corpora", "sect_affiliation"} <= set(
             NARRATORS_CANONICAL_SCHEMA.names
         )
+
+
+class TestNarratorModelMirror:
+    """The canonical schema must mirror the date-bound fields on the Narrator
+    model (da#161) 1:1 so model and schema cannot drift (da#162)."""
+
+    _DATE_FIELDS = (
+        "birth_year_ah_earliest",
+        "birth_year_ah_latest",
+        "birth_date_precision",
+        "death_year_ah_earliest",
+        "death_year_ah_latest",
+        "death_date_precision",
+    )
+
+    def test_schema_carries_all_model_date_fields(self) -> None:
+        from src.models.narrator import Narrator
+
+        names = set(NARRATORS_CANONICAL_SCHEMA.names)
+        for field in self._DATE_FIELDS:
+            assert field in Narrator.model_fields, f"{field} missing from model"
+            assert field in names, f"{field} missing from canonical schema"
+
+    def test_date_fields_nullable(self) -> None:
+        for field in self._DATE_FIELDS:
+            assert NARRATORS_CANONICAL_SCHEMA.field(field).nullable, (
+                f"{field} must be nullable (producers leave it None via r.get)"
+            )
+
+    def test_roundtrips_with_model(self) -> None:
+        """A Narrator carrying populated date bounds + precision projects onto the
+        canonical schema and reads back the same values."""
+        from src.models.enums import (
+            DatePrecision,
+            Gender,
+            NarratorGeneration,
+            SectAffiliation,
+            TrustworthinessGrade,
+        )
+        from src.models.narrator import Narrator
+
+        narrator = Narrator(
+            id="nar:ali-001",
+            name_ar="علي",
+            name_en="Ali",
+            death_year_ah=40,
+            death_year_ah_earliest=38,
+            death_year_ah_latest=41,
+            death_date_precision=DatePrecision.RANGE,
+            generation=NarratorGeneration.SAHABI,
+            gender=Gender.MALE,
+            sect_affiliation=SectAffiliation.NEUTRAL,
+            trustworthiness_consensus=TrustworthinessGrade.THIQA,
+        )
+        # Project the model's date-bound fields onto a single-row canonical table,
+        # exactly as the producers do via ``{f.name: [r.get(f.name)] ...}``.
+        record: dict[str, Any] = {f.name: None for f in NARRATORS_CANONICAL_SCHEMA}
+        record["canonical_id"] = narrator.id
+        for field in self._DATE_FIELDS:
+            value = getattr(narrator, field)
+            record[field] = value.value if isinstance(value, DatePrecision) else value
+        arrays = {f.name: [record[f.name]] for f in NARRATORS_CANONICAL_SCHEMA}
+        table = pa.table(arrays, schema=NARRATORS_CANONICAL_SCHEMA)
+
+        assert table.num_rows == 1
+        row = table.to_pylist()[0]
+        assert row["death_year_ah_earliest"] == 38
+        assert row["death_year_ah_latest"] == 41
+        assert row["death_date_precision"] == "range"
+        assert row["birth_date_precision"] == "unknown"
+        assert row["birth_year_ah_earliest"] is None
 
     def test_ambiguous_narrators(self) -> None:
         data = {

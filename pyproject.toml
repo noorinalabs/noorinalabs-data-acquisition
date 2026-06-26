@@ -28,6 +28,11 @@ dependencies = [
     "rapidfuzz>=3.6",
     "kafka-python>=2.3.1",
     "openpyxl>=3.1",
+    # AH<->CE (Hijri<->Gregorian) calendar conversion for src/utils/hijri.py
+    # (da#163). Pure-Python, MIT-licensed; the tabular astronomical-Hijri
+    # algorithm matches the year-granularity conversion the resolve step needs
+    # (research/historical-timeline-dates.md § AH<->CE).
+    "convertdate>=2.4.0",
 ]
 
 [project.scripts]
@@ -119,6 +124,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["openpyxl", "openpyxl.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["convertdate", "convertdate.*"]
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]

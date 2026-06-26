@@ -57,6 +57,15 @@ _NON_PARSER_MODULES = frozenset(
         # da#191: declares the canonical corpus composition (which source/collection
         # pairs load) — not a per-source parser, emits no parquet.
         "composition",
+        # da#230: curated sourced name_ar/expected_count fill applied by parsers —
+        # a metadata table, not a per-source parser, emits no parquet.
+        "collection_metadata",
+        # da#229: shared in-book-ordinal derivation helper — mutates a parser's
+        # records in place, emits no schema/parquet of its own.
+        "in_book_ordinal",
+        # da#164: pure life-date notation parser used BY the source parsers to fill
+        # the bound/precision columns — emits no schema/parquet of its own.
+        "narrator_dates",
     }
 )
 

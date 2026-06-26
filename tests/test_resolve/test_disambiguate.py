@@ -172,14 +172,82 @@ class TestTemporalFilter:
 # ---------------------------------------------------------------------------
 # Stage 4: Geographic filter
 # ---------------------------------------------------------------------------
+def _candidate_in(location: str) -> Candidate:
+    """A candidate based in *location* (death_location)."""
+    return Candidate(
+        bio_id="bio-geo",
+        name_ar_normalized="ابو هريره",
+        death_year_ah=200,
+        death_location=location,
+    )
+
+
+def _ctx_near(locations: list[str]) -> ChainContext:
+    return ChainContext(
+        hadith_id="h-1",
+        position_in_chain=1,
+        source_corpus="test",
+        adjacent_locations=locations,
+    )
+
+
 class TestGeographicFilter:
-    def test_passthrough(self, candidate_abu_hurayra: Candidate) -> None:
+    def test_passthrough_no_context(self, candidate_abu_hurayra: Candidate) -> None:
+        # No chain context at all -> pure pass-through (backward-compatible call).
         matches = [Match(candidate=candidate_abu_hurayra, stage="fuzzy", score=0.85)]
-        filtered = _geographic_filter(matches)
-        assert filtered == matches
+        assert _geographic_filter(matches) == matches
 
     def test_empty_list(self) -> None:
         assert _geographic_filter([]) == []
+
+    def test_no_adjacent_locations_passes_all(self, candidate_abu_hurayra: Candidate) -> None:
+        matches = [Match(candidate=candidate_abu_hurayra, stage="fuzzy", score=0.85)]
+        filtered = _geographic_filter(matches, _ctx_near([]))
+        assert filtered == matches
+
+    def test_plausible_candidate_kept(self) -> None:
+        # Candidate in Basra, neighbour in Kufa — same region, plausible.
+        match = Match(candidate=_candidate_in("Basra"), stage="fuzzy", score=0.85)
+        filtered = _geographic_filter([match], _ctx_near(["Kufa"]))
+        assert filtered == [match]
+
+    def test_implausible_candidate_dropped(self) -> None:
+        # Candidate in Cordoba (Andalus), neighbour in Bukhara (Transoxiana) — antipodal.
+        match = Match(candidate=_candidate_in("Cordoba"), stage="fuzzy", score=0.85)
+        filtered = _geographic_filter([match], _ctx_near(["Bukhara"]))
+        assert filtered == []
+
+    def test_candidate_unknown_location_kept(self) -> None:
+        # No usable location signal on the candidate -> soft constraint keeps it.
+        match = Match(candidate=_candidate_in("Atlantis"), stage="fuzzy", score=0.85)
+        filtered = _geographic_filter([match], _ctx_near(["Bukhara"]))
+        assert filtered == [match]
+
+    def test_candidate_no_location_kept(self) -> None:
+        cand = Candidate(bio_id="b", death_location=None)
+        match = Match(candidate=cand, stage="fuzzy", score=0.8)
+        filtered = _geographic_filter([match], _ctx_near(["Bukhara"]))
+        assert filtered == [match]
+
+    def test_unresolvable_neighbour_passes_all(self) -> None:
+        # Neighbour location unrecognised -> no reference region -> pass-through.
+        match = Match(candidate=_candidate_in("Cordoba"), stage="fuzzy", score=0.85)
+        filtered = _geographic_filter([match], _ctx_near(["Atlantis"]))
+        assert filtered == [match]
+
+    def test_kept_when_plausible_against_any_neighbour(self) -> None:
+        # Implausible vs Bukhara but plausible vs Kufa -> kept (any-neighbour rule).
+        match = Match(candidate=_candidate_in("Cordoba"), stage="fuzzy", score=0.85)
+        filtered = _geographic_filter([match], _ctx_near(["Bukhara", "Kufa"]))
+        assert filtered == [match]
+
+    def test_mixed_batch_drops_only_implausible(self) -> None:
+        # Neighbour in Bukhara (Transoxiana): Kufa (Iraq) is a plausible span, but
+        # Cordoba (Andalus) is antipodal and dropped.
+        keep = Match(candidate=_candidate_in("Kufa"), stage="fuzzy", score=0.9)
+        drop = Match(candidate=_candidate_in("Cordoba"), stage="fuzzy", score=0.95)
+        filtered = _geographic_filter([keep, drop], _ctx_near(["Bukhara"]))
+        assert filtered == [keep]
 
 
 # ---------------------------------------------------------------------------

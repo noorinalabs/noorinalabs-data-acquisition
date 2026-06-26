@@ -7,6 +7,7 @@ import pyarrow as pa
 __all__ = [
     "RESOLVE_SCHEMA_VERSION",
     "NARRATOR_MENTIONS_RESOLVED_SCHEMA",
+    "MUHADDITHAT_MENTION_LINKS_SCHEMA",
     "NARRATORS_CANONICAL_SCHEMA",
     "AMBIGUOUS_NARRATORS_SCHEMA",
     "PARALLEL_LINKS_SCHEMA",
@@ -28,6 +29,22 @@ NARRATOR_MENTIONS_RESOLVED_SCHEMA = pa.schema(
     ]
 )
 
+# Curated mention-links for the bio-only orphan narrators (da#228 / ADR-004 item
+# #3). A SUPERSET of NARRATOR_MENTIONS_RESOLVED_SCHEMA — the standard resolved-
+# mention columns the chain-edge loaders (NARRATED / TRANSMITTED_TO) already read,
+# PLUS a first-class, NON-NULL ``provenance`` field. Because it is a superset the
+# file it produces (``narrator_mentions_resolved_muhaddithat.parquet``) is read by
+# the existing ``_resolved_mentions_files`` glob unchanged; the loaders ``.get``
+# each column, so the extra ``provenance`` rides through to the NARRATED edge while
+# the chain mechanics are identical to a normal resolved-mention row.
+#
+# ``provenance`` is non-nullable on purpose: an orphan-link with no source of the
+# link is exactly the "auto-link blindly" failure ADR-004 forbids — every curated
+# link MUST carry the source that attests it.
+MUHADDITHAT_MENTION_LINKS_SCHEMA = pa.schema(
+    [*NARRATOR_MENTIONS_RESOLVED_SCHEMA, pa.field("provenance", pa.string(), nullable=False)]
+)
+
 NARRATORS_CANONICAL_SCHEMA = pa.schema(
     [
         pa.field("canonical_id", pa.string(), nullable=False),
@@ -37,6 +54,21 @@ NARRATORS_CANONICAL_SCHEMA = pa.schema(
         pa.field("aliases", pa.list_(pa.string()), nullable=True),
         pa.field("birth_year_ah", pa.int32(), nullable=True),
         pa.field("death_year_ah", pa.int32(), nullable=True),
+        # Date uncertainty bounds + precision — mirror Narrator (da#161) 1:1 so the
+        # model and this canonical schema cannot drift. The *_year_ah fields above
+        # stay the point estimate; these express the real-world uncertainty of
+        # classical dating. All nullable (PyArrow fields carry no column default):
+        # existing canonical producers leave them None via ``r.get(name)``, and the
+        # populating stages (da#164/#165/#166) fill them downstream. The
+        # ``*_date_precision`` columns carry the DatePrecision StrEnum value as a
+        # string ("unknown" when unset, matching the model's default), alongside the
+        # other string-enum columns (generation/gender/trustworthiness) below.
+        pa.field("birth_year_ah_earliest", pa.int32(), nullable=True),
+        pa.field("birth_year_ah_latest", pa.int32(), nullable=True),
+        pa.field("birth_date_precision", pa.string(), nullable=True),
+        pa.field("death_year_ah_earliest", pa.int32(), nullable=True),
+        pa.field("death_year_ah_latest", pa.int32(), nullable=True),
+        pa.field("death_date_precision", pa.string(), nullable=True),
         pa.field("generation", pa.string(), nullable=True),
         pa.field("gender", pa.string(), nullable=True),
         pa.field("trustworthiness", pa.string(), nullable=True),

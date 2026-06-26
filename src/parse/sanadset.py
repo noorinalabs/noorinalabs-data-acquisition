@@ -56,6 +56,7 @@ from pathlib import Path
 import pyarrow as pa
 
 from src.config import get_settings
+from src.models.enums import DatePrecision
 from src.parse.base import (
     generate_source_id,
     read_csv_robust,
@@ -63,6 +64,7 @@ from src.parse.base import (
     safe_str,
     write_parquet,
 )
+from src.parse.collection_metadata import apply_collection_metadata
 from src.parse.identity import ID_DELIMITER
 from src.parse.narrator_extraction import (
     IsnadSegmentationError,
@@ -551,6 +553,16 @@ def _parse_narrators_bio(narrators_dir: Path) -> pa.Table | None:
                     "laqab": safe_str(row_dict.get(field_map.get("laqab", ""))),
                     "birth_year_ah": safe_int(row_dict.get(field_map.get("birth_year_ah", ""))),
                     "death_year_ah": safe_int(row_dict.get(field_map.get("death_year_ah", ""))),
+                    # Sanadset carries only a scalar point year (no span/openness
+                    # notation), so the da#164 bound columns stay null with a concrete
+                    # "unknown" precision (never null). Promoting these point years to
+                    # EXACT bounds is reconcile/fallback territory (da#165/#166).
+                    "birth_year_ah_earliest": None,
+                    "birth_year_ah_latest": None,
+                    "birth_date_precision": DatePrecision.UNKNOWN.value,
+                    "death_year_ah_earliest": None,
+                    "death_year_ah_latest": None,
+                    "death_date_precision": DatePrecision.UNKNOWN.value,
                     "birth_location": safe_str(row_dict.get(field_map.get("birth_location", ""))),
                     "death_location": safe_str(row_dict.get(field_map.get("death_location", ""))),
                     "generation": safe_str(row_dict.get(field_map.get("generation", ""))),
@@ -695,6 +707,8 @@ def parse_sanadset(
         _collection_row(cname, count, books, has_books)
         for cname, count in sorted(collection_counts.items())
     ]
+    # Fill sourced name_ar + expected_count where curated (da#230).
+    collection_rows = [apply_collection_metadata(r) for r in collection_rows]
     collections_table = pa.Table.from_pylist(collection_rows, schema=COLLECTION_SCHEMA)
     outputs["collections"] = write_parquet(
         collections_table,

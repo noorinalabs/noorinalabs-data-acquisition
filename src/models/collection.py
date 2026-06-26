@@ -36,6 +36,13 @@ class Collection(BaseModel):
     """Canonical rank within its tradition (1 = highest authority)."""
     total_hadiths: int | None = None
     """Total number of hadiths in the collection."""
+    expected_count: int | None = None
+    """Canonical expected hadith count from sourced metadata (da#230).
+
+    Distinct from ``total_hadiths`` (whatever the source file reported): this is
+    the authoritative reference count used to measure load completeness. Filled
+    from the sourced table in :mod:`src.parse.collection_metadata`; ``None`` when
+    no sourced value exists (never guessed)."""
     book_count: int | None = None
     """Number of books/chapters in the collection."""
 

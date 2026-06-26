@@ -139,3 +139,35 @@ class TestSunnahScrapedParser:
 
         table = pq.read_table(staging_dir / "hadiths_sunnah_scraped.parquet")
         assert table.num_rows == 2
+
+    def test_explicit_in_book_ordinals_are_preserved(self, tmp_path: Path) -> None:
+        # The base fixture numbers both hadiths (1, 2); derivation must not touch
+        # a book the scraper already numbered.
+        raw_dir = tmp_path / "raw"
+        staging_dir = tmp_path / "staging"
+        _make_scraped_data(raw_dir)
+
+        run(raw_dir, staging_dir)
+
+        table = pq.read_table(staging_dir / "hadiths_sunnah_scraped.parquet")
+        assert table.column("hadith_number").to_pylist() == [1, 2]
+
+    def test_in_book_ordinal_derived_from_page_order(self, tmp_path: Path) -> None:
+        # da#229 / ADR-004 item #1: a book page with NO per-hadith ordinal gets
+        # the in-book ordinal recovered from page (row) order, since the sunnah
+        # corpus is order-reliable.
+        raw_dir = tmp_path / "raw"
+        staging_dir = tmp_path / "staging"
+        scraped_dir = raw_dir / "sunnah_scraped"
+        scraped_dir.mkdir(parents=True)
+        hadiths = [
+            {"hadith_number": None, "book_number": 3, "text_ar": "أول", "text_en": "first"},
+            {"hadith_number": None, "book_number": 3, "text_ar": "ثان", "text_en": "second"},
+            {"hadith_number": None, "book_number": 3, "text_ar": "ثالث", "text_en": "third"},
+        ]
+        (scraped_dir / "musnad-ahmad.json").write_text(json.dumps(hadiths), encoding="utf-8")
+
+        run(raw_dir, staging_dir)
+
+        table = pq.read_table(staging_dir / "hadiths_sunnah_scraped.parquet")
+        assert table.column("hadith_number").to_pylist() == [1, 2, 3]
