@@ -61,5 +61,8 @@ faiss_index/
 *.log
 logs/
 
+# Hypothesis property-test cache (machine-local; never commit)
+.hypothesis/
+
 .claude/.consulted/
 .claude/.librarian-consulted/

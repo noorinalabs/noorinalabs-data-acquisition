@@ -34,7 +34,11 @@ from typing import Any
 import pyarrow.parquet as pq
 import yaml
 
-from src.parse.composition import is_canonical_hadith
+from src.parse.composition import (
+    canonical_matn_identity,
+    is_canonical_hadith,
+    is_cross_edition_dedup_source,
+)
 from src.parse.identity import (
     chain_node_id,
     collection_node_id,
@@ -79,10 +83,66 @@ def _read_parquet_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _read_parquet_columns(path: Path, columns: list[str]) -> list[dict[str, Any]]:
+    """Read only *columns* from a Parquet file and return row dicts.
+
+    Used by the cross-edition identity pre-pass so it can scan every hadith file
+    for its matn/composition keys without materializing the full (wide) rows of
+    the ~650k-row corpus.
+    """
+    table = pq.read_table(path, columns=columns)
+    rows: list[dict[str, Any]] = table.to_pylist()
+    return rows
+
+
 def _val(row: dict[str, Any], key: str, default: Any = None) -> Any:
     """Get a value from *row*, returning *default* for ``None``."""
     v = row.get(key)
     return default if v is None else v
+
+
+def _effective_matn_ar(row: dict[str, Any]) -> str:
+    """Arabic matn used for display *and* cross-edition identity.
+
+    Sources that split isnad from matn populate ``matn_ar`` directly; those that
+    only carry a combined body (halimbahae / open_hadith / bihar) populate
+    ``full_text_ar``. Falling back to ``full_text_ar`` here keeps one rule for
+    both the persisted node text (da#190) and the dedup identity, so a curated
+    hadith and a sanadset duplicate are compared on the same basis.
+    """
+    matn_ar = _val(row, "matn_ar", "")
+    if matn_ar and str(matn_ar).strip():
+        return str(matn_ar)
+    return str(_val(row, "full_text_ar", ""))
+
+
+# Columns the cross-edition identity pre-pass needs from each hadith file.
+_IDENTITY_COLUMNS = ["source_corpus", "collection_name", "matn_ar", "matn_en", "full_text_ar"]
+
+
+def _build_curated_identity_index(files: list[Path]) -> set[str]:
+    """Set of cross-edition identities occupied by the *curated* sources (da#220).
+
+    Scans every hadith file and collects :func:`canonical_matn_identity` for each
+    row that (a) is NOT from a cross-edition dedup source and (b) passes the
+    per-source :func:`is_canonical_hadith` gate — i.e. exactly the curated
+    traditions that will actually load. A dedup-source hadith whose identity is
+    in this set duplicates an already-richer curated edition and is dropped
+    ("curated wins"). Built once, up front, because a dedup-source file may sort
+    before or after the curated files it must be checked against.
+    """
+    index: set[str] = set()
+    for fp in files:
+        for row in _read_parquet_columns(fp, _IDENTITY_COLUMNS):
+            corpus = _val(row, "source_corpus", "")
+            if is_cross_edition_dedup_source(corpus):
+                continue
+            if not is_canonical_hadith(corpus, _val(row, "collection_name", "")):
+                continue
+            identity = canonical_matn_identity(_effective_matn_ar(row), _val(row, "matn_en"))
+            if identity is not None:
+                index.add(identity)
+    return index
 
 
 def _narrator_name_en(row: dict[str, Any]) -> str:
@@ -255,8 +315,16 @@ def _load_hadiths(
 
     total_created = 0
     total_skipped = 0
+    total_deduped = 0
     all_errors: list[str] = []
     total_batch = 0
+
+    # Cross-edition canonical-identity dedup (da#220 / Path B-B2): identities
+    # occupied by the curated sources, against which dedup-source hadiths
+    # (e.g. sanadset) are checked so the same tradition is not double-counted.
+    # Built once up front because a dedup-source file may sort before the curated
+    # files it must be checked against.
+    curated_identities = _build_curated_identity_index(files)
 
     for fp in files:
         rows = _read_parquet_rows(fp)
@@ -267,25 +335,32 @@ def _load_hadiths(
                 all_errors.append(f"{fp.name} row {i}: invalid source_id={sid!r}")
                 total_skipped += 1
                 continue
+            source_corpus = _val(row, "source_corpus", "")
             # Canonical corpus composition (da#191): skip Hadith whose
             # (source_corpus, collection) duplicates the chosen canonical edition
             # — halimbahae/fawaz non-unique books, the mis Sahih Muslim matn copy.
             # One enforcement point so a fresh run_all (the production path) yields
             # the deduped graph without manual surgery.
-            if not is_canonical_hadith(
-                _val(row, "source_corpus", ""), _val(row, "collection_name", "")
-            ):
+            if not is_canonical_hadith(source_corpus, _val(row, "collection_name", "")):
                 total_skipped += 1
                 continue
-            hid = hadith_node_id(sid)
             # Fall back to the raw full text when a source supplies no separated
             # matn: halimbahae / open_hadith / bihar populate ``full_text_ar``
             # only (they do not split isnad from matn). The loader persists
             # matn_ar — not full_text_ar — so without this the Hadith node lands
             # textless on the graph (da#190).
-            matn_ar = _val(row, "matn_ar", "")
-            if not (matn_ar and str(matn_ar).strip()):
-                matn_ar = _val(row, "full_text_ar", "")
+            matn_ar = _effective_matn_ar(row)
+            # Cross-edition canonical-identity dedup (da#220): drop a dedup-source
+            # hadith whose normalized matn already exists from a curated edition —
+            # curated wins (richer metadata). Curated rows and dedup-source rows
+            # with no curated twin fall straight through.
+            if is_cross_edition_dedup_source(source_corpus):
+                identity = canonical_matn_identity(matn_ar, _val(row, "matn_en"))
+                if identity is not None and identity in curated_identities:
+                    total_skipped += 1
+                    total_deduped += 1
+                    continue
+            hid = hadith_node_id(sid)
             batch.append(
                 {
                     "id": hid,
@@ -316,6 +391,8 @@ def _load_hadiths(
         created=total_created,
         merged=merged,
         skipped=total_skipped,
+        cross_edition_deduped=total_deduped,
+        curated_identities=len(curated_identities),
     )
     return LoadResult("Hadith", total_created, merged, total_skipped, all_errors)
 
