@@ -255,6 +255,7 @@ def run_all(raw_dir: Path, staging_dir: Path, output_dir: Path) -> dict[str, lis
         muhaddithat_links,
         ner,
         parallels,
+        tabaqa_dates,
     )
 
     results: dict[str, list[Path]] = {
@@ -263,6 +264,7 @@ def run_all(raw_dir: Path, staging_dir: Path, output_dir: Path) -> dict[str, lis
         "bio_promote": [],
         "cluster": [],
         "reconcile": [],
+        "tabaqa_dates": [],
         "muhaddithat_links": [],
         "dedup": [],
         "parallels": [],
@@ -377,6 +379,26 @@ def run_all(raw_dir: Path, staging_dir: Path, output_dir: Path) -> dict[str, lis
         logger.error(
             "resolve_step_failed", step="reconcile_dates", traceback=traceback.format_exc()
         )
+
+    # Step 3.65: ṭabaqa → estimated-window fallback (da#166). The LAST date stage:
+    # after reconciliation has folded every *attested* dating into the canonical
+    # envelope, some narrators still have no death date. For exactly those — death
+    # still undated AND a known ṭabaqa class (``generation``) — derive an estimated
+    # death window tagged ``tabaqa_estimate`` so the timeline isn't blank where the
+    # rijāl sources are silent. Runs AFTER reconcile so it only ever fills the gaps
+    # reconcile left; never overwrites a reconciled/parsed date; idempotent.
+    try:
+        logger.info("resolve_step", step="tabaqa_dates", status="running")
+        estimated = tabaqa_dates.apply_tabaqa_fallback(output_dir)
+        results["tabaqa_dates"] = [estimated] if estimated is not None else []
+        logger.info(
+            "resolve_step",
+            step="tabaqa_dates",
+            status="complete",
+            files=len(results["tabaqa_dates"]),
+        )
+    except Exception:  # noqa: BLE001
+        logger.error("resolve_step_failed", step="tabaqa_dates", traceback=traceback.format_exc())
 
     # Step 3.7: Curated muhaddithat orphan mention-links (da#228 / ADR-004 item #3).
     # The 8 bio-only muhaddithat narrators promoted by bio_promote carry no chain
