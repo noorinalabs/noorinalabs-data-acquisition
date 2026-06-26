@@ -91,6 +91,24 @@ def write_narrators_canonical(curated: Path, rows: list[dict[str, Any]]) -> Path
         "aliases": pa.array([r.get("aliases", []) for r in rows], type=pa.list_(pa.string())),
         "birth_year_ah": pa.array([r.get("birth_year_ah") for r in rows], type=pa.int32()),
         "death_year_ah": pa.array([r.get("death_year_ah") for r in rows], type=pa.int32()),
+        "birth_year_ah_earliest": pa.array(
+            [r.get("birth_year_ah_earliest") for r in rows], type=pa.int32()
+        ),
+        "birth_year_ah_latest": pa.array(
+            [r.get("birth_year_ah_latest") for r in rows], type=pa.int32()
+        ),
+        "birth_date_precision": pa.array(
+            [r.get("birth_date_precision") for r in rows], type=pa.string()
+        ),
+        "death_year_ah_earliest": pa.array(
+            [r.get("death_year_ah_earliest") for r in rows], type=pa.int32()
+        ),
+        "death_year_ah_latest": pa.array(
+            [r.get("death_year_ah_latest") for r in rows], type=pa.int32()
+        ),
+        "death_date_precision": pa.array(
+            [r.get("death_date_precision") for r in rows], type=pa.string()
+        ),
         "generation": pa.array([r.get("generation") for r in rows], type=pa.string()),
         "gender": pa.array([r.get("gender") for r in rows], type=pa.string()),
         "trustworthiness": pa.array([r.get("trustworthiness") for r in rows], type=pa.string()),

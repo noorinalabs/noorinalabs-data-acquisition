@@ -37,6 +37,21 @@ NARRATORS_CANONICAL_SCHEMA = pa.schema(
         pa.field("aliases", pa.list_(pa.string()), nullable=True),
         pa.field("birth_year_ah", pa.int32(), nullable=True),
         pa.field("death_year_ah", pa.int32(), nullable=True),
+        # Date uncertainty bounds + precision — mirror Narrator (da#161) 1:1 so the
+        # model and this canonical schema cannot drift. The *_year_ah fields above
+        # stay the point estimate; these express the real-world uncertainty of
+        # classical dating. All nullable (PyArrow fields carry no column default):
+        # existing canonical producers leave them None via ``r.get(name)``, and the
+        # populating stages (da#164/#165/#166) fill them downstream. The
+        # ``*_date_precision`` columns carry the DatePrecision StrEnum value as a
+        # string ("unknown" when unset, matching the model's default), alongside the
+        # other string-enum columns (generation/gender/trustworthiness) below.
+        pa.field("birth_year_ah_earliest", pa.int32(), nullable=True),
+        pa.field("birth_year_ah_latest", pa.int32(), nullable=True),
+        pa.field("birth_date_precision", pa.string(), nullable=True),
+        pa.field("death_year_ah_earliest", pa.int32(), nullable=True),
+        pa.field("death_year_ah_latest", pa.int32(), nullable=True),
+        pa.field("death_date_precision", pa.string(), nullable=True),
         pa.field("generation", pa.string(), nullable=True),
         pa.field("gender", pa.string(), nullable=True),
         pa.field("trustworthiness", pa.string(), nullable=True),
