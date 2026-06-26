@@ -32,9 +32,17 @@ The producer writes ``narrator_mentions_resolved_muhaddithat.parquet`` to the
 curated dir. The existing ``_resolved_mentions_files`` glob in
 ``src/graph/load_edges.py`` picks it up alongside the main resolved-mentions file,
 so the curated links flow through the normal ``NARRATED`` loader (narrator →
-hadith) — no new loader is needed. Each link is a single position-0 mention per
-hadith, so it produces a ``NARRATED`` edge and never a spurious ``TRANSMITTED_TO``
-pair (which needs ≥2 resolved mentions on one hadith).
+hadith) — no new loader is needed.
+
+These curated links are **NARRATED-only by contract**: ``_load_transmitted_to``
+explicitly drops every provenance-bearing row before chain-pair construction
+(da#228). That loader-side guard — not the single-mention-per-hadith shape — is
+what prevents a fabricated ``TRANSMITTED_TO`` edge. The "≥2 mentions per hadith"
+reasoning holds only in isolation: a curated link's ``hadith_id`` is a real
+``sunnah`` hadith that ALSO carries its own NER chain mention(s), so the ≥2
+condition is met exactly when that hadith is loaded — without the provenance
+filter the orphan narrator would be paired with the hadith's Companion narrator
+into a wrong-attribution transmission edge.
 
 Honest-attribution note
 -----------------------

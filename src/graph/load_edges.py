@@ -191,7 +191,22 @@ def _load_transmitted_to(
         logger.warning("transmitted_to_files_missing", dir=str(staging_dir))
         return EdgeLoadResult("TRANSMITTED_TO", 0, 0, 0)
 
-    # Group mentions by hadith
+    # Group mentions by hadith.
+    #
+    # Curated mention-links (provenance-bearing rows from the muhaddithat orphan
+    # producer, da#228) are NARRATED-ONLY by contract and MUST NOT enter chain-pair
+    # construction. _resolved_mentions_files is a PREFIX glob, so the curated
+    # ``narrator_mentions_resolved_muhaddithat.parquet`` is read here alongside the
+    # main resolved-mentions file; a curated link's ``hadith_id`` is a real
+    # ``sunnah`` hadith id, which that hadith's own NER chain mention also carries
+    # (same id grammar). Without this guard, _build_chain_pairs would pair the
+    # orphan narrator with that hadith's Companion narrator into a FABRICATED
+    # TRANSMITTED_TO edge — a wrong attribution ADR-004 forbids, which the
+    # narrator-only _TRANSMITTED_TO_CHECK cannot catch (both endpoints are real
+    # nodes). Dropping provenance-bearing rows here keeps them flowing to NARRATED
+    # (the correct edge) while never fabricating a transmission pair. A normal
+    # chain mention has no ``provenance`` column (row.get → None), so this only
+    # ever excludes curated links.
     by_hadith: dict[str, list[dict[str, Any]]] = {}
     for fp in files:
         rows = _read_parquet_rows(fp)
@@ -199,6 +214,8 @@ def _load_transmitted_to(
             hid = row.get("hadith_id") or row.get("source_hadith_id")
             if not hid:
                 continue
+            if row.get("provenance"):
+                continue  # curated NARRATED-only link — never a transmission pair
             by_hadith.setdefault(hid, []).append(row)
 
     # Build all chain pairs
