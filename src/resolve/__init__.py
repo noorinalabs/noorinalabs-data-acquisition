@@ -252,6 +252,7 @@ def run_all(raw_dir: Path, staging_dir: Path, output_dir: Path) -> dict[str, lis
         dedup,
         disambiguate,
         fuzzy_cluster,
+        muhaddithat_links,
         ner,
         parallels,
     )
@@ -262,6 +263,7 @@ def run_all(raw_dir: Path, staging_dir: Path, output_dir: Path) -> dict[str, lis
         "bio_promote": [],
         "cluster": [],
         "reconcile": [],
+        "muhaddithat_links": [],
         "dedup": [],
         "parallels": [],
     }
@@ -374,6 +376,33 @@ def run_all(raw_dir: Path, staging_dir: Path, output_dir: Path) -> dict[str, lis
     except Exception:  # noqa: BLE001
         logger.error(
             "resolve_step_failed", step="reconcile_dates", traceback=traceback.format_exc()
+        )
+
+    # Step 3.7: Curated muhaddithat orphan mention-links (da#228 / ADR-004 item #3).
+    # The 8 bio-only muhaddithat narrators promoted by bio_promote carry no chain
+    # mention, so they sit orphaned with no graph edges. This emits a curated,
+    # provenance-bearing NARRATED mention-link for exactly those 8 (no bulk-link),
+    # resolving each to the SAME canonical id bio_promote minted and verifying it
+    # exists in the canonical master first (no link to a non-promoted narrator).
+    # Runs after bio_promote + cluster so the canonical master is final; the output
+    # rides the existing resolved-mentions glob into the NARRATED loader.
+    try:
+        logger.info("resolve_step", step="muhaddithat_links", status="running")
+        canonical_path = output_dir / "narrators_canonical.parquet"
+        link_path = muhaddithat_links.build_muhaddithat_mention_links(
+            output_dir,
+            canonical_path=canonical_path if canonical_path.exists() else None,
+        )
+        results["muhaddithat_links"] = [link_path] if link_path is not None else []
+        logger.info(
+            "resolve_step",
+            step="muhaddithat_links",
+            status="complete",
+            files=len(results["muhaddithat_links"]),
+        )
+    except Exception:  # noqa: BLE001
+        logger.error(
+            "resolve_step_failed", step="muhaddithat_links", traceback=traceback.format_exc()
         )
 
     # Step 4: Dedup (semantic; degrades to an empty table without the embedding
