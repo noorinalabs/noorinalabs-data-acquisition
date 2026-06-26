@@ -22,6 +22,7 @@ import pyarrow.parquet as pq
 from rapidfuzz import fuzz
 from rapidfuzz.distance import Levenshtein
 
+from src.models.enums import DatePrecision
 from src.parse.base import safe_str, write_parquet
 from src.parse.identity import make_canonical_id
 from src.resolve.geography import regions_plausible, resolve_region
@@ -728,6 +729,30 @@ def _build_canonical_table(
         "aliases": pa.array([r.get("aliases") or [] for r in rows], type=pa.list_(pa.string())),
         "birth_year_ah": pa.array([r.get("birth_year_ah") for r in rows], type=pa.int32()),
         "death_year_ah": pa.array([r.get("death_year_ah") for r in rows], type=pa.int32()),
+        # Date uncertainty bounds + precision (da#162, mirrors Narrator da#161).
+        # The disambiguator does not yet derive these — the date-parse/reconcile/
+        # ṭabaqa-fallback stages (da#164/#165/#166) populate them downstream — so
+        # bounds default null and precision defaults to UNKNOWN, matching the model.
+        "birth_year_ah_earliest": pa.array(
+            [r.get("birth_year_ah_earliest") for r in rows], type=pa.int32()
+        ),
+        "birth_year_ah_latest": pa.array(
+            [r.get("birth_year_ah_latest") for r in rows], type=pa.int32()
+        ),
+        "birth_date_precision": pa.array(
+            [r.get("birth_date_precision") or DatePrecision.UNKNOWN.value for r in rows],
+            type=pa.string(),
+        ),
+        "death_year_ah_earliest": pa.array(
+            [r.get("death_year_ah_earliest") for r in rows], type=pa.int32()
+        ),
+        "death_year_ah_latest": pa.array(
+            [r.get("death_year_ah_latest") for r in rows], type=pa.int32()
+        ),
+        "death_date_precision": pa.array(
+            [r.get("death_date_precision") or DatePrecision.UNKNOWN.value for r in rows],
+            type=pa.string(),
+        ),
         "generation": pa.array([r.get("generation") for r in rows], type=pa.string()),
         "gender": pa.array([r.get("gender") for r in rows], type=pa.string()),
         "trustworthiness": pa.array([r.get("trustworthiness") for r in rows], type=pa.string()),
