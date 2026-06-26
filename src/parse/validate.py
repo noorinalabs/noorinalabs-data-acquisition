@@ -487,6 +487,34 @@ def _hadith_checks(table: pa.Table, num_rows: int) -> list[CheckResult]:
                 )
             )
 
+    # In-book ordinal (``hadith_number``) coverage — da#153 item #1.
+    #
+    # The staging ``hadith_number`` column is the IN-BOOK ordinal that flows to
+    # ``APPEARS_IN.hadith_number_in_book`` (da#77). It is **legitimately null**
+    # for scraped sources that only carry the collection-wide reference number
+    # (see project memory "hadith number: collection-ref vs in-book ordinal").
+    # The contract (ADR-004) is an EXPLICIT NULL where the ordinal is genuinely
+    # unknown: the load layer's coalesce-preserve ``_APPEARS_IN_QUERY`` leaves the
+    # edge property absent rather than fabricating a value. So this is an
+    # informational coverage metric (always PASS) — a null in-book ordinal is a
+    # tracked, contractual state, not a validation failure. It surfaces the null
+    # population so a per-source ordinal-derivation decision can be sized.
+    if "hadith_number" in table.column_names:
+        null_ordinals = table.column("hadith_number").null_count
+        filled = num_rows - null_ordinals
+        pct = round(100.0 * filled / num_rows, 2)
+        checks.append(
+            CheckResult(
+                name="hadith_number_coverage",
+                status=CheckStatus.PASS,
+                message=(
+                    f"in-book ordinal coverage: {pct}% "
+                    f"({null_ordinals} explicit-null per da#153/ADR-004)"
+                ),
+                value=pct,
+            )
+        )
+
     return checks
 
 

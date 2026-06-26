@@ -213,6 +213,35 @@ class TestValidateStaging:
         assert len(empty_ar) == 1
         assert empty_ar[0].value == 2  # 1 null + 1 empty string
 
+    def test_in_book_ordinal_explicit_null_is_contractual(self, staging_dir: Path):
+        """da#153 item #1 / ADR-004: a null in-book ordinal is an EXPLICIT-NULL
+        contract, NOT a failure.
+
+        The staging ``hadith_number`` column is the in-book ordinal that flows to
+        ``APPEARS_IN.hadith_number_in_book`` (da#77). Scraped sources that carry
+        only the collection-wide reference number leave it null on purpose; the
+        load layer never fabricates a value. The validator must surface the null
+        population as an informational coverage metric that always PASSES — pinning
+        the decision so a future change can't silently turn explicit-null into a
+        hard validation failure (which would pressure fabrication at load).
+        """
+        rows = [
+            _make_hadith_row(source_id="h1", hadith_number=1),  # in-book ordinal known
+            _make_hadith_row(source_id="h2", hadith_number=None),  # explicit-null
+            _make_hadith_row(source_id="h3", hadith_number=None),  # explicit-null
+        ]
+        _write_hadith_parquet(staging_dir / "hadiths_test.parquet", rows)
+
+        report = validate_staging(staging_dir, strictness=Strictness.STRICT)
+        cov = [c for c in report.files[0].checks if c.name == "hadith_number_coverage"]
+        assert len(cov) == 1
+        # 1 of 3 rows carry the ordinal → 33.33% coverage, the other 2 explicit-null.
+        assert cov[0].value == pytest.approx(33.33, abs=0.01)
+        # Explicit-null is contractual: the check PASSES, and the file still passes
+        # even under STRICT — nulls do not fabricate, do not fail.
+        assert cov[0].status == CheckStatus.PASS
+        assert report.files[0].passed is True
+
     def test_collection_file(self, staging_dir: Path):
         rows = [
             {
