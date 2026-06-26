@@ -145,7 +145,20 @@ DEFAULT_BASELINES: dict[str, dict[str, float | int]] = {
     "narrator_mentions_sunnah_api": {"row_count": 100000},
     "narrator_mentions_thaqalayn": {"row_count": 405360},
     "narrator_mentions_lk": {"row_count": 86162},
-    "narrator_mentions_sanadset": {"row_count": 2789517},
+    # Recalibrated da#221 (Path B / B3 narrator re-segmentation). The old
+    # 2,789,517 baseline was the COARSE `<NAR>`-tag firehose — one mention per raw
+    # tag, taken at face value (ADR-003), so it counted honorific phrases, bare
+    # transmission verbs, English / vowel-stripped transliteration fragments, and
+    # un-segmentable chain blobs as "narrators". B3 (`sanadset._segment_nar_content`
+    # / `_is_narrator_like`) drops that pollution (and re-segments the minority of
+    # multi-narrator blobs), so the clean mention count drops substantially. The
+    # new target ~1,950,000 is an estimate of ~30% net pollution removal pending
+    # confirmation on the next full pipeline run (cf. the da#175 recalibration
+    # precedent); the 30% DEFAULT_DRIFT_TOLERANCE_PCT absorbs the calibration band
+    # either side of the true post-filter count. The behaviour itself is pinned by
+    # the B3 unit tests in tests/test_parse/test_sanadset_parser.py, not by this
+    # exact number (which CI does not exercise — no raw corpus in CI).
+    "narrator_mentions_sanadset": {"row_count": 1950000},
     "narrators_bio_kaggle": {"row_count": 24326},
     "narrators_bio_muhaddithat": {"row_count": 113},
     "narrators_bio_itqan": {"row_count": 115735},
@@ -486,6 +499,34 @@ def _hadith_checks(table: pa.Table, num_rows: int) -> list[CheckResult]:
                     value=pct,
                 )
             )
+
+    # In-book ordinal (``hadith_number``) coverage — da#153 item #1.
+    #
+    # The staging ``hadith_number`` column is the IN-BOOK ordinal that flows to
+    # ``APPEARS_IN.hadith_number_in_book`` (da#77). It is **legitimately null**
+    # for scraped sources that only carry the collection-wide reference number
+    # (see project memory "hadith number: collection-ref vs in-book ordinal").
+    # The contract (ADR-004) is an EXPLICIT NULL where the ordinal is genuinely
+    # unknown: the load layer's coalesce-preserve ``_APPEARS_IN_QUERY`` leaves the
+    # edge property absent rather than fabricating a value. So this is an
+    # informational coverage metric (always PASS) — a null in-book ordinal is a
+    # tracked, contractual state, not a validation failure. It surfaces the null
+    # population so a per-source ordinal-derivation decision can be sized.
+    if "hadith_number" in table.column_names:
+        null_ordinals = table.column("hadith_number").null_count
+        filled = num_rows - null_ordinals
+        pct = round(100.0 * filled / num_rows, 2)
+        checks.append(
+            CheckResult(
+                name="hadith_number_coverage",
+                status=CheckStatus.PASS,
+                message=(
+                    f"in-book ordinal coverage: {pct}% "
+                    f"({null_ordinals} explicit-null per da#153/ADR-004)"
+                ),
+                value=pct,
+            )
+        )
 
     return checks
 

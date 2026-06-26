@@ -395,6 +395,135 @@ class TestLoadHadiths:
         ids = {r["id"] for r in self._hadith_batch_rows(mock_client)}
         assert ids == {"hdt:hb-kept"}
 
+    def _all_hadith_ids(self, mock_client: MockNeo4jClient) -> list[str]:
+        """Every loaded Hadith id across ALL write batches (one batch per file)."""
+        ids: list[str] = []
+        for _query, batch in mock_client.calls:
+            if (
+                isinstance(batch, list)
+                and batch
+                and isinstance(batch[0], dict)
+                and str(batch[0].get("id", "")).startswith("hdt:")
+            ):
+                ids.extend(str(r["id"]) for r in batch)
+        return ids
+
+    # A 3-token Arabic matn (meets the identity-token floor) shared by a curated
+    # edition and a sanadset re-publication of the same tradition.
+    _SHARED_MATN = "انما الاعمال بالنيات"
+    _UNIQUE_MATN = "لا ضرر ولا ضرار"
+
+    def test_cross_edition_dedup_curated_wins(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """da#220 / B2: a sanadset hadith duplicating a curated tradition is dropped
+        (curated wins), while a sanadset-unique tradition still loads. No double-count."""
+        # Curated edition (lk) — not a dedup source, populates the identity index.
+        write_hadiths(
+            staging_dir,
+            [{"source_id": "lk:bukhari:1", "source_corpus": "lk", "matn_ar": self._SHARED_MATN}],
+            suffix="lk",
+        )
+        # sanadset: one row duplicates the curated matn (-> dropped), one is unique.
+        write_hadiths(
+            staging_dir,
+            [
+                {
+                    "source_id": "sanadset:1:dup",
+                    "source_corpus": "sanadset",
+                    "matn_ar": self._SHARED_MATN,
+                },
+                {
+                    "source_id": "sanadset:1:uniq",
+                    "source_corpus": "sanadset",
+                    "matn_ar": self._UNIQUE_MATN,
+                },
+            ],
+            suffix="sanadset",
+        )
+        results = load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        ids = self._all_hadith_ids(mock_client)
+        # Curated kept; sanadset duplicate dropped; sanadset-unique kept.
+        assert "hdt:lk:bukhari:1" in ids
+        assert "hdt:sanadset:1:dup" not in ids
+        assert "hdt:sanadset:1:uniq" in ids
+        # The shared tradition appears exactly once — no double-count.
+        assert ids.count("hdt:lk:bukhari:1") == 1
+        hadith_result = next(r for r in results if r.node_type == "Hadith")
+        assert hadith_result.skipped == 1
+
+    def test_cross_edition_dedup_no_overlap_keeps_all(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """With no curated twin, every sanadset hadith loads (dedup is a no-op)."""
+        write_hadiths(
+            staging_dir,
+            [{"source_id": "lk:bukhari:1", "source_corpus": "lk", "matn_ar": self._SHARED_MATN}],
+            suffix="lk",
+        )
+        write_hadiths(
+            staging_dir,
+            [
+                {
+                    "source_id": "sanadset:1:uniq",
+                    "source_corpus": "sanadset",
+                    "matn_ar": self._UNIQUE_MATN,
+                }
+            ],
+            suffix="sanadset",
+        )
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        ids = self._all_hadith_ids(mock_client)
+        assert "hdt:lk:bukhari:1" in ids
+        assert "hdt:sanadset:1:uniq" in ids
+
+    def test_cross_edition_dedup_only_curated_seeds_index(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """Two sanadset hadiths sharing a matn but with NO curated twin are both
+        kept — the index is seeded from curated sources only, so sanadset never
+        deduplicates against itself."""
+        write_hadiths(
+            staging_dir,
+            [
+                {
+                    "source_id": "sanadset:1:a",
+                    "source_corpus": "sanadset",
+                    "matn_ar": self._SHARED_MATN,
+                },
+                {
+                    "source_id": "sanadset:1:b",
+                    "source_corpus": "sanadset",
+                    "matn_ar": self._SHARED_MATN,
+                },
+            ],
+            suffix="sanadset",
+        )
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        ids = self._all_hadith_ids(mock_client)
+        assert "hdt:sanadset:1:a" in ids
+        assert "hdt:sanadset:1:b" in ids
+
+    def test_cross_edition_dedup_short_matn_not_deduped(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """A sub-threshold (too-short) matn carries no identity, so even an exact
+        curated match does not drop the sanadset hadith — the conservative
+        keep-when-unsure direction."""
+        write_hadiths(
+            staging_dir,
+            [{"source_id": "lk:bukhari:1", "source_corpus": "lk", "matn_ar": "متن"}],
+            suffix="lk",
+        )
+        write_hadiths(
+            staging_dir,
+            [{"source_id": "sanadset:1:short", "source_corpus": "sanadset", "matn_ar": "متن"}],
+            suffix="sanadset",
+        )
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        ids = self._all_hadith_ids(mock_client)
+        assert "hdt:sanadset:1:short" in ids
+
     def test_adds_hdt_prefix(
         self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
     ) -> None:
