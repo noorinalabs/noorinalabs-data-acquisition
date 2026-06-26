@@ -7,8 +7,24 @@ from unittest.mock import patch
 
 import pyarrow.parquet as pq
 
+from src.parse.identity import collection_node_id
 from src.parse.sanadset import parse_sanadset
-from src.parse.schemas import HADITH_SCHEMA, NARRATOR_MENTION_SCHEMA
+from src.parse.schemas import COLLECTION_SCHEMA, HADITH_SCHEMA, NARRATOR_MENTION_SCHEMA
+
+# books.csv mapping the two book_ids used by ``_make_sanadset_csv`` to collections.
+_BOOKS_CSV = "book_id,name,author\n1,صحيح البخاري,البخاري\n2,صحيح مسلم,مسلم\n"
+
+
+def _appears_in_collection_id(hadith_row: dict[str, object]) -> str:
+    """Rebuild the Collection node id ``load_edges._load_appears_in`` MATCHes on.
+
+    Mirrors ``f"{source_corpus}:{collection_name}"`` → ``collection_node_id`` so a
+    test can assert the parser's emitted Collection ids cover every hadith's
+    APPEARS_IN endpoint without standing up Neo4j.
+    """
+    corpus = hadith_row["source_corpus"]
+    cname = hadith_row["collection_name"]
+    return collection_node_id(f"{corpus}:{cname}")
 
 
 def _make_sanadset_csv(path: Path) -> Path:
@@ -191,3 +207,77 @@ class TestSanadsetParser:
         # bio_id is the bio-source-namespaced provenance key, never corpus-gated.
         bio_ids = bio_table.column("bio_id").to_pylist()
         assert all(bid.startswith("kaggle_narrators:bios:") for bid in bio_ids)
+
+
+class TestSanadsetCollections:
+    """Collection emission for APPEARS_IN linkage (da#219 / Path B-B1)."""
+
+    def test_collections_emitted_without_books_csv(self, tmp_path: Path) -> None:
+        """Absent books.csv → one Collection per CSV stem (pre-B1 fallback)."""
+        raw_dir = tmp_path / "raw" / "sanadset"
+        raw_dir.mkdir(parents=True)
+        staging_dir = tmp_path / "staging"
+        _make_sanadset_csv(raw_dir / "hadiths.csv")
+
+        outputs = parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
+
+        assert "collections" in outputs
+        table = pq.read_table(staging_dir / "collections_sanadset.parquet")
+        assert table.schema == COLLECTION_SCHEMA
+        # All three hadiths fall under the single CSV-stem collection "hadiths".
+        assert table.num_rows == 1
+        row = table.to_pylist()[0]
+        assert row["collection_id"] == "sanadset:hadiths"
+        assert row["source_corpus"] == "sanadset"
+        assert row["sect"] == "sunni"
+        assert row["total_hadiths"] == 3
+
+    def test_collections_from_books_csv(self, tmp_path: Path) -> None:
+        """books.csv present → one Collection per book_id, named from books.csv."""
+        raw_dir = tmp_path / "raw" / "sanadset"
+        raw_dir.mkdir(parents=True)
+        staging_dir = tmp_path / "staging"
+        _make_sanadset_csv(raw_dir / "hadiths.csv")
+        (raw_dir / "books.csv").write_text(_BOOKS_CSV, encoding="utf-8")
+
+        outputs = parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
+
+        # books.csv must NOT be parsed as hadiths — still exactly 3 hadiths.
+        hadiths = pq.read_table(staging_dir / "hadiths_sanadset.parquet").to_pylist()
+        assert len(hadiths) == 3
+        # collection_name is now the book_id (per-book breadth), not the CSV stem.
+        assert sorted(h["collection_name"] for h in hadiths) == ["1", "1", "2"]
+
+        assert "collections" in outputs
+        collections = pq.read_table(staging_dir / "collections_sanadset.parquet").to_pylist()
+        by_id = {c["collection_id"]: c for c in collections}
+        assert set(by_id) == {"sanadset:1", "sanadset:2"}
+        # Book metadata flows from books.csv onto the Collection node.
+        assert by_id["sanadset:1"]["name_ar"] == "صحيح البخاري"
+        assert by_id["sanadset:1"]["compiler_name"] == "البخاري"
+        assert by_id["sanadset:1"]["total_hadiths"] == 2  # book_id 1 has 2 hadiths
+        assert by_id["sanadset:2"]["total_hadiths"] == 1
+        assert all(c["sect"] == "sunni" and c["source_corpus"] == "sanadset" for c in collections)
+
+    def test_emitted_collections_cover_every_appears_in_endpoint(self, tmp_path: Path) -> None:
+        """Every hadith's APPEARS_IN collection endpoint has a matching Collection.
+
+        This is the linkage contract the orphan defect (ADR-003) broke: the
+        Collection node ids the edge loader MATCHes on (rebuilt here from each
+        hadith) must all exist among the emitted collections, or APPEARS_IN drops.
+        """
+        raw_dir = tmp_path / "raw" / "sanadset"
+        raw_dir.mkdir(parents=True)
+        staging_dir = tmp_path / "staging"
+        _make_sanadset_csv(raw_dir / "hadiths.csv")
+        (raw_dir / "books.csv").write_text(_BOOKS_CSV, encoding="utf-8")
+
+        parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
+
+        hadiths = pq.read_table(staging_dir / "hadiths_sanadset.parquet").to_pylist()
+        collections = pq.read_table(staging_dir / "collections_sanadset.parquet").to_pylist()
+        emitted_node_ids = {collection_node_id(c["collection_id"]) for c in collections}
+        needed_node_ids = {_appears_in_collection_id(h) for h in hadiths}
+        assert needed_node_ids <= emitted_node_ids
+        # And no hadith is left without a collection endpoint.
+        assert needed_node_ids

@@ -45,6 +45,14 @@ HADITH_COMPOSITION: dict[str, frozenset[str] | None] = {
     # open_hadith is dropped at the registry (active=False); listed here as a
     # defence-in-depth no-op in case its parquet is ever present in a staging dir.
     "open_hadith": frozenset(),
+    # sanadset (da#219 / Path B-B1): admit ALL collections explicitly. B1 only
+    # re-links the corpus (emit collections_sanadset so APPEARS_IN loads); the
+    # cross-edition canonical-identity dedup that would tighten this to an
+    # allowlist (so the 650k raw hadiths don't double-count the canonical six
+    # books) is B2/da#220 and is intentionally NOT done here. ``None`` is
+    # behaviorally identical to the unlisted-source default, but listing it makes
+    # admission explicit and gives da#220 a single line to replace.
+    "sanadset": None,
 }
 
 

@@ -35,7 +35,6 @@ from src.graph.load_edges import load_all_edges
 from src.graph.load_nodes import load_all_nodes
 from src.parse import sanadset
 from src.resolve import disambiguate, ner
-from tests.test_graph.conftest import write_collections
 
 # A NAR-tagged sanadset CSV. The narrator names below are mirrored exactly in the
 # bio CSV so disambiguation resolves them via the deterministic exact-match stage.
@@ -102,19 +101,15 @@ class TestSanadsetLightupLive:
         # resolve output into curated for the load step.
         shutil.copy(canonical, curated / "narrators_canonical.parquet")
 
-        # A sanadset Collection so APPEARS_IN (hadith->collection) can materialize.
-        write_collections(
-            staging,
-            [
-                {
-                    "collection_id": "sanadset:bukhari",
-                    "name_en": "Sahih al-Bukhari (sanadset)",
-                    "source_corpus": "sanadset",
-                    "sect": "sunni",
-                }
-            ],
-            suffix="sanadset",
-        )
+        # The sanadset Collection that APPEARS_IN (hadith->collection) needs is now
+        # emitted by the REAL parser path (collections_sanadset.parquet, da#219/B1)
+        # — NOT fabricated out of band. Before B1 this test injected a Collection
+        # via ``write_collections``, which masked the production gap that the parser
+        # emitted no collections file at all (ADR-003; cf. org memory
+        # "test-mock injection masks production failure"). Assert the parser
+        # produced it so this test exercises the path production runs.
+        assert "collections" in outputs, "B1: parser must emit collections_sanadset.parquet"
+        assert (staging / "collections_sanadset.parquet").exists()
 
         # --- load: real loaders into the live neo4j:5 container -----------------
         load_all_nodes(neo4j_client, staging, curated, strict=False)
