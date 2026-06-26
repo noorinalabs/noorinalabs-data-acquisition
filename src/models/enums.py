@@ -8,6 +8,7 @@ from enum import StrEnum
 __all__ = [
     "ChainClassification",
     "ChainPosition",
+    "DatePrecision",
     "Gender",
     "HadithGrade",
     "HistoricalEventType",
@@ -30,6 +31,33 @@ class NarratorGeneration(StrEnum):
     TABA_TABII = "taba_tabii"
     ATBA_TABA_TABIIN = "atba_taba_tabiin"
     LATER = "later"
+    UNKNOWN = "unknown"
+
+
+class DatePrecision(StrEnum):
+    """How tightly a source dates a narrator's birth/death event.
+
+    Orthogonal to disambiguation ``confidence`` (how sure we are a date attaches
+    to *this* canonical narrator): ``DatePrecision`` describes only the tightness
+    of the *source's* dating. Each value implies how the earliest/latest bound
+    fields on :class:`~src.models.narrator.Narrator` relate to the point estimate:
+
+    - ``EXACT``: single attested year (``earliest == latest == point``).
+    - ``RANGE``: attested bounds, e.g. "between 130 and 135 AH".
+    - ``CIRCA``: "~X" — a point with a small symmetric window.
+    - ``AFTER``: "died after X" → ``earliest = X``, ``latest = None``.
+    - ``BEFORE``: "died before X" → ``latest = X``, ``earliest = None``.
+    - ``TABAQA_ESTIMATE``: no year attested; window derived from the ṭabaqa
+      (generation) layer.
+    - ``UNKNOWN``: nothing is known about the date.
+    """
+
+    EXACT = "exact"
+    RANGE = "range"
+    CIRCA = "circa"
+    AFTER = "after"
+    BEFORE = "before"
+    TABAQA_ESTIMATE = "tabaqa_estimate"
     UNKNOWN = "unknown"
 
 

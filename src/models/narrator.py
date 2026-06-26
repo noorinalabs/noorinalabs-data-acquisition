@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from src.models.enums import Gender, NarratorGeneration, SectAffiliation, TrustworthinessGrade
+from src.models.enums import (
+    DatePrecision,
+    Gender,
+    NarratorGeneration,
+    SectAffiliation,
+    TrustworthinessGrade,
+)
 
 __all__ = ["Narrator"]
 
@@ -31,9 +37,29 @@ class Narrator(BaseModel):
     laqab: str | None = None
     """Honorific or epithet."""
     birth_year_ah: int | None = None
-    """Birth year in Hijri calendar."""
+    """Birth year in Hijri calendar (point estimate / best single value)."""
     death_year_ah: int | None = None
-    """Death year in Hijri calendar."""
+    """Death year in Hijri calendar (point estimate / best single value)."""
+
+    # Date uncertainty bounds (additive — the existing *_year_ah fields above
+    # remain the point estimate). Bounds + precision express the real-world
+    # uncertainty of classical dating; precision is orthogonal to disambiguation
+    # confidence. Populated downstream by the date-parse/reconcile/ṭabaqa-fallback
+    # stages (da#164/#165/#166); null + UNKNOWN until then so existing rows are
+    # unaffected.
+    birth_year_ah_earliest: int | None = None
+    """Lower bound (inclusive) for the birth year in AH, if known."""
+    birth_year_ah_latest: int | None = None
+    """Upper bound (inclusive) for the birth year in AH, if known."""
+    birth_date_precision: DatePrecision = DatePrecision.UNKNOWN
+    """How tightly the source dates the birth (orthogonal to confidence)."""
+    death_year_ah_earliest: int | None = None
+    """Lower bound (inclusive) for the death year in AH, if known."""
+    death_year_ah_latest: int | None = None
+    """Upper bound (inclusive) for the death year in AH, if known."""
+    death_date_precision: DatePrecision = DatePrecision.UNKNOWN
+    """How tightly the source dates the death (orthogonal to confidence)."""
+
     birth_location_id: str | None = None
     """FK to Location.id."""
     death_location_id: str | None = None

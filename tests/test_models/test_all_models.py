@@ -21,6 +21,7 @@ from src.models.edges import (
 )
 from src.models.enums import (
     ChainClassification,
+    DatePrecision,
     Gender,
     HadithGrade,
     HistoricalEventType,
@@ -528,6 +529,13 @@ class TestDefaults:
         assert n.aliases == []
         assert n.betweenness_centrality is None
         assert n.pagerank is None
+        # Additive date-bound fields default to absent / UNKNOWN.
+        assert n.birth_year_ah_earliest is None
+        assert n.birth_year_ah_latest is None
+        assert n.birth_date_precision == DatePrecision.UNKNOWN
+        assert n.death_year_ah_earliest is None
+        assert n.death_year_ah_latest is None
+        assert n.death_date_precision == DatePrecision.UNKNOWN
 
     def test_hadith_optional_defaults(self) -> None:
         h = _hadith()
@@ -542,3 +550,85 @@ class TestDefaults:
         assert ch.full_chain_text_ar is None
         assert ch.is_elevated is False
         assert ch.narrator_ids == []
+
+
+# ---------------------------------------------------------------------------
+# DatePrecision enum + Narrator date-bound fields (da#161)
+# ---------------------------------------------------------------------------
+
+
+class TestDatePrecisionEnum:
+    """DatePrecision is a StrEnum with the documented members and string values."""
+
+    def test_values(self) -> None:
+        assert DatePrecision.EXACT == "exact"
+        assert DatePrecision.RANGE == "range"
+        assert DatePrecision.CIRCA == "circa"
+        assert DatePrecision.AFTER == "after"
+        assert DatePrecision.BEFORE == "before"
+        assert DatePrecision.TABAQA_ESTIMATE == "tabaqa_estimate"
+        assert DatePrecision.UNKNOWN == "unknown"
+
+    def test_member_set_is_exhaustive(self) -> None:
+        assert {m.value for m in DatePrecision} == {
+            "exact",
+            "range",
+            "circa",
+            "after",
+            "before",
+            "tabaqa_estimate",
+            "unknown",
+        }
+
+    def test_str_serialization(self) -> None:
+        """StrEnum members serialize as their plain string value (JSON/Parquet)."""
+        assert f"{DatePrecision.EXACT}" == "exact"
+        assert DatePrecision("circa") is DatePrecision.CIRCA
+
+
+class TestNarratorDateBounds:
+    """Additive earliest/latest bounds + precision on Narrator behave correctly."""
+
+    def test_bounds_and_precision_assignable(self) -> None:
+        n = _narrator(
+            death_year_ah=110,
+            death_year_ah_earliest=108,
+            death_year_ah_latest=112,
+            death_date_precision=DatePrecision.CIRCA,
+            birth_year_ah_earliest=30,
+            birth_year_ah_latest=50,
+            birth_date_precision=DatePrecision.TABAQA_ESTIMATE,
+        )
+        assert n.death_year_ah == 110
+        assert n.death_year_ah_earliest == 108
+        assert n.death_year_ah_latest == 112
+        assert n.death_date_precision == DatePrecision.CIRCA
+        assert n.birth_year_ah_earliest == 30
+        assert n.birth_year_ah_latest == 50
+        assert n.birth_date_precision == DatePrecision.TABAQA_ESTIMATE
+
+    def test_precision_accepts_string_value(self) -> None:
+        """Pydantic coerces the raw string into the DatePrecision member."""
+        n = _narrator(death_date_precision="after")
+        assert n.death_date_precision is DatePrecision.AFTER
+
+    def test_bad_precision_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            _narrator(death_date_precision="approximately")
+
+    def test_round_trip_preserves_bounds(self) -> None:
+        original = _narrator(
+            death_year_ah=241,
+            death_year_ah_earliest=241,
+            death_year_ah_latest=241,
+            death_date_precision=DatePrecision.EXACT,
+            birth_date_precision=DatePrecision.UNKNOWN,
+        )
+        data = original.model_dump()
+        rebuilt = Narrator(**data)
+        assert rebuilt == original
+
+    def test_date_fields_frozen(self) -> None:
+        n = _narrator()
+        with pytest.raises(ValidationError):
+            n.death_date_precision = DatePrecision.EXACT  # type: ignore[misc]
