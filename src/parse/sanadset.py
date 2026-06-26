@@ -23,8 +23,29 @@ keyed ``col:<corpus>:<collection_name>`` (``load_edges._load_appears_in``), so t
 join key is the hadith's ``collection_name``: when ``books.csv`` is present it is
 the ``book_id`` (per-book breadth — the reason Path B was chosen over a purge);
 otherwise it falls back to the per-CSV-stem name (pre-B1 behavior). Cross-edition
-dedup (B2 / da#220) and narrator re-segmentation (B3 / da#221) are deliberately
-out of scope here.
+dedup (B2 / da#220) is deliberately out of scope here.
+
+Narrator re-segmentation (da#221, Path B / B3)
+----------------------------------------------
+The raw ``<NAR>`` tags are a *coarse* per-fragment firehose: a tag may hold a
+genuine narrator name, but it may equally hold an honorific/eulogy phrase
+(``رضي الله عنه``), a bare transmission verb (``قال`` / ``عن``), a non-Arabic or
+vowel-stripped transliteration fragment (``He said`` / ``that``), or a whole
+mis-tagged *sub-chain* carrying internal transmission markers. Stored at face
+value (pre-B3 behaviour) these polluted the resolved ``Narrator`` table, made
+full-text search surface matns as narrator hits (ig#1110), and starved
+``STUDIED_UNDER`` (ADR-003). B3 routes every ``<NAR>`` tag through
+:func:`_segment_nar_content`, which (1) re-segments a marker-bearing blob into its
+constituent narrators via the shared
+:func:`src.parse.narrator_extraction.extract_narrator_mentions` segmenter
+(dropping an un-segmentable chain blob rather than minting it, da#158), and
+(2) filters non-narrator pollution via :func:`_is_narrator_like` — Arabic script
+required (drops English / Latin transliteration fragments), no residual
+transmission marker, not a whole honorific phrase, and not a bare nasab particle.
+Genuine narrators flow through unchanged (the common single-name tag keeps its raw
+voweled ``name_ar``). The net effect is a substantial drop in the mention
+firehose — the ``narrator_mentions_sanadset`` baseline in
+:mod:`src.parse.validate` is recalibrated accordingly.
 """
 
 from __future__ import annotations
@@ -43,13 +64,22 @@ from src.parse.base import (
     write_parquet,
 )
 from src.parse.identity import ID_DELIMITER
+from src.parse.narrator_extraction import (
+    IsnadSegmentationError,
+    extract_narrator_mentions,
+)
 from src.parse.schemas import (
     COLLECTION_SCHEMA,
     HADITH_SCHEMA,
     NARRATOR_BIO_SCHEMA,
     NARRATOR_MENTION_SCHEMA,
 )
-from src.utils.arabic import extract_transmission_phrases, normalize_arabic
+from src.utils.arabic import (
+    contains_transmission_marker,
+    extract_transmission_phrases,
+    is_arabic,
+    normalize_arabic,
+)
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -73,6 +103,122 @@ _BIO_SOURCE = "kaggle_narrators"
 # is excluded from the hadith glob and consumed as the book→collection mapping.
 _BOOKS_FILENAME = "books.csv"
 
+# ---------------------------------------------------------------------------
+# Narrator re-segmentation / pollution filtering (da#221, Path B / B3)
+# ---------------------------------------------------------------------------
+
+# Minimum substantive length (Arabic letters, spaces excluded) for a span to be a
+# plausible narrator name. The shortest real classical names — علي / عمر / زيد —
+# normalize to 3 letters; anything shorter is a particle or stray glyph, not a
+# name.
+_MIN_NARRATOR_CHARS = 3
+
+# Whole-tag honorific / eulogy phrases that routinely ride inside ``<NAR>`` tags
+# but name no narrator (``رضي الله عنه`` "may God be pleased with him", the
+# ṣalawāt, …). Stored normalized so a voweled tag matches after
+# :func:`normalize_arabic`. Only an *entire* tag equal to one of these is dropped;
+# an honorific trailing a real name leaves the name intact.
+_RAW_NON_NARRATOR_PHRASES: frozenset[str] = frozenset(
+    {
+        "رضي الله عنه",
+        "رضي الله عنها",
+        "رضي الله عنهم",
+        "رضي الله عنهما",
+        "صلى الله عليه وسلم",
+        "عليه السلام",
+        "عليها السلام",
+        "عليهم السلام",
+        "رحمه الله",
+        "رحمها الله",
+        "عز وجل",
+        "سبحانه وتعالى",
+        "تعالى",
+    }
+)
+_NON_NARRATOR_PHRASES: frozenset[str] = frozenset(
+    normalize_arabic(p) for p in _RAW_NON_NARRATOR_PHRASES
+)
+
+# Bare nasab / kunya structural particles. A span made up of nothing but these
+# (``بن`` / ``ابن`` / ``ابو`` …) is a dangling connective, not a narrator. Stored
+# normalized for diacritic/orthographic-insensitive comparison.
+_RAW_STRUCTURAL_PARTICLES: frozenset[str] = frozenset(
+    {"بن", "ابن", "أبو", "أبا", "أبي", "أم", "عبد", "ال", "بنت"}
+)
+_STRUCTURAL_PARTICLES: frozenset[str] = frozenset(
+    normalize_arabic(p) for p in _RAW_STRUCTURAL_PARTICLES
+)
+
+
+def _is_narrator_like(name: str) -> bool:
+    """Return True if *name* is a plausible narrator entity (da#221, B3).
+
+    Rejects the pollution classes the coarse ``<NAR>`` firehose mints as
+    ``Narrator`` nodes (ADR-003):
+
+    * non-Arabic spans — English fragments (``He said``/``that``) and
+      vowel-stripped Latin transliterations;
+    * spans still carrying a transmission marker — a residual / partial-chain
+      fragment, never a clean name (da#158);
+    * whole honorific/eulogy phrases that name no narrator;
+    * bare nasab particles with no actual name token;
+    * sub-substantive spans below :data:`_MIN_NARRATOR_CHARS`.
+    """
+    if not name or not name.strip():
+        return False
+    text = name.strip()
+    # Arabic script required — drops English fragments and Latin transliterations.
+    if not is_arabic(text):
+        return False
+    # A residual transmission marker means a fragment / partial blob, not a name.
+    if contains_transmission_marker(text):
+        return False
+    normalized = normalize_arabic(text)
+    if normalized in _NON_NARRATOR_PHRASES:
+        return False
+    tokens = normalized.split()
+    if tokens and all(tok in _STRUCTURAL_PARTICLES for tok in tokens):
+        return False
+    if len(normalized.replace(" ", "")) < _MIN_NARRATOR_CHARS:
+        return False
+    return True
+
+
+def _segment_nar_content(content: str) -> list[tuple[str, str, str | None]]:
+    """Re-segment one ``<NAR>`` tag into clean narrator mentions (da#221, B3).
+
+    Returns ``(name_ar, name_ar_normalized, transmission_method)`` tuples — zero
+    when the tag is entirely pollution, one for the common clean single-name tag,
+    or several when a single tag mis-holds a whole sub-chain.
+
+    * A tag whose own text carries a transmission marker is a mis-tagged blob: it
+      is re-segmented via the shared
+      :func:`src.parse.narrator_extraction.extract_narrator_mentions` Arabic
+      segmenter. An *un-segmentable* marker-bearing blob is dropped (never minted
+      as a whole-chain "narrator", da#158); the split pieces are kept in their
+      normalized form (a blob has no single clean voweled form anyway).
+    * A clean single-name tag keeps its raw, voweled ``name_ar`` and is accepted
+      only if :func:`_is_narrator_like`.
+    """
+    stripped = content.strip()
+    if not stripped:
+        return []
+    if contains_transmission_marker(stripped):
+        try:
+            spans = extract_narrator_mentions(stripped, "ar")
+        except IsnadSegmentationError:
+            # Un-segmentable chain blob → drop rather than pollute the table.
+            return []
+        return [
+            (span.name, span.name, span.transmission_method)
+            for span in spans
+            if _is_narrator_like(span.name)
+        ]
+    normalized = normalize_arabic(stripped)
+    if not _is_narrator_like(normalized):
+        return []
+    return [(stripped, normalized, None)]
+
 
 def _extract_tag(pattern: re.Pattern[str], text: str) -> str | None:
     """Extract first match of a tag pattern, returning stripped content or None."""
@@ -87,46 +233,54 @@ def _extract_narrator_mentions(
     sanad_text: str,
     source_hadith_id: str,
 ) -> list[dict[str, str | int | None]]:
-    """Extract narrator mentions from SANAD text containing NAR tags.
+    """Extract clean narrator mentions from SANAD text containing NAR tags.
 
-    Returns list of dicts matching NARRATOR_MENTION_SCHEMA fields.
+    Each ``<NAR>`` tag is re-segmented and pollution-filtered by
+    :func:`_segment_nar_content` (da#221, B3): genuine narrators are emitted, a
+    mis-tagged sub-chain is split into its constituents, and non-narrator
+    fragments (honorifics, bare transmission verbs, English / transliteration
+    fragments, dangling particles) are dropped. ``position_in_chain`` is numbered
+    over the *emitted* mentions so it stays a gap-free chain order even when tags
+    are dropped or split. Returns list of dicts matching NARRATOR_MENTION_SCHEMA.
     """
     mentions: list[dict[str, str | int | None]] = []
     nar_matches = list(_NAR_RE.finditer(sanad_text))
 
+    position = 0
     for idx, match in enumerate(nar_matches):
-        name_raw = match.group(1).strip()
-        if not name_raw:
-            continue
-
-        name_ar_normalized = normalize_arabic(name_raw)
-        mention_id = generate_source_id(_SOURCE_CORPUS, "mention", source_hadith_id, str(idx))
-
-        # Extract transmission method from text between previous NAR end and current NAR start
-        transmission_method: str | None = None
-        if idx > 0:
-            prev_end = nar_matches[idx - 1].end()
-            between_text = sanad_text[prev_end : match.start()]
-        else:
-            between_text = sanad_text[: match.start()]
-
+        # Transmission method carried by the text between the previous NAR's end
+        # and this tag's start (e.g. the ``عن`` joining two narrators).
+        between_method: str | None = None
+        between_text = (
+            sanad_text[nar_matches[idx - 1].end() : match.start()]
+            if idx > 0
+            else sanad_text[: match.start()]
+        )
         if between_text.strip():
             phrases = extract_transmission_phrases(between_text)
             if phrases:
-                transmission_method = phrases[0][2]  # label of first match
+                between_method = phrases[0][2]  # label of first match
 
-        mentions.append(
-            {
-                "mention_id": mention_id,
-                "source_hadith_id": source_hadith_id,
-                "source_corpus": _SOURCE_CORPUS,
-                "position_in_chain": idx,
-                "name_ar": name_raw,
-                "name_en": None,
-                "name_ar_normalized": name_ar_normalized,
-                "transmission_method": transmission_method,
-            }
-        )
+        for name_ar, name_ar_normalized, span_method in _segment_nar_content(match.group(1)):
+            mention_id = generate_source_id(
+                _SOURCE_CORPUS, "mention", source_hadith_id, str(position)
+            )
+            # An internal blob-split carries its own method; otherwise the
+            # between-tag transmission phrase applies to this narrator.
+            method = span_method if span_method is not None else between_method
+            mentions.append(
+                {
+                    "mention_id": mention_id,
+                    "source_hadith_id": source_hadith_id,
+                    "source_corpus": _SOURCE_CORPUS,
+                    "position_in_chain": position,
+                    "name_ar": name_ar,
+                    "name_en": None,
+                    "name_ar_normalized": name_ar_normalized,
+                    "transmission_method": method,
+                }
+            )
+            position += 1
 
     return mentions
 
@@ -237,11 +391,18 @@ def _process_chunk(
     row_offset: int = 0,
     *,
     has_books: bool = False,
-) -> tuple[list[dict[str, object]], list[dict[str, str | int | None]], int]:
-    """Process a chunk of rows, returning hadith records, narrator mentions, and malformed count."""
+) -> tuple[list[dict[str, object]], list[dict[str, str | int | None]], int, int]:
+    """Process a chunk of rows.
+
+    Returns ``(hadiths, mentions, malformed_count, raw_nar_count)``. ``raw_nar_count``
+    is the number of raw ``<NAR>`` tags seen before B3 re-segmentation / filtering;
+    comparing it to ``len(mentions)`` quantifies how much coarse-tag pollution the
+    B3 filter removed (da#221).
+    """
     hadiths: list[dict[str, object]] = []
     mentions: list[dict[str, str | int | None]] = []
     malformed_count = 0
+    raw_nar_count = 0
 
     for idx, row in enumerate(rows):
         full_text = safe_str(row.get("hadith") or row.get("text") or row.get("Hadith"))
@@ -292,6 +453,7 @@ def _process_chunk(
 
         # Extract narrator mentions from SANAD if available
         if isnad_raw_ar:
+            raw_nar_count += len(_NAR_RE.findall(isnad_raw_ar))
             try:
                 row_mentions = _extract_narrator_mentions(isnad_raw_ar, source_id)
                 mentions.extend(row_mentions)
@@ -299,7 +461,7 @@ def _process_chunk(
                 malformed_count += 1
                 logger.debug("malformed_nar_tags", source_id=source_id)
 
-    return hadiths, mentions, malformed_count
+    return hadiths, mentions, malformed_count, raw_nar_count
 
 
 def _parse_narrators_bio(narrators_dir: Path) -> pa.Table | None:
@@ -447,6 +609,7 @@ def parse_sanadset(
     all_hadiths: list[dict[str, object]] = []
     all_mentions: list[dict[str, str | int | None]] = []
     total_malformed = 0
+    total_raw_nar = 0
     total_rows = 0
     global_row_offset = 0
 
@@ -465,7 +628,7 @@ def parse_sanadset(
 
         for chunk_start in range(0, len(rows), _CHUNK_SIZE):
             chunk = rows[chunk_start : chunk_start + _CHUNK_SIZE]
-            hadiths, mentions, malformed = _process_chunk(
+            hadiths, mentions, malformed, raw_nar = _process_chunk(
                 chunk,
                 collection_name,
                 row_offset=global_row_offset + chunk_start,
@@ -474,6 +637,7 @@ def parse_sanadset(
             all_hadiths.extend(hadiths)
             all_mentions.extend(mentions)
             total_malformed += malformed
+            total_raw_nar += raw_nar
 
             logger.info(
                 "chunk_processed",
@@ -489,13 +653,21 @@ def parse_sanadset(
     valid_sanad_count = sum(1 for h in all_hadiths if h["isnad_raw_ar"] is not None)
     valid_sanad_pct = (valid_sanad_count / len(all_hadiths) * 100) if all_hadiths else 0
     avg_narrators = len(all_mentions) / valid_sanad_count if valid_sanad_count > 0 else 0
+    # B3 (da#221) observability: how much coarse-tag pollution the re-segmentation
+    # filter removed. total_raw_nar counts raw <NAR> tags; len(all_mentions) is the
+    # clean post-filter mention count. A positive filtered_pct is the firehose drop.
+    filtered_nar = total_raw_nar - len(all_mentions)
+    filtered_nar_pct = (filtered_nar / total_raw_nar * 100) if total_raw_nar else 0
 
     logger.info(
         "sanadset_parse_quality",
         total_rows=total_rows,
         parsed_hadiths=len(all_hadiths),
         valid_sanad_pct=round(valid_sanad_pct, 1),
+        raw_nar_tags=total_raw_nar,
         narrator_mentions=len(all_mentions),
+        filtered_nar=filtered_nar,
+        filtered_nar_pct=round(filtered_nar_pct, 1),
         avg_narrators_per_chain=round(avg_narrators, 2),
         malformed_tags=total_malformed,
     )

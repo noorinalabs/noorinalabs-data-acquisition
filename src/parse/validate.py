@@ -145,7 +145,20 @@ DEFAULT_BASELINES: dict[str, dict[str, float | int]] = {
     "narrator_mentions_sunnah_api": {"row_count": 100000},
     "narrator_mentions_thaqalayn": {"row_count": 405360},
     "narrator_mentions_lk": {"row_count": 86162},
-    "narrator_mentions_sanadset": {"row_count": 2789517},
+    # Recalibrated da#221 (Path B / B3 narrator re-segmentation). The old
+    # 2,789,517 baseline was the COARSE `<NAR>`-tag firehose — one mention per raw
+    # tag, taken at face value (ADR-003), so it counted honorific phrases, bare
+    # transmission verbs, English / vowel-stripped transliteration fragments, and
+    # un-segmentable chain blobs as "narrators". B3 (`sanadset._segment_nar_content`
+    # / `_is_narrator_like`) drops that pollution (and re-segments the minority of
+    # multi-narrator blobs), so the clean mention count drops substantially. The
+    # new target ~1,950,000 is an estimate of ~30% net pollution removal pending
+    # confirmation on the next full pipeline run (cf. the da#175 recalibration
+    # precedent); the 30% DEFAULT_DRIFT_TOLERANCE_PCT absorbs the calibration band
+    # either side of the true post-filter count. The behaviour itself is pinned by
+    # the B3 unit tests in tests/test_parse/test_sanadset_parser.py, not by this
+    # exact number (which CI does not exercise — no raw corpus in CI).
+    "narrator_mentions_sanadset": {"row_count": 1950000},
     "narrators_bio_kaggle": {"row_count": 24326},
     "narrators_bio_muhaddithat": {"row_count": 113},
     "narrators_bio_itqan": {"row_count": 115735},
