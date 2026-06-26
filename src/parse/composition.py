@@ -21,8 +21,32 @@ composition (relayed via the Program Director) keeps each book once:
 * every other source — all collections (value ``None``).
 
 This is the **per-source** half of the dedup and is the deterministic part that
-MUST hold before the production load. Cross-edition canonical-identity dedup
-(same hadith by collection+number across editions) is a tracked fast-follow.
+MUST hold before the production load.
+
+Cross-edition canonical-identity dedup (da#220 / Path B-B2)
+-----------------------------------------------------------
+The per-source map above keeps each *book* once, but it cannot stop a hadith in
+one corpus from duplicating the *same canonical tradition* already loaded — with
+richer metadata — from another corpus. That gap matters for ``sanadset``: B1
+(da#219) re-links its 650k hadiths to their collections, but ``sanadset`` is a
+raw re-publication that overlaps the curated spine (``lk`` / ``halimbahae`` /
+``fawaz`` …). Admitting all of it without a cross-edition check would
+**double-count** the canonical books on production.
+
+:func:`canonical_matn_identity` mints a deterministic identity for a hadith from
+its **normalized matn** — the one signal both editions actually share. (The
+collection slug does NOT survive across editions: ``sanadset`` keys collections
+by numeric ``book_id``, the curated sources by name, so a literal
+"collection+number" key never collides between them. The normalized matn does.)
+The graph node loader (``src.graph.load_nodes._load_hadiths``) builds the set of
+identities occupied by the **curated** sources (everything NOT in
+:data:`CROSS_EDITION_DEDUP_SOURCES`) and drops any hadith from a dedup-source
+whose identity collides — **curated wins**, because it carries the richer,
+deduplicated metadata. The match is *exact normalized-matn equality*: it only
+ever removes a genuine textual duplicate, never a distinct tradition (the safe,
+irreversible-load-friendly direction). Sub-exact near-duplicates are a *linking*
+concern, not a dedup one, and remain the job of ``PARALLEL_OF`` detection
+(``src.resolve.parallels``).
 
 This module is the single source of truth, consumed by the graph node loader
 (``src.graph.load_nodes``) so a fresh ``run_all`` (the path production uses)
@@ -30,6 +54,10 @@ produces the deduped graph without manual surgery.
 """
 
 from __future__ import annotations
+
+import hashlib
+
+from src.utils.arabic import is_arabic, normalize_arabic
 
 # source_corpus -> allowed collection slugs.
 #   None           = load all collections for this source. Equivalent to the
@@ -45,15 +73,33 @@ HADITH_COMPOSITION: dict[str, frozenset[str] | None] = {
     # open_hadith is dropped at the registry (active=False); listed here as a
     # defence-in-depth no-op in case its parquet is ever present in a staging dir.
     "open_hadith": frozenset(),
-    # sanadset (da#219 / Path B-B1): admit ALL collections explicitly. B1 only
-    # re-links the corpus (emit collections_sanadset so APPEARS_IN loads); the
-    # cross-edition canonical-identity dedup that would tighten this to an
-    # allowlist (so the 650k raw hadiths don't double-count the canonical six
-    # books) is B2/da#220 and is intentionally NOT done here. ``None`` is
-    # behaviorally identical to the unlisted-source default, but listing it makes
-    # admission explicit and gives da#220 a single line to replace.
+    # sanadset (da#219 / Path B-B1): admit ALL collections at the per-source
+    # level. ``sanadset`` keeps its full collection breadth — that is the reason
+    # Path B was chosen over a purge — so this is NOT tightened to a per-source
+    # allowlist. The double-counting risk the ADR flags is handled per-*hadith*
+    # by the cross-edition dedup (da#220 / B2): ``sanadset`` is listed in
+    # :data:`CROSS_EDITION_DEDUP_SOURCES`, so a sanadset hadith whose normalized
+    # matn matches an already-loaded curated tradition is dropped at load (curated
+    # wins). ``None`` here is behaviorally identical to the unlisted-source
+    # default; listing it keeps sanadset's admission explicit next to that gate.
     "sanadset": None,
 }
+
+# Sources whose hadiths are deduplicated against the curated spine by
+# cross-edition canonical identity (da#220 / Path B-B2). A hadith from one of
+# these sources is dropped at graph-load time when its
+# :func:`canonical_matn_identity` collides with a hadith already admitted from a
+# *curated* (non-dedup) source — "curated wins", because the curated editions
+# carry the richer, deduplicated metadata. This is the per-hadith complement to
+# the per-source/per-collection :data:`HADITH_COMPOSITION` gate above: the map
+# keeps each *book* once; this keeps each *tradition* once across editions.
+CROSS_EDITION_DEDUP_SOURCES: frozenset[str] = frozenset({"sanadset"})
+
+# Minimum number of normalized matn tokens for a hadith to carry a reliable
+# cross-edition identity. A matn shorter than this is too generic to distinguish
+# traditions (e.g. a bare formula), so such a hadith is never deduped — it is
+# always kept, the conservative direction for an irreversible production load.
+_MIN_IDENTITY_TOKENS = 3
 
 
 def is_canonical_hadith(source_corpus: str, collection_name: str) -> bool:
@@ -71,3 +117,45 @@ def is_canonical_hadith(source_corpus: str, collection_name: str) -> bool:
     if allowed is None:
         return True
     return collection_name in allowed
+
+
+def is_cross_edition_dedup_source(source_corpus: str) -> bool:
+    """Return True if *source_corpus* is deduped against the curated spine (da#220).
+
+    Hadiths from such a source are dropped at graph-load time when their
+    :func:`canonical_matn_identity` collides with a tradition already admitted
+    from a curated (non-dedup) source. See :data:`CROSS_EDITION_DEDUP_SOURCES`.
+    """
+    return source_corpus in CROSS_EDITION_DEDUP_SOURCES
+
+
+def canonical_matn_identity(matn_ar: str | None, matn_en: str | None) -> str | None:
+    """Deterministic cross-edition identity for a hadith, from its normalized matn.
+
+    Two editions of the *same canonical tradition* share their matn body, so the
+    normalized matn is the join key that survives across editions (unlike the
+    collection slug — see the module docstring). Returns a stable hex digest of
+    the normalized matn, or ``None`` when the hadith carries no matn reliable
+    enough to identify it (empty, or fewer than :data:`_MIN_IDENTITY_TOKENS`
+    tokens) — a ``None`` identity is never deduped, so the hadith is kept.
+
+    The Arabic matn is preferred and normalized via
+    :func:`src.utils.arabic.normalize_arabic` (diacritics / alif / hamza / taa
+    marbuta / tatweel folded, whitespace collapsed) so spelling variants between
+    editions converge; the English matn (lowercased) is the fallback when no
+    Arabic matn is present. The normalization mirrors ``src.resolve.parallels``'s
+    tokenizer so the dedup gate and the PARALLEL_OF detector agree on what the
+    "same text" is. The digest (not the raw matn) is returned so the loader's
+    identity index stays compact for the full ~650k-row corpus.
+    """
+    if matn_ar and is_arabic(matn_ar):
+        normalized = normalize_arabic(matn_ar)
+    elif matn_en and matn_en.strip():
+        normalized = matn_en.lower()
+    else:
+        return None
+    tokens = normalized.split()
+    if len(tokens) < _MIN_IDENTITY_TOKENS:
+        return None
+    signature = " ".join(tokens)
+    return hashlib.blake2b(signature.encode("utf-8"), digest_size=16).hexdigest()
