@@ -25,6 +25,7 @@ from rapidfuzz.distance import Levenshtein
 from src.models.enums import DatePrecision
 from src.parse.base import safe_str, write_parquet
 from src.parse.identity import make_canonical_id
+from src.resolve.geography import regions_plausible, resolve_region
 from src.resolve.schemas import (
     AMBIGUOUS_NARRATORS_SCHEMA,
     NARRATOR_MENTIONS_RESOLVED_SCHEMA,
@@ -102,6 +103,9 @@ class ChainContext:
     position_in_chain: int
     source_corpus: str
     adjacent_death_years: list[int] = field(default_factory=list)
+    # Free-text birth/death locations of the resolved adjacent narrators, used by
+    # the geographic filter. Empty when no neighbour resolved or carried a location.
+    adjacent_locations: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -263,24 +267,52 @@ def _temporal_filter(matches: list[Match], chain_context: ChainContext) -> list[
 # ---------------------------------------------------------------------------
 # Stage 4: Geographic filter
 # ---------------------------------------------------------------------------
-def _geographic_filter(matches: list[Match]) -> list[Match]:
-    """Soft geographic constraint — pass-through until location ontology exists.
+def _geographic_filter(
+    matches: list[Match], chain_context: ChainContext | None = None
+) -> list[Match]:
+    """Soft geographic constraint — drop matches based in a region travel-implausible
+    given the chain's adjacent narrators.
 
-    Geographic filtering is deferred because:
-    - No normalized location ontology exists yet (birth/death locations are
-      free-text strings with inconsistent transliteration across corpora).
-    - Effective filtering requires a curated mapping of historical Islamic
-      cities/regions plus known scholarly travel routes.
-    - Incorrect filtering would silently drop valid matches, so conservative
-      pass-through is preferable until location data is reliable.
+    Mirrors :func:`_temporal_filter`: it consumes a chain-context signal (here the
+    canonical regions of the resolved adjacent narrators' locations) and prunes
+    candidates that contradict it, while passing everything through when the signal
+    is absent. The location normalization + travel-plausibility model lives in
+    :mod:`src.resolve.geography` (da#139).
 
-    TODO(phase4): Implement geographic filtering once a location ontology
-    is built in the enrich stage. Key steps:
-      1. Normalize location strings to canonical city/region IDs.
-      2. Build a travel-plausibility graph (e.g., Basra<->Baghdad: likely).
-      3. Filter candidates whose locations are implausible given chain context.
+    Conservative by design — a match is dropped **only** when both its own location
+    and at least one neighbour's location resolve to known regions AND the candidate
+    region is travel-implausible against *every* known neighbour region. Any
+    unresolved or missing location keeps the match (soft constraint), so noisy or
+    sparse free-text location data can never silently drop a valid match.
+
+    ``chain_context`` is optional: with no context (or no resolvable neighbour
+    location) the stage is a pure pass-through, exactly as before location data
+    became available.
     """
-    return matches
+    if chain_context is None or not chain_context.adjacent_locations:
+        return matches
+
+    ref_regions = {
+        region
+        for loc in chain_context.adjacent_locations
+        if (region := resolve_region(loc)) is not None
+    }
+    if not ref_regions:
+        return matches
+
+    filtered: list[Match] = []
+    for m in matches:
+        cand_location = m.candidate.death_location or m.candidate.birth_location
+        cand_region = resolve_region(cand_location)
+        if cand_region is None:
+            # No usable location signal for this candidate — keep (soft constraint).
+            filtered.append(m)
+            continue
+        if any(regions_plausible(cand_region, ref) for ref in ref_regions):
+            filtered.append(m)
+        # else: implausibly far from every known neighbour region — drop.
+
+    return filtered
 
 
 # ---------------------------------------------------------------------------
@@ -531,6 +563,7 @@ def _disambiguate_mention(
     mention: dict[str, str | int | float | None],
     candidates: list[Candidate],
     death_year_index: dict[str, int | None],
+    location_index: dict[str, str] | None = None,
 ) -> tuple[Match | None, list[Match]]:
     """Run 5-stage pipeline on a single mention. Return (best_match, all_matches)."""
     raw_name = str(mention.get("name_normalized") or mention.get("name_raw") or "")
@@ -548,18 +581,24 @@ def _disambiguate_mention(
     source_corpus = str(mention.get("source_corpus", ""))
 
     adjacent_years: list[int] = []
-    # Look up adjacent narrators' death years from the index if available.
+    adjacent_locations: list[str] = []
+    # Look up adjacent narrators' death years + locations from the indexes.
     for offset in (-1, 1):
         key = f"{hadith_id}:{position + offset}"
         year = death_year_index.get(key)
         if year is not None:
             adjacent_years.append(year)
+        if location_index is not None:
+            loc = location_index.get(key)
+            if loc:
+                adjacent_locations.append(loc)
 
     chain_ctx = ChainContext(
         hadith_id=hadith_id,
         position_in_chain=position,
         source_corpus=source_corpus,
         adjacent_death_years=adjacent_years,
+        adjacent_locations=adjacent_locations,
     )
 
     all_matches: list[Match] = []
@@ -576,7 +615,7 @@ def _disambiguate_mention(
         # Stage 3: Temporal filter
         fuzzy = _temporal_filter(fuzzy, chain_ctx)
         # Stage 4: Geographic filter
-        fuzzy = _geographic_filter(fuzzy)
+        fuzzy = _geographic_filter(fuzzy, chain_ctx)
         all_matches.extend(fuzzy)
         if fuzzy:
             best = max(fuzzy, key=lambda m: m.score)
@@ -596,6 +635,7 @@ def _disambiguate_mention_indexed(
     mention: dict[str, str | int | float | None],
     index: BlockingIndex,
     death_year_index: dict[str, int | None],
+    location_index: dict[str, str] | None = None,
 ) -> tuple[Match | None, list[Match]]:
     """Run 5-stage pipeline using blocking indexes for fast lookup."""
     raw_name = str(mention.get("name_normalized") or mention.get("name_raw") or "")
@@ -611,17 +651,23 @@ def _disambiguate_mention_indexed(
     source_corpus = str(mention.get("source_corpus", ""))
 
     adjacent_years: list[int] = []
+    adjacent_locations: list[str] = []
     for offset in (-1, 1):
         key = f"{hadith_id}:{position + offset}"
         year = death_year_index.get(key)
         if year is not None:
             adjacent_years.append(year)
+        if location_index is not None:
+            loc = location_index.get(key)
+            if loc:
+                adjacent_locations.append(loc)
 
     chain_ctx = ChainContext(
         hadith_id=hadith_id,
         position_in_chain=position,
         source_corpus=source_corpus,
         adjacent_death_years=adjacent_years,
+        adjacent_locations=adjacent_locations,
     )
 
     all_matches: list[Match] = []
@@ -638,7 +684,7 @@ def _disambiguate_mention_indexed(
         # Stage 3: Temporal filter
         fuzzy = _temporal_filter(fuzzy, chain_ctx)
         # Stage 4: Geographic filter
-        fuzzy = _geographic_filter(fuzzy)
+        fuzzy = _geographic_filter(fuzzy, chain_ctx)
         all_matches.extend(fuzzy)
         if fuzzy:
             best = max(fuzzy, key=lambda m: m.score)
@@ -875,6 +921,12 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
     # We populate this incrementally as we resolve mentions.
     death_year_index: dict[str, int | None] = {}
 
+    # Parallel location index for the geographic filter (da#139):
+    # key = "hadith_id:position" → free-text birth/death location of the resolved
+    # candidate. Populated only for bio-matched mentions whose candidate carried a
+    # location; absent neighbours simply contribute no geographic signal.
+    location_index: dict[str, str] = {}
+
     # Canonical narrator accumulator: normalized_name → metadata dict.
     canonical_map: dict[str, dict[str, str | int | list[str] | None]] = {}
     merge_log_rows: list[dict[str, str | float | None]] = []
@@ -901,7 +953,9 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
             corpus = str(mention.get("source_corpus", "unknown"))
             source_total[corpus] = source_total.get(corpus, 0) + 1
 
-            best, all_matches = _disambiguate_mention_indexed(mention, index, death_year_index)
+            best, all_matches = _disambiguate_mention_indexed(
+                mention, index, death_year_index, location_index
+            )
 
             mention_id = str(mention.get("mention_id", ""))
             mention_text = str(mention.get("name_normalized") or mention.get("name_raw") or "")
@@ -913,10 +967,13 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
                 norm_name = c.name_ar_normalized or normalize_arabic(c.name_ar or "")
                 canonical_id = _make_canonical_id(norm_name)
 
-                # Update death-year index for temporal chain context.
+                # Update death-year + location indexes for chain context.
                 hadith_id = str(mention.get("hadith_id", ""))
                 position = int(mention.get("position_in_chain") or 0)
                 death_year_index[f"{hadith_id}:{position}"] = c.death_year_ah
+                cand_location = c.death_location or c.birth_location
+                if cand_location:
+                    location_index[f"{hadith_id}:{position}"] = cand_location
 
                 _upsert_canonical(
                     canonical_map,
