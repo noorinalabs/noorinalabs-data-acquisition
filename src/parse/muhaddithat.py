@@ -19,6 +19,7 @@ from src.parse.base import (
     safe_str,
     write_parquet,
 )
+from src.parse.narrator_dates import to_field_dict
 from src.parse.schemas import (
     EDGE_RELATION_STUDIED_UNDER,
     NARRATOR_BIO_SCHEMA,
@@ -133,8 +134,10 @@ def _parse_narrator_bios(narrators_path: Path) -> tuple[pa.Table, dict[str, str]
                 "kunya": None,
                 "nisba": None,
                 "laqab": None,
-                "birth_year_ah": None,
-                "death_year_ah": None,
+                # No life-dates in this source — emit null bounds with a concrete
+                # "unknown" precision (never a null precision string), da#164.
+                **to_field_dict("birth", None),
+                **to_field_dict("death", None),
                 "birth_location": None,
                 "death_location": None,
                 "generation": None,

@@ -119,6 +119,12 @@ class TestParseProfile:
         assert row["name_ar_normalized"]  # normalized, non-empty
         assert row["trustworthiness"] == "matruk"
         assert row["death_year_ah"] == 168
+        # da#164: a bare year is EXACT, bounds collapse to the point; birth silent.
+        assert row["death_year_ah_earliest"] == 168
+        assert row["death_year_ah_latest"] == 168
+        assert row["death_date_precision"] == "exact"
+        assert row["birth_year_ah"] is None
+        assert row["birth_date_precision"] == "unknown"  # concrete, never null
         assert row["birth_location"] == "البصرة"
         assert row["nisba"] == "الذهلي"
         assert row["laqab"] is None  # dash placeholder
@@ -126,6 +132,33 @@ class TestParseProfile:
 
     def test_profile_without_name_is_dropped(self) -> None:
         assert _parse_profile("1", {"id": 1, "full_name": "-", "grade_en": "weak"}) is None
+
+    def test_death_notation_forms_populate_bounds_and_precision(self) -> None:
+        # The four notation shapes the Itqan ``death`` field actually carries
+        # (verified against the fixture): range, open-after, alternatives, prose.
+        base = {"id": 1, "full_name": "فلان الفلاني", "grade_en": "reliable"}
+
+        rng = _parse_profile("1", {**base, "death": "بين 161 هـ إلى 170 هـ"})
+        assert rng is not None
+        assert (rng["death_year_ah_earliest"], rng["death_year_ah_latest"]) == (161, 170)
+        assert rng["death_date_precision"] == "range"
+
+        after = _parse_profile("1", {**base, "death": "بعد 130 هـ"})
+        assert after is not None
+        assert after["death_year_ah_earliest"] == 130
+        assert after["death_year_ah_latest"] is None
+        assert after["death_date_precision"] == "after"
+
+        alt = _parse_profile("1", {**base, "death": "230 هـ ، أو 232هـ"})
+        assert alt is not None
+        assert (alt["death_year_ah_earliest"], alt["death_year_ah_latest"]) == (230, 232)
+        assert alt["death_date_precision"] == "range"
+
+        prose = _parse_profile("1", {**base, "death": "في خلافة عبد الملك بن مروان"})
+        assert prose is not None
+        assert prose["death_year_ah"] is None
+        assert prose["death_year_ah_earliest"] is None
+        assert prose["death_date_precision"] == "unknown"  # concrete, never null
 
 
 class TestRunOverFixture:

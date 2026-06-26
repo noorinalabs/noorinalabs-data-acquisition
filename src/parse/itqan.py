@@ -34,12 +34,12 @@ onto the matching ``nar:`` record without re-reading the source.
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import pyarrow as pa
 
 from src.parse.base import safe_str, write_parquet
+from src.parse.narrator_dates import extract_narrator_dates, parse_year_notation, to_field_dict
 from src.parse.schemas import (
     EDGE_RELATION_STUDIED_UNDER,
     NARRATOR_ALIAS_SCHEMA,
@@ -87,9 +87,6 @@ _TABAQAT_GENERATION: list[tuple[str, str]] = [
     ("الثانية عشرة", "later"),
 ]
 
-# A Hijri year inside a free-text death string ("168 هـ", "بين 161 هـ إلى 170 هـ").
-_YEAR_RE = re.compile(r"\d+")
-
 
 def _clean(value: object) -> str | None:
     """Itqan uses ``"-"`` as a placeholder for missing fields; treat it as null."""
@@ -100,24 +97,19 @@ def _clean(value: object) -> str | None:
 
 
 def _extract_death_year(value: object) -> int | None:
-    """Best-effort Hijri death year from a free-text death field.
+    """Best-effort Hijri death *point* year from a free-text death field.
 
-    The field is prose — exact years, ranges ("بين 161 هـ إلى 170 هـ") and
-    approximations ("180 هـ تقريبا"). We take the FIRST year mentioned as an
-    approximate anchor; ranges/approximations are inherently lossy, so this is
-    a hint for timelines, not an authoritative date.
+    The field is prose — exact years, ranges ("بين 161 هـ إلى 170 هـ"), open
+    bounds ("بعد 130 هـ") and approximations ("180 هـ تقريبا"). This returns the
+    point estimate (the first attested year) that backs the ``death_year_ah``
+    column; the full earliest/latest + precision bounds parsed from the same text
+    are emitted alongside it by :func:`_parse_profile` (da#164). Delegates to
+    :func:`src.parse.narrator_dates.parse_year_notation` so the point estimate and
+    the bounds are derived by one parser (no drift) and the absurd-year /
+    placeholder guards live in a single place.
     """
-    s = _clean(value)
-    if s is None:
-        return None
-    match = _YEAR_RE.search(s)
-    if not match:
-        return None
-    year = int(match.group())
-    # Guard against absurd values (no narrator died in year 0 or > ~1500 AH).
-    if 1 <= year <= 1500:
-        return year
-    return None
+    parsed = parse_year_notation(value)
+    return parsed.point if parsed is not None else None
 
 
 def _generation(profile: dict[str, object], grade: str | None) -> str | None:
@@ -145,6 +137,14 @@ def _parse_profile(raw_id: str, profile: dict[str, object]) -> dict[str, object 
     grade = _clean(profile.get("grade_en"))
     trustworthiness = _GRADE_TO_TRUST.get(grade) if grade else None
 
+    # Death-anchored date extraction (da#164). Itqan carries the ``wafāt`` as the
+    # free-text ``death`` field and no explicit birth, so only death is parsed;
+    # birth stays silent → all-null bounds with a concrete "unknown" precision (the
+    # ṭabaqa-derived birth fallback is da#166). ``to_field_dict`` returns the four
+    # ``{birth,death}_year_ah[_earliest|_latest]`` + ``_date_precision`` columns,
+    # always with a concrete precision string (never null).
+    dates = extract_narrator_dates(death_text=profile.get("death"))
+
     return {
         "bio_id": f"{SOURCE}:{profile_id}",
         "source": SOURCE,
@@ -155,8 +155,8 @@ def _parse_profile(raw_id: str, profile: dict[str, object]) -> dict[str, object 
         "kunya": _clean(profile.get("kunya")),
         "nisba": _clean(profile.get("nasab")),
         "laqab": _clean(profile.get("laqab")),
-        "birth_year_ah": None,  # not present in the source
-        "death_year_ah": _extract_death_year(profile.get("death")),
+        **to_field_dict("birth", dates.birth),  # birth_year_ah(+bounds+precision)
+        **to_field_dict("death", dates.death),  # death_year_ah(+bounds+precision)
         "birth_location": _clean(profile.get("city")),  # primary city of activity
         "death_location": None,
         "generation": _generation(profile, grade),

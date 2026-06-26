@@ -56,6 +56,7 @@ from pathlib import Path
 import pyarrow as pa
 
 from src.config import get_settings
+from src.models.enums import DatePrecision
 from src.parse.base import (
     generate_source_id,
     read_csv_robust,
@@ -552,6 +553,16 @@ def _parse_narrators_bio(narrators_dir: Path) -> pa.Table | None:
                     "laqab": safe_str(row_dict.get(field_map.get("laqab", ""))),
                     "birth_year_ah": safe_int(row_dict.get(field_map.get("birth_year_ah", ""))),
                     "death_year_ah": safe_int(row_dict.get(field_map.get("death_year_ah", ""))),
+                    # Sanadset carries only a scalar point year (no span/openness
+                    # notation), so the da#164 bound columns stay null with a concrete
+                    # "unknown" precision (never null). Promoting these point years to
+                    # EXACT bounds is reconcile/fallback territory (da#165/#166).
+                    "birth_year_ah_earliest": None,
+                    "birth_year_ah_latest": None,
+                    "birth_date_precision": DatePrecision.UNKNOWN.value,
+                    "death_year_ah_earliest": None,
+                    "death_year_ah_latest": None,
+                    "death_date_precision": DatePrecision.UNKNOWN.value,
                     "birth_location": safe_str(row_dict.get(field_map.get("birth_location", ""))),
                     "death_location": safe_str(row_dict.get(field_map.get("death_location", ""))),
                     "generation": safe_str(row_dict.get(field_map.get("generation", ""))),

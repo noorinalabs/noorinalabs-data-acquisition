@@ -125,6 +125,13 @@ class TestSampleData:
             "laqab": [None],
             "birth_year_ah": [None],
             "death_year_ah": [59],
+            # da#164 date-bound + precision columns (death attested exact here).
+            "birth_year_ah_earliest": [None],
+            "birth_year_ah_latest": [None],
+            "birth_date_precision": ["unknown"],
+            "death_year_ah_earliest": [59],
+            "death_year_ah_latest": [59],
+            "death_date_precision": ["exact"],
             "birth_location": [None],
             "death_location": ["Medina"],
             "generation": ["Sahabi"],
