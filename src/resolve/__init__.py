@@ -246,13 +246,22 @@ def run_all(raw_dir: Path, staging_dir: Path, output_dir: Path) -> dict[str, lis
     """
     logger.info("resolve_pipeline_start")
 
-    from src.resolve import bio_promote, dedup, disambiguate, fuzzy_cluster, ner, parallels
+    from src.resolve import (
+        bio_promote,
+        date_reconcile,
+        dedup,
+        disambiguate,
+        fuzzy_cluster,
+        ner,
+        parallels,
+    )
 
     results: dict[str, list[Path]] = {
         "ner": [],
         "disambiguate": [],
         "bio_promote": [],
         "cluster": [],
+        "reconcile": [],
         "dedup": [],
         "parallels": [],
     }
@@ -345,6 +354,27 @@ def run_all(raw_dir: Path, staging_dir: Path, output_dir: Path) -> dict[str, lis
         )
     except Exception:  # noqa: BLE001
         logger.error("resolve_step_failed", step="cluster", traceback=traceback.format_exc())
+
+    # Step 3.6: Multi-source date reconciliation (da#165). After bio_promote and
+    # cluster have built the final canonical set, fold each narrator's per-source
+    # parsed life-dates (da#164) into one canonical birth/death envelope + a
+    # concrete precision, written onto the canonical date columns. Runs AFTER
+    # cluster so it keys on final canonical ids and its always-concrete-precision
+    # invariant holds on the emitted table; a no-op if no canonical table exists.
+    try:
+        logger.info("resolve_step", step="reconcile_dates", status="running")
+        reconciled = date_reconcile.reconcile_canonical_dates(staging_dir, output_dir)
+        results["reconcile"] = [reconciled] if reconciled is not None else []
+        logger.info(
+            "resolve_step",
+            step="reconcile_dates",
+            status="complete",
+            files=len(results["reconcile"]),
+        )
+    except Exception:  # noqa: BLE001
+        logger.error(
+            "resolve_step_failed", step="reconcile_dates", traceback=traceback.format_exc()
+        )
 
     # Step 4: Dedup (semantic; degrades to an empty table without the embedding
     # model). Runs independently of NER/disambiguation. Capture its output before
