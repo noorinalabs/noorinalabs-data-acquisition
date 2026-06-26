@@ -60,6 +60,9 @@ _NON_PARSER_MODULES = frozenset(
         # da#230: curated sourced name_ar/expected_count fill applied by parsers —
         # a metadata table, not a per-source parser, emits no parquet.
         "collection_metadata",
+        # da#229: shared in-book-ordinal derivation helper — mutates a parser's
+        # records in place, emits no schema/parquet of its own.
+        "in_book_ordinal",
     }
 )
 
