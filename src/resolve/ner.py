@@ -20,7 +20,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.parse.base import safe_str, write_parquet
-from src.parse.narrator_extraction import extract_narrator_mentions
+from src.parse.narrator_extraction import IsnadSegmentationError, extract_narrator_mentions
 from src.resolve.schemas import NARRATOR_MENTIONS_RESOLVED_SCHEMA
 from src.utils.arabic import is_arabic, normalize_arabic
 from src.utils.logging import get_logger
@@ -100,6 +100,7 @@ def _extract_from_hadiths(
 
     rows: list[dict[str, str | int | None]] = []
     null_isnad_count = 0
+    unsegmentable_count = 0
     total_hadiths = 0
 
     for hf in hadith_files:
@@ -120,7 +121,24 @@ def _extract_from_hadiths(
                 null_isnad_count += 1
                 continue
 
-            spans = extract_narrator_mentions(isnad_text, language)
+            # The segmenter fails LOUD on an isnad it cannot split into narrators
+            # (da#158) — e.g. a row whose isnad field is actually matn, or an
+            # isnad+matn blob (da#244: thaqalayn hadith 5762). That is a per-row
+            # data defect, not a pipeline-fatal one: skip-and-count this hadith so
+            # one bad row does not abort the entire NER pass (which would cascade
+            # to skip disambiguate and strand the whole resolve). The fail-loud
+            # guard is by design; its consumer must tolerate per-row rejection.
+            try:
+                spans = extract_narrator_mentions(isnad_text, language)
+            except IsnadSegmentationError:
+                unsegmentable_count += 1
+                logger.warning(
+                    "hadith_isnad_unsegmentable",
+                    corpus=corpus,
+                    hadith_id=hadith_id,
+                    isnad_preview=isnad_text[:80],
+                )
+                continue
             for span in spans:
                 name_raw = span.name
                 if language == "ar":
@@ -149,6 +167,7 @@ def _extract_from_hadiths(
         language=language,
         total_hadiths=total_hadiths,
         null_isnad_pct=round(null_pct, 1),
+        unsegmentable_skipped=unsegmentable_count,
         mentions_extracted=len(rows),
         mentions_per_hadith=round(len(rows) / max(total_hadiths, 1), 2),
     )
