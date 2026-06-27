@@ -9,7 +9,7 @@ from src.parse.narrator_extraction import (
     NarratorSpan,
     extract_narrator_mentions,
 )
-from src.utils.arabic import contains_transmission_marker
+from src.utils.arabic import contains_transmission_marker, normalize_arabic
 
 
 class TestNarratorSpanDataclass:
@@ -244,3 +244,50 @@ class TestDa154NameBoundary:
         # Multi-token name with a laqab (al-Ansari) stays a single span.
         spans = extract_narrator_mentions("حدثنا يحيى بن سعيد الأنصاري", "ar")
         assert spans[0].name == "يحيى بن سعيد الانصاري"
+
+
+class TestDa244TrailingTransmissionMarker:
+    """da#244: a transmission marker (قال/…) the phrase splitter fails to consume
+    can survive into the *trailing* position of a name span. Such a residual
+    trailing marker must be STRIPPED so the underlying name resolves — not aborted
+    by the fail-loud guard, which would drop the whole chain. A marker in the
+    *middle* of a span is a genuinely-unsegmented blob and must still fail loud.
+
+    The asymmetry is real (arabic.py: the guard's normalizer-based detector
+    catches orthographic variants the hand-built phrase patterns can miss). We
+    reproduce it deterministically by simulating the splitter under-detecting,
+    matching the existing TestDa158FailLoud monkeypatch style.
+    """
+
+    # The exact span that aborted the main#723 prod re-validation NER pass.
+    _NAME = "ابو القاسم عبد الله بن احمد بن عامر الطاءي"
+
+    def test_trailing_marker_stripped_not_raised(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A trailing قال the splitter missed is stripped; the name resolves."""
+        # Splitter detects only the leading حدثنا, leaving the trailing قال in the
+        # tail segment — the production condition that tripped the guard.
+        monkeypatch.setattr(
+            "src.parse.narrator_extraction.extract_transmission_phrases",
+            lambda _text: [(0, 5, "haddathana")],
+        )
+        spans = extract_narrator_mentions(f"حدثنا {self._NAME} قال", "ar")
+        assert len(spans) == 1
+        assert spans[0].name == self._NAME
+        # No marker survives into the resolved name (the guard's invariant).
+        assert not contains_transmission_marker(spans[0].name)
+
+    def test_midspan_marker_still_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A marker BETWEEN two names is an unsegmented blob — still fail loud."""
+        monkeypatch.setattr(
+            "src.parse.narrator_extraction.extract_transmission_phrases",
+            lambda _text: [(0, 5, "haddathana")],
+        )
+        with pytest.raises(IsnadSegmentationError):
+            extract_narrator_mentions("حدثنا فلان قال علان", "ar")
+
+    def test_real_name_with_marker_substring_unaffected(self) -> None:
+        """Strip is whole-token + boundary-anchored: مقالة / معن keep their قال/عن
+        (the marker substring is inside the token, not a standalone trailing one)."""
+        for name in ["مقالة", "معن", "ابو القاسم الطاءي"]:
+            spans = extract_narrator_mentions(name, "ar")
+            assert [s.name for s in spans] == [normalize_arabic(name)]

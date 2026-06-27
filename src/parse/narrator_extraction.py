@@ -43,7 +43,10 @@ _TRAILING_PUNCT_RE: re.Pattern[str] = re.compile(r"[.,;:!?()،؛\s]+$")
 # Connective particles that trail a narrator name into the next clause and should
 # not be part of the name span (da#154 name-boundary precision). Compared against
 # the *normalized* trailing token, so they cover diacritic/orthographic variants
-# (أَنَّهُ → انه). ``قال`` is already consumed as a transmission phrase upstream.
+# (أَنَّهُ → انه). A trailing transmission *marker* (قال/عن/حدثنا/…) is handled
+# separately in ``_clean_ar_name`` via ``contains_transmission_marker`` — it is
+# NOT always consumed as a phrase upstream (da#244: a trailing ``قال`` the phrase
+# splitter missed survived into a tail span and tripped the fail-loud guard).
 _AR_TRAILING_CONNECTIVES: frozenset[str] = frozenset({"انه", "انها", "انهم", "انك", "اني", "يقول"})
 
 
@@ -74,17 +77,30 @@ def _clean_name(raw: str) -> str | None:
 
 
 def _clean_ar_name(normalized: str) -> str | None:
-    """Clean a normalized Arabic name span: punctuation + trailing connectives.
+    """Clean a normalized Arabic name span: punctuation + trailing connectives/markers.
 
-    Strips trailing punctuation, then drops trailing connective particles
-    (انه/يقول/…) that bleed the name into the following clause, re-stripping any
-    punctuation the connective removal re-exposes (da#154).
+    Strips trailing punctuation, then drops trailing tokens that bleed the name
+    into the following clause:
+
+    - connective particles (انه/يقول/…) that ride the name into the next clause
+      (da#154), and
+    - a residual standalone transmission marker (قال/عن/حدثنا/…) that the phrase
+      splitter failed to consume upstream (da#244).
+
+    Stripping is **trailing-only**. A marker in the *middle* of a span signals a
+    genuinely-unsegmented multi-narrator blob and must still trip the fail-loud
+    guard in :func:`_extract_arabic`, so it is deliberately left in place here.
+    Markers are matched via :func:`contains_transmission_marker` on the whole
+    trailing token, which is word-boundary anchored — so a ``قال`` buried inside a
+    real name (``مقالة``, ``معن``) is never stripped.
     """
     cleaned = _clean_name(normalized)
     if cleaned is None:
         return None
     tokens = cleaned.split()
-    while tokens and tokens[-1] in _AR_TRAILING_CONNECTIVES:
+    while tokens and (
+        tokens[-1] in _AR_TRAILING_CONNECTIVES or contains_transmission_marker(tokens[-1])
+    ):
         tokens.pop()
     if not tokens:
         return None
