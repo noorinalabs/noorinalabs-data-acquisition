@@ -31,6 +31,10 @@ __all__ = ["run", "run_dedup"]
 _SUNNI_SOURCES: frozenset[str] = frozenset({"lk", "sanadset", "sunnah", "fawaz", "open_hadith"})
 _SHIA_SOURCES: frozenset[str] = frozenset({"thaqalayn"})
 
+# Sentence-transformer used for hadith-matn embeddings. Pinned name so the resume
+# meta can refuse to reuse embeddings produced by a different model.
+_MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
+
 
 def _classify_pair(score: float) -> VariantType:
     """Classify a similarity score into a variant type tier."""
@@ -86,6 +90,90 @@ def _load_hadith_texts(
     return ids, texts, corpora
 
 
+def _encode_with_resume(
+    texts: list[str],
+    hadith_ids: list[str],
+    staging_dir: Path,
+    model: object,
+    batch_size: int,
+) -> npt.NDArray[np.float32]:
+    """Encode hadith matn into a disk-backed, crash-resumable embedding memmap.
+
+    Writes embeddings straight into a memory-mapped ``hadith_embeddings.npy`` one
+    chunk at a time, so peak RAM is ~one chunk rather than the whole
+    ``n × dim`` matrix plus the ``np.vstack`` copy the old path held (da#245
+    memory-bounding). A per-chunk progress marker plus a sidecar meta
+    (count / dim / model / id-set hash) let a re-run skip already-encoded chunks
+    instead of redoing the multi-hour encode after any later-stage crash. Each
+    chunk logs throughput, ETA, and an RSS watermark so an approaching OOM shows
+    up in the logs rather than as a silent kill.
+    """
+    import hashlib
+    import json as _json
+    import resource
+
+    import numpy as np
+
+    n = len(texts)
+    dim = int(model.get_sentence_embedding_dimension())  # type: ignore[attr-defined]
+    emb_path = staging_dir / "hadith_embeddings.npy"
+    prog_path = staging_dir / "hadith_embeddings.progress"
+    meta_path = staging_dir / "hadith_embeddings.meta.json"
+
+    ids_hash = hashlib.sha256("\n".join(hadith_ids).encode("utf-8")).hexdigest()
+    meta = {"count": n, "dim": dim, "model": _MODEL_NAME, "ids_hash": ids_hash}
+
+    # Reuse an in-progress memmap only when the corpus + model are byte-identical.
+    start = 0
+    emb = None
+    if emb_path.exists() and meta_path.exists() and prog_path.exists():
+        try:
+            same = _json.loads(meta_path.read_text()) == meta
+        except (ValueError, OSError):
+            same = False
+        if same:
+            candidate = np.lib.format.open_memmap(emb_path, mode="r+")
+            if tuple(candidate.shape) == (n, dim):
+                emb = candidate
+                start = int(prog_path.read_text().strip() or "0")
+    if emb is None:
+        emb = np.lib.format.open_memmap(emb_path, mode="w+", dtype=np.float32, shape=(n, dim))
+        meta_path.write_text(_json.dumps(meta))
+        prog_path.write_text("0")
+        start = 0
+
+    if start >= n:
+        logger.info("dedup_encoding_resume_complete", count=n)
+        return emb
+
+    logger.info("dedup_encoding", count=n, batch_size=batch_size, resume_from=start)
+    t0 = time.monotonic()
+    for s in range(start, n, batch_size):
+        e = min(s + batch_size, n)
+        emb[s:e] = model.encode(  # type: ignore[attr-defined]
+            texts[s:e],
+            batch_size=batch_size,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+        )
+        prog_path.write_text(str(e))
+        elapsed = time.monotonic() - t0
+        rate = (e - start) / elapsed if elapsed > 0 else 0.0
+        logger.info(
+            "dedup_encoding_progress",
+            processed=e,
+            total=n,
+            pct=round(e / n * 100, 1),
+            rate_per_s=round(rate, 1),
+            eta_s=round((n - e) / rate) if rate > 0 else None,
+            rss_mb=round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024),
+        )
+    emb.flush()
+    logger.info("dedup_embeddings_saved", shape=[n, dim], dir=str(staging_dir))
+    return emb
+
+
 def run_dedup(
     staging_dir: Path,
     *,
@@ -129,7 +217,7 @@ def run_dedup(
     # 2. Generate embeddings
     # ------------------------------------------------------------------
     try:
-        import numpy as np
+        import numpy  # noqa: F401  (availability guard — used by _encode_with_resume)
         from sentence_transformers import SentenceTransformer
     except ImportError:
         logger.error(
@@ -138,40 +226,19 @@ def run_dedup(
         )
         return _write_empty_output(staging_dir)
 
-    logger.info("dedup_loading_model", model="paraphrase-multilingual-MiniLM-L12-v2")
-    model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+    logger.info("dedup_loading_model", model=_MODEL_NAME)
+    model = SentenceTransformer(_MODEL_NAME)
 
-    logger.info("dedup_encoding", count=len(texts), batch_size=batch_size)
-
-    # Encode in chunks to log progress during embedding generation (#81)
-    all_embeddings: list[npt.NDArray[np.float32]] = []
-    for start in range(0, len(texts), batch_size):
-        end = min(start + batch_size, len(texts))
-        chunk: npt.NDArray[np.float32] = model.encode(
-            texts[start:end],
-            batch_size=batch_size,
-            show_progress_bar=False,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-        )
-        all_embeddings.append(chunk)
-        logger.info("dedup_encoding_progress", processed=end, total=len(texts))
-
-    embeddings: npt.NDArray[np.float32] = np.vstack(all_embeddings)
-    # Ensure float32 for FAISS
-    embeddings = np.ascontiguousarray(embeddings, dtype=np.float32)
-
-    # ------------------------------------------------------------------
-    # 3. Persist embeddings & ID mapping
-    # ------------------------------------------------------------------
-    np.save(staging_dir / "hadith_embeddings.npy", embeddings)
+    # Persist the id mapping up front so a resumed encode can validate the corpus.
     with open(staging_dir / "hadith_id_mapping.json", "w") as f:
         json.dump(hadith_ids, f)
-    logger.info(
-        "dedup_embeddings_saved",
-        shape=list(embeddings.shape),
-        dir=str(staging_dir),
-    )
+
+    # ------------------------------------------------------------------
+    # 3. Generate (or resume) embeddings — disk-backed memmap, crash-resumable.
+    # ------------------------------------------------------------------
+    # `embeddings` is the memmap itself: already float32 and C-contiguous, so it
+    # feeds FAISS directly without an extra full-size in-RAM copy.
+    embeddings = _encode_with_resume(texts, hadith_ids, staging_dir, model, batch_size)
 
     # ------------------------------------------------------------------
     # 4. Build FAISS index & search
