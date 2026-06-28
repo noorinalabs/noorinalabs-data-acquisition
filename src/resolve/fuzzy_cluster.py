@@ -62,6 +62,9 @@ Identity & ordering invariants
 
 from __future__ import annotations
 
+import itertools
+import time
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -103,6 +106,13 @@ _DEATH_YEAR_TOLERANCE = 2
 # subset never clusters, while a genuine variant (which shares the nasab/nisba
 # stem) still does.
 _MIN_SHARED_TOKENS = 2
+
+# Emit a `cluster_progress` log line every this many candidate pairs scored, so a
+# long clustering pass over a large canonical set is not silent for hours (the
+# pre-optimization pass ran >5h with zero progress output and an unbounded `seen`
+# set that grew until OOM — see the composite-key blocking note in
+# :func:`cluster_records`).
+_CLUSTER_PROGRESS_INTERVAL = 500_000
 
 # Name tokens that carry no disambiguating signal (Arabic genealogical
 # connectors / honorific particles). Excluded as *blocking* keys so a block does
@@ -327,28 +337,89 @@ def cluster_records(
     guard-conflicting pair into one cluster. Returns one index list per cluster
     (singletons included), so the i-th record's cluster is recoverable. Pure and
     deterministic — the IO wrapper and the quality test both drive it.
+
+    Blocking on **unordered token pairs** (not single tokens)
+    --------------------------------------------------------
+    ``_can_merge`` already requires :data:`_MIN_SHARED_TOKENS` (=2) shared
+    significant tokens, so any pair that can possibly merge shares ≥2 tokens —
+    i.e. it co-occurs in the posting list of at least one *2-token* composite
+    key. We therefore block on ``(tok_a, tok_b)`` pairs rather than single
+    tokens. This is **behaviour-identical** to single-token blocking + the
+    ≥2-shared-token guard (the set of pairs that reach ``_can_merge`` and pass it
+    is unchanged, and union-find components are invariant to edge order), but it
+    eliminates the pathology that made the old pass blow up: a single
+    ultra-frequent name token (``محمد``/``احمد``…) put tens of thousands of
+    records in one block, so the inner ``O(|block|²)`` enumeration scored
+    billions of pairs that the ≥2-token guard then rejected — pegging CPU and
+    growing the ``seen`` set until it exhausted memory. Requiring two *specific*
+    shared tokens makes the blocks small, so both time and peak memory drop by
+    orders of magnitude on a real (~300k-record) canonical set.
     """
     n = len(records)
     uf = _UnionFind(n)
 
-    # Inverted index: significant token -> record indices carrying it (blocking).
-    token_index: dict[str, list[int]] = {}
+    # Inverted index: unordered significant-token PAIR -> record indices whose
+    # name/alias tokens include both members of the pair (composite blocking).
+    # Each record contributes C(t, 2) keys for its t significant tokens (t is
+    # small — a name has a handful of tokens), so the index stays compact.
+    pair_index: dict[tuple[str, str], list[int]] = defaultdict(list)
     for i, rec in enumerate(records):
-        for tok in _significant_tokens(_match_keys(rec)):
-            token_index.setdefault(tok, []).append(i)
+        toks = sorted(_significant_tokens(_match_keys(rec)))
+        for key in itertools.combinations(toks, 2):
+            pair_index[key].append(i)
 
-    # Candidate pairs = records sharing ≥1 significant token. Dedup pairs so each
-    # is scored once even when two records share several tokens.
+    candidate_pairs_est = sum(len(m) * (len(m) - 1) // 2 for m in pair_index.values())
+    max_block = max((len(m) for m in pair_index.values()), default=0)
+    logger.info(
+        "cluster_blocking_built",
+        records=n,
+        blocks=len(pair_index),
+        candidate_pairs_est=candidate_pairs_est,
+        max_block=max_block,
+    )
+
+    # Within each composite block every pair already shares the two key tokens,
+    # so it clears the ≥2-shared-token guard by construction. Dedup pairs so a
+    # pair sharing >2 tokens (which lands in several composite blocks) is scored
+    # once; with composite keys `seen` is bounded by the *viable* pair count, not
+    # the old all-pairs-sharing-any-token explosion.
     seen: set[tuple[int, int]] = set()
-    for members in token_index.values():
+    scored = 0
+    merged = 0
+    t0 = time.monotonic()
+    for members in pair_index.values():
         for pos, i in enumerate(members):
             for j in members[pos + 1 :]:
                 pair = (i, j) if i < j else (j, i)
                 if pair in seen:
                     continue
                 seen.add(pair)
-                if _can_merge(records[i], records[j], threshold=threshold):
-                    uf.union(i, j)
+                scored += 1
+                if _can_merge(records[pair[0]], records[pair[1]], threshold=threshold):
+                    uf.union(pair[0], pair[1])
+                    merged += 1
+                if scored % _CLUSTER_PROGRESS_INTERVAL == 0:
+                    logger.info(
+                        "cluster_progress",
+                        scored=scored,
+                        candidate_pairs_est=candidate_pairs_est,
+                        pct=(
+                            round(scored / candidate_pairs_est * 100, 1)
+                            if candidate_pairs_est
+                            else 100.0
+                        ),
+                        merged=merged,
+                        unique_pairs=len(seen),
+                        elapsed_seconds=round(time.monotonic() - t0, 1),
+                    )
+
+    logger.info(
+        "cluster_pairs_scored",
+        scored=scored,
+        merged=merged,
+        unique_pairs=len(seen),
+        elapsed_seconds=round(time.monotonic() - t0, 1),
+    )
 
     # Re-partition each transitive group into guard-safe cliques (closes the
     # bridge-bypass: A–B ✓, B–C ✓, A–C conflict must NOT yield one {A,B,C}).
