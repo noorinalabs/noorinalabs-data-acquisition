@@ -20,6 +20,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.parse.base import safe_str, write_parquet
+from src.parse.name_quality import clean_narrator_name, strip_markup
 from src.parse.narrator_extraction import IsnadSegmentationError, extract_narrator_mentions
 from src.resolve.schemas import NARRATOR_MENTIONS_RESOLVED_SCHEMA
 from src.utils.arabic import is_arabic, normalize_arabic
@@ -58,6 +59,7 @@ def _load_phase1_mentions(
 
     table = pq.read_table(path)
     rows: list[dict[str, str | int | None]] = []
+    dropped = 0
 
     for i in range(table.num_rows):
         name_ar = safe_str(table.column("name_ar")[i].as_py())
@@ -67,6 +69,16 @@ def _load_phase1_mentions(
         # Use Arabic name if available, else English.
         name_raw = name_ar or name_en
         name_normalized = name_ar_norm or (normalize_arabic(name_ar) if name_ar else name_en)
+
+        # Name-quality filter (da#247): strip markup / honorifics and drop
+        # non-name spans (mubham descriptors, mis-parsed text). sanadset's coarse
+        # <NAR> firehose is the main pollution source here.
+        cleaned = clean_narrator_name(name_normalized)
+        if cleaned is None:
+            dropped += 1
+            continue
+        name_normalized = cleaned
+        name_raw = strip_markup(name_raw) or name_raw
 
         rows.append(
             {
@@ -82,7 +94,7 @@ def _load_phase1_mentions(
             }
         )
 
-    logger.info("phase1_mentions_loaded", corpus=corpus, mentions=len(rows))
+    logger.info("phase1_mentions_loaded", corpus=corpus, mentions=len(rows), dropped=dropped)
     return rows
 
 
@@ -101,6 +113,7 @@ def _extract_from_hadiths(
     rows: list[dict[str, str | int | None]] = []
     null_isnad_count = 0
     unsegmentable_count = 0
+    dropped_names = 0
     total_hadiths = 0
 
     for hf in hadith_files:
@@ -146,6 +159,16 @@ def _extract_from_hadiths(
                 else:
                     name_normalized = name_raw.strip()
 
+                # Name-quality filter (da#247): the token-count cap here is the
+                # backstop for the thaqalayn parser dumping whole hadith bodies
+                # into the name field; markup / mubham guards apply too.
+                cleaned = clean_narrator_name(name_normalized)
+                if cleaned is None:
+                    dropped_names += 1
+                    continue
+                name_normalized = cleaned
+                name_raw = strip_markup(name_raw) or name_raw
+
                 rows.append(
                     {
                         "mention_id": str(uuid.uuid4()),
@@ -168,6 +191,7 @@ def _extract_from_hadiths(
         total_hadiths=total_hadiths,
         null_isnad_pct=round(null_pct, 1),
         unsegmentable_skipped=unsegmentable_count,
+        dropped_names=dropped_names,
         mentions_extracted=len(rows),
         mentions_per_hadith=round(len(rows) / max(total_hadiths, 1), 2),
     )
