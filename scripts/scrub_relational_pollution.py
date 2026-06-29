@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""One-off scrub: drop relational-pronoun (mubham) narrators from curated artifacts.
+"""One-off scrub: drop name_quality-rejected narrators from curated artifacts.
 
-da#247 residual. The durable fix is the ``name_quality.py`` filter, which drops
-these spans at the NER stage on the *next* full resolve run. This script is the
-fast operational equivalent for stage rehearsal: it applies the SAME filter
-(``clean_narrator_name``) to the already-built curated narrator artifacts so we
-can wipe+reload a clean stage graph without re-running disambiguate/enrichment.
+da#247. The durable fix is the ``name_quality.py`` filter (relational-pronoun
+mubham refs AND English non-name prose fragments), which drops these spans at the
+NER stage on the *next* full resolve run. This script is the fast operational
+equivalent for stage rehearsal: it applies the SAME filter (``clean_narrator_name``,
+whatever classes it currently rejects) to the already-built curated narrator
+artifacts so we can wipe+reload a clean stage graph without re-running
+disambiguate/enrichment.
 
 Why this is provably equivalent to re-running NER-with-filter (not a heuristic):
 relational-pronoun names (``ابيه`` "his father", ``جده`` "his grandfather", …)

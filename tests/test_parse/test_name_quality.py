@@ -99,6 +99,42 @@ class TestCleanNarratorName:
     def test_relational_token_in_real_name_preserved(self, real_kunya: str) -> None:
         assert clean_narrator_name(real_kunya) == real_kunya
 
+    # --- English non-name fragments (translated isnad prose) rejected (da#247) ---
+    @pytest.mark.parametrize(
+        "fragment",
+        [
+            "It was",
+            "It was narrated",
+            "It has been narrated that",
+            "This hadith has been",
+            "The Prophet said",
+            "his father",
+            "He said",
+            "They narrated from",
+            "narrated by",
+        ],
+    )
+    def test_english_fragment_rejected(self, fragment: str) -> None:
+        assert clean_narrator_name(fragment) is None
+
+    # --- PRECISION: romanized real narrators survive, incl. al-/an- article forms
+    # and name-leaders abu/ibn/abd/umm that must NOT match the leader set ---
+    @pytest.mark.parametrize(
+        "romanized",
+        [
+            "Abu Huraira",
+            "Ibn Umar",
+            "Malik",
+            "Anas bin Malik",
+            "Al-Zuhri",
+            "An-Nawawi",
+            "Umm Salama",
+            "Abd Allah ibn Abbas",
+        ],
+    )
+    def test_romanized_name_preserved(self, romanized: str) -> None:
+        assert clean_narrator_name(romanized) == romanized
+
     # --- over-long span (thaqalayn whole-text) rejected ---
     def test_overlong_text_rejected(self) -> None:
         long_text = " ".join(["كلمه"] * 40)

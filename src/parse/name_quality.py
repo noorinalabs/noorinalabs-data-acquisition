@@ -15,6 +15,10 @@ Background (da#247): on the pre-fix resolve output 39.9% of canonical narrators
    Latin+Arabic. Stripped here (recovers ``"ابو عبيده"``), not dropped.
 2. thaqalayn parser dumping whole hadith bodies into the name field — hundreds of
    tokens of Arabic + English text. Caught by the token-count cap.
+2b. English-only sources putting translated isnad PROSE in the name field — a
+   "name" that is really a sentence fragment (``"It was narrated…"``, ``"The
+   Prophet said…"``, ``"his father"``). Caught by an English non-name leader-word
+   guard; romanized real names (``"Abu Huraira"``, ``"Al-Zuhri"``) are kept.
 3. mubham (unnamed) descriptors minted as named narrators — both *collective*
    phrases (``"رجل من اصحاب النبي"``, ``"جماعه من اصحاب"``) and bare *relational
    pronouns* (``"ابيه"`` "his father", ``"جده"`` "his grandfather"), plus bare
@@ -124,6 +128,81 @@ _MUBHAM_RELATIONAL = frozenset(
     }
 )
 
+# English non-name *leader* words. Several English-only sources (halimbahae,
+# sunnah translations) put translated isnad prose in the name field, so a "name"
+# is really a sentence fragment: "It was narrated…", "The Prophet said…", "his
+# father", "This hadith has been…". A span whose FIRST token (case-folded) is one
+# of these is such a fragment — on the #723 reload "It"-led spans alone were
+# 19,087 mentions. Precision: NO Arabic-name romanization starts with these, and
+# the genuine name-leaders are excluded — `abu`, `ibn`, `abd`, `umm`, `bint`,
+# `banu`, `dhu`, `al`/`an` (article-assimilation forms like "An-Nawawi"), and
+# every actual name token (Anas, Malik, Jabir, …). So real romanized narrators
+# are never dropped; only function/pronoun/verb-led prose is.
+_EN_NONNAME_LEADERS = frozenset(
+    {
+        "it",
+        "its",
+        "this",
+        "these",
+        "those",
+        "that",
+        "there",
+        "the",
+        "he",
+        "she",
+        "they",
+        "we",
+        "you",
+        "him",
+        "his",
+        "her",
+        "my",
+        "our",
+        "your",
+        "their",
+        "was",
+        "were",
+        "is",
+        "are",
+        "has",
+        "have",
+        "had",
+        "been",
+        "be",
+        "will",
+        "would",
+        "did",
+        "narrated",
+        "said",
+        "says",
+        "reported",
+        "related",
+        "told",
+        "mentioned",
+        "transmitted",
+        "then",
+        "when",
+        "while",
+        "from",
+        "to",
+        "by",
+        "of",
+        "for",
+        "with",
+        "and",
+        "but",
+        "as",
+        "at",
+        "upon",
+        "about",
+        "which",
+        "who",
+        "whom",
+        "whose",
+        "what",
+    }
+)
+
 # A narrator name longer than this many whitespace tokens is a phrase / sentence /
 # mis-parsed text body (thaqalayn dumps whole hadith bodies of 50–500+ tokens),
 # not a name. The cap is set high (30) on purpose: classical full nasab lineages
@@ -193,6 +272,13 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
     #    WHOLE name is exactly one such token, so multi-token kunya names
     #    ("ابي اسحاق" = Abū Isḥāq) survive untouched (precision guard).
     if len(tokens) == 1 and tokens[0] in _MUBHAM_RELATIONAL:
+        return None
+
+    # 7. English non-name fragment (translated isnad prose in the name field):
+    #    first token is a function/pronoun/verb leader ("It was…", "The Prophet…",
+    #    "his father"). Name-leaders (abu/ibn/abd/al/…) are excluded from the set,
+    #    so romanized narrators are never touched. Case-folded; a no-op on Arabic.
+    if tokens[0].lower() in _EN_NONNAME_LEADERS:
         return None
 
     return " ".join(tokens)
