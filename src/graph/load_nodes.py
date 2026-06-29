@@ -504,35 +504,50 @@ SET n.hadith_id           = row.hadith_id,
 def _load_chains(
     client: Neo4jClient,
     staging_dir: Path,
+    curated_dir: Path,
     *,
     strict: bool = True,
     skip_files: list[str] | None = None,
 ) -> LoadResult:
-    """Load Chain nodes from narrator_mentions resolved data.
+    """Load Chain nodes from the *resolved* narrator-mention master.
 
-    Chains are synthesized from narrator-mention parquet files: each unique
-    (hadith_id, chain_index=0) tuple produces a Chain node.  In Phase 3
-    wave-1 we create placeholder chains with metadata derived from the
-    mentions themselves; full chain enrichment happens in Phase 4.
+    Chains are synthesized from narrator-mention parquet: each unique
+    (hadith_id, chain_index=0) tuple produces a Chain node whose ``narrator_ids``
+    is the per-hadith mention sequence (ordered by ``position_in_chain``).
+
+    Reads ``narrator_mentions_resolved*.parquet`` from ``curated_dir`` — NOT the
+    raw ``narrator_mentions_*.parquet`` in ``staging_dir``. The canonical
+    ``canonical_narrator_id`` column is produced by the resolve stage and written
+    only to the curated master; the staging mentions have no such column, so
+    reading staging produced hollow chains (every ``narrator_ids == []``,
+    ``chain_length == 0``) — the #723 "chains empty" defect. ``staging_dir`` is
+    retained only so ``skip_files`` paths resolve consistently with the other
+    node loaders.
     """
-    files = _filter_parquet_files(
-        _parquet_files(staging_dir, "narrator_mentions_"), staging_dir, skip_files
-    )
+    files = [
+        fp
+        for fp in _parquet_files(curated_dir, "narrator_mentions_resolved")
+        if not _should_skip_file(fp, staging_dir, skip_files)
+    ]
     if not files:
         if strict:
-            msg = f"No narrator_mentions_*.parquet files in {staging_dir}"
+            msg = f"No narrator_mentions_resolved*.parquet files in {curated_dir}"
             raise FileNotFoundError(msg)
-        logger.warning("chain_files_missing", dir=str(staging_dir))
+        logger.warning("chain_files_missing", dir=str(curated_dir))
         return LoadResult("Chain", 0, 0, 0)
 
-    seen_hadiths: dict[str, list[dict[str, Any]]] = {}
+    # Accumulate only the (position, canonical_id) pairs we need per hadith —
+    # the resolved master is ~3.2M rows, so keeping whole row dicts would bloat
+    # memory needlessly (see the streaming work in load_edges for the same reason).
+    seen_hadiths: dict[str, list[tuple[int, str]]] = {}
     for fp in files:
-        rows = _read_parquet_rows(fp)
-        for row in rows:
+        for row in _read_parquet_rows(fp):
             hid = row.get("source_hadith_id") or row.get("hadith_id")
-            if not hid:
+            nid = row.get("canonical_narrator_id")
+            if not hid or not nid:
                 continue
-            seen_hadiths.setdefault(hid, []).append(row)
+            pos = row.get("position_in_chain") or 0
+            seen_hadiths.setdefault(hid, []).append((pos, nid))
 
     batch: list[dict[str, Any]] = []
     errors: list[str] = []
@@ -540,11 +555,7 @@ def _load_chains(
 
     for hid, mentions in seen_hadiths.items():
         chn_id = chain_node_id(hid, 0)
-        narrator_ids = []
-        for m in sorted(mentions, key=lambda r: r.get("position_in_chain", 0)):
-            nid = m.get("canonical_narrator_id")
-            if nid:
-                narrator_ids.append(nid)
+        narrator_ids = [nid for _pos, nid in sorted(mentions, key=lambda pair: pair[0])]
         batch.append(
             {
                 "id": chn_id,
@@ -831,7 +842,9 @@ def load_all_nodes(
     )
     results.append(_load_hadiths(client, staging_dir, strict=strict, skip_files=skip_files))
     results.append(_load_collections(client, staging_dir, strict=strict, skip_files=skip_files))
-    results.append(_load_chains(client, staging_dir, strict=strict, skip_files=skip_files))
+    results.append(
+        _load_chains(client, staging_dir, curated_dir, strict=strict, skip_files=skip_files)
+    )
     results.append(_load_gradings(client, staging_dir, strict=strict, skip_files=skip_files))
     results.append(_load_historical_events(client, curated_dir, strict=strict))
     results.append(_load_locations(client, curated_dir, strict=strict))

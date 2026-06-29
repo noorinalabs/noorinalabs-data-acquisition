@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from src.graph.load_nodes import LoadResult, load_all_nodes
+from src.parse.identity import chain_node_id
 from tests.test_graph.conftest import (
     MockNeo4jClient,
     write_collections,
@@ -15,6 +16,7 @@ from tests.test_graph.conftest import (
     write_historical_events_yaml,
     write_locations_yaml,
     write_narrator_mentions,
+    write_narrator_mentions_resolved,
     write_narrators_canonical,
 )
 
@@ -629,26 +631,29 @@ class TestLoadChains:
     def test_chains_from_mentions(
         self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
     ) -> None:
-        write_narrator_mentions(
-            staging_dir,
+        # Chains are built from the *resolved* mention master in curated/, which
+        # carries canonical_narrator_id — NOT the raw staging mentions (which
+        # lack it). Reading staging produced hollow chains: the #723 defect.
+        write_narrator_mentions_resolved(
+            curated_dir,
             [
                 {
                     "mention_id": "m1",
-                    "source_hadith_id": "h-1",
-                    "position_in_chain": 0,
-                    "name_ar": "n1",
+                    "hadith_id": "h-1",
+                    "position_in_chain": 1,
+                    "canonical_narrator_id": "nar:n2",
                 },
                 {
                     "mention_id": "m2",
-                    "source_hadith_id": "h-1",
-                    "position_in_chain": 1,
-                    "name_ar": "n2",
+                    "hadith_id": "h-1",
+                    "position_in_chain": 0,
+                    "canonical_narrator_id": "nar:n1",
                 },
                 {
                     "mention_id": "m3",
-                    "source_hadith_id": "h-2",
+                    "hadith_id": "h-2",
                     "position_in_chain": 0,
-                    "name_ar": "n3",
+                    "canonical_narrator_id": "nar:n3",
                 },
             ],
         )
@@ -656,6 +661,23 @@ class TestLoadChains:
         chain_result = results[3]
         assert chain_result.node_type == "Chain"
         assert chain_result.created + chain_result.merged == 2  # 2 distinct hadiths
+
+        # Regression guard for #723 "chains empty": the chains must be populated
+        # (non-hollow), with narrator_ids ordered by position_in_chain.
+        chain_batches = [
+            batch
+            for _query, batch in mock_client.calls
+            if isinstance(batch, list)
+            and batch
+            and "id" in batch[0]
+            and batch[0]["id"].startswith("chn:")
+        ]
+        assert chain_batches, "no Chain MERGE batch was issued"
+        by_id = {row["id"]: row for batch in chain_batches for row in batch}
+        h1 = by_id[chain_node_id("h-1", 0)]
+        assert h1["narrator_ids"] == ["nar:n1", "nar:n2"]  # ordered by position
+        assert h1["chain_length"] == 2
+        assert h1["is_complete"] is True
 
 
 class TestLoadGradings:

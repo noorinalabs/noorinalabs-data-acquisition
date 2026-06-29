@@ -63,8 +63,10 @@ Identity & ordering invariants
 from __future__ import annotations
 
 import itertools
+import os
 import time
 from collections import defaultdict
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -118,17 +120,40 @@ _MIN_SHARED_TOKENS = 2
 # justified *solely* by a common-name pair — the least reliable ones. Tunable
 # (and disable-able with ``None``) so it can be swept against the da#118
 # precision/recall harness; ``None`` restores the exact uncapped behaviour.
-_DEFAULT_MAX_BLOCK_SIZE = 1000
+#
+# Set to 250 (down from 1000) for the main#723 reload: cdist cost is O(K²) per
+# block, and on the real ~245k-canonical set the 250–1000-member blocks dominated
+# the candidate volume — ~550M pairs, ~36h even fully parallel across 14 cores.
+# Capping at 250 makes the pass tractable; the dropped merges are exactly the
+# lowest-reliability common-name-pair-only ones (cluster is itself a recall
+# *increment* on the exact-name pass, so this trades a little extra recall for a
+# runnable pass). Raising it back is a deliberate precision/recall + runtime call.
+_DEFAULT_MAX_BLOCK_SIZE = 250
 
-# Block-scoring strategy thresholds (by member count). Most composite blocks are
-# tiny (the bulk of candidate pairs live in a few thousand large blocks), so the
-# scorer is size-aware: a plain scalar loop for tiny blocks (no numpy/thread
-# setup cost), single-thread vectorized ``cdist`` for medium blocks, and the
-# multi-core ``cdist`` thread pool only for blocks large enough to amortize it.
-# Spawning the thread pool per tiny block was an order of magnitude slower than
-# the work itself.
+# Block-scoring strategy. Tiny blocks (≤ this many members) are scored by a plain
+# scalar Python loop — they have too few pairs to amortize building a numpy matrix
+# or dispatching a future. Every larger block is scored by a single-threaded C
+# ``cdist`` (``workers=1``) dispatched to ONE shared thread pool across all blocks
+# (see ``_block_merge_pairs`` / ``cluster_records``).
+#
+# This is the fix for the per-block thread-pool pathology: the previous code
+# called ``cdist(..., workers=-1)`` *per block*, spawning a fresh all-cores pool
+# for every medium block (64 threads each doing ~3 rows of a ~200-key matrix →
+# ~99% thread spawn/join overhead, ~1.2 effective cores, ~40h projected on the
+# real ~245k-canonical set). rapidfuzz releases the GIL during the C matrix
+# computation, so many *single-threaded* cdist calls running on one persistent
+# pool achieve true multi-core throughput with ZERO per-block spawn cost.
 _SCALAR_BLOCK_MAX = 8
-_THREADED_BLOCK_MIN = 96
+
+# Worker count for the shared block-scoring pool. Capped so an oversubscribed
+# host (many cores) does not thrash; cdist itself is single-threaded per call, so
+# parallelism is purely across blocks.
+_CLUSTER_MAX_WORKERS = min(16, (os.cpu_count() or 2))
+
+# How many block-scoring futures may be in flight at once (× workers). Bounds peak
+# memory (each future holds one block's flattened keys + score matrix) while
+# keeping the pool saturated.
+_CLUSTER_INFLIGHT_FACTOR = 4
 
 # Emit a `cluster_progress` log line every this many candidate pairs scored, so a
 # long clustering pass over a large canonical set is not silent for hours (the
@@ -345,34 +370,79 @@ def _safe_partition(
     return subclusters
 
 
-def _union_if_consistent(
-    uf: _UnionFind,
+def _stateless_merge_ok(
     records: list[dict[str, Any]],
     members: list[int],
     owner: list[int],
     flat_keys: list[str],
     p: int,
     q: int,
-) -> bool:
-    """Apply the non-name guards to an over-threshold key pair and union on pass.
+) -> tuple[int, int] | None:
+    """Apply the STATELESS non-name guards to an over-threshold key pair.
 
     ``p``/``q`` index into the block's flattened key list. Applies the same guards
-    as :func:`_can_merge` for an already-name-matched key pair — different owning
-    records, not already merged, no death-year / gender conflict, and the matched
-    key pair token-order-consistent (da#138). Returns True iff a NEW union is made.
+    as :func:`_can_merge` for an already-name-matched key pair, EXCEPT the
+    union-find ``already-merged`` check (that one is stateful and stays on the main
+    thread): different owning records, no death-year / gender conflict, and the
+    matched key pair token-order-consistent (da#138). Returns the canonical
+    ``(i, j)`` record-index pair (``i < j``) on pass, else ``None``.
+
+    This is pure (reads ``records``/``flat_keys`` read-only, mutates nothing), so
+    it runs INSIDE the parallel block workers — moving the per-pair guard cost
+    (the real bottleneck on the ~550M candidate pairs) off the serial main thread,
+    which is then left only the cheap ``uf.find``/``uf.union`` on survivors.
     """
     a_pos, b_pos = owner[p], owner[q]
     if a_pos == b_pos:
-        return False  # two keys (aliases) of the same record
+        return None  # two keys (aliases) of the same record
     i, j = members[a_pos], members[b_pos]
-    if uf.find(i) == uf.find(j):
-        return False  # already in the same cluster
     if _death_years_conflict(records[i], records[j]) or _genders_conflict(records[i], records[j]):
-        return False
+        return None
     if not _token_order_consistent(flat_keys[p], flat_keys[q]):
-        return False
-    uf.union(i, j)
-    return True
+        return None
+    return (i, j) if i < j else (j, i)
+
+
+def _block_merge_pairs(
+    records: list[dict[str, Any]],
+    members: list[int],
+    owner: list[int],
+    flat_keys: list[str],
+    threshold: float,
+) -> list[tuple[int, int]]:
+    """Pure, thread-safe: cdist a block + apply the stateless guards → merge pairs.
+
+    Computes the full key×key ``token_set_ratio`` matrix in C with ``workers=1``
+    (single-threaded), then runs every over-threshold key pair through
+    :func:`_stateless_merge_ok` and returns the DEDUPED surviving ``(i, j)``
+    record-index pairs. Holds no shared state, so it is dispatched concurrently to
+    a shared :class:`ThreadPoolExecutor`: rapidfuzz releases the GIL during the C
+    matrix computation, and the per-pair guard work (death/gender/token-order — the
+    bottleneck across ~550M candidate pairs) runs HERE in the worker rather than on
+    the serial main thread, which is left only the cheap ``uf.find``/``uf.union``.
+
+    A record pair survives if ANY of its key pairs passes the guards (the union-find
+    semantics): the per-block dedup keeps the returned list — and the main thread's
+    work — to the distinct record pairs, not the far larger key-pair count.
+    """
+    if len(flat_keys) < 2:
+        return []
+    mat = process.cdist(
+        flat_keys,
+        flat_keys,
+        scorer=fuzz.token_set_ratio,
+        dtype=np.float64,
+        workers=1,
+    )
+    rows, cols = np.where(mat >= threshold)
+    out: set[tuple[int, int]] = set()
+    for p, q in zip(rows.tolist(), cols.tolist()):
+        if p >= q:
+            continue
+        pair = _stateless_merge_ok(records, members, owner, flat_keys, p, q)
+        if pair is not None:
+            out.add(pair)
+    return list(out)
 
 
 def cluster_records(
@@ -460,61 +530,60 @@ def cluster_records(
     # Score each block's pairs by vectorizing the rapidfuzz call instead of a
     # Python loop of per-pair ``token_set_ratio`` calls — at ~1.7B candidate pairs
     # the per-pair Python+call overhead was the bottleneck (~27k pairs/s → ~18h).
-    # ``process.cdist`` computes a block's full key×key score matrix in C; the
-    # strategy is size-aware (see ``_SCALAR_BLOCK_MAX`` / ``_THREADED_BLOCK_MIN``)
-    # because spinning cdist's thread pool per tiny block costs far more than the
-    # work. Within a composite block every pair already shares the two key tokens,
-    # so the ≥2-shared-token guard holds by construction; only the name score +
-    # death/gender + token-order guards remain. We keep NO ``seen`` set (it would
-    # hold ~1B tuples → the original OOM relocated): union-find is idempotent and
-    # the ``uf.find`` check skips already-merged pairs, so memory stays bounded to
-    # the blocking index + the union-find. float64 matches the scalar
+    # ``process.cdist`` computes a block's full key×key score matrix in C. Within a
+    # composite block every pair already shares the two key tokens, so the
+    # ≥2-shared-token guard holds by construction; only the name score + death/
+    # gender + token-order guards remain. We keep NO ``seen`` set (it would hold
+    # ~1B tuples → the original OOM relocated): union-find is idempotent and the
+    # ``uf.find`` check skips already-merged pairs, so memory stays bounded to the
+    # blocking index + the union-find. float64 matches the scalar
     # ``token_set_ratio`` exactly, so the ≥threshold cut is identical across the
     # scalar and cdist paths (no float32 borderline flips).
+    #
+    # Parallelism is ACROSS blocks on one shared pool, not within a block: each
+    # cdist runs single-threaded (``workers=1``) but releases the GIL, so the pool
+    # gets true multi-core throughput without the per-block thread-pool spawn that
+    # made ``workers=-1`` project to ~40h (see ``_block_merge_pairs`` /
+    # ``_SCALAR_BLOCK_MAX``). Tiny blocks are scored inline (scalar) — too few
+    # pairs to amortize a future. Union-find is mutated only here in the main
+    # thread (it is not thread-safe); workers return pure index-pair lists.
     scored = 0
     merged = 0
     next_log = _CLUSTER_PROGRESS_INTERVAL
     t0 = time.monotonic()
-    for members in blocks:
-        m = len(members)
-        if m < 2:
-            continue
 
-        # Flatten each member's match keys (name + aliases) into one list, with
-        # a parallel `owner` array back to the member's position in the block.
-        flat_keys: list[str] = []
-        owner: list[int] = []
-        for pos in range(m):
+    def _flatten(members: list[int]) -> tuple[list[str], list[int]]:
+        """Flatten a block's members' match keys + a parallel owner→member-pos map."""
+        fk: list[str] = []
+        ow: list[int] = []
+        for pos in range(len(members)):
             for name_key in keys_cache[members[pos]]:
-                flat_keys.append(name_key)
-                owner.append(pos)
-        nkeys = len(flat_keys)
+                fk.append(name_key)
+                ow.append(pos)
+        return fk, ow
 
-        if m <= _SCALAR_BLOCK_MAX:
-            # Tiny block: plain scalar loop — fewer pairs than the cost of building
-            # a numpy matrix, so skip cdist entirely.
-            for p in range(nkeys):
-                kp = flat_keys[p]
-                for q in range(p + 1, nkeys):
-                    if fuzz.token_set_ratio(kp, flat_keys[q]) >= threshold and _union_if_consistent(
-                        uf, records, members, owner, flat_keys, p, q
-                    ):
-                        merged += 1
-        else:
-            # Vectorized: cdist computes the key×key matrix in C; only large blocks
-            # spin the multi-core thread pool (it dominates the work otherwise).
-            mat = process.cdist(
-                flat_keys,
-                flat_keys,
-                scorer=fuzz.token_set_ratio,
-                dtype=np.float64,
-                workers=-1 if m > _THREADED_BLOCK_MIN else 1,
-            )
-            rows, cols = np.where(mat >= threshold)
-            for p, q in zip(rows.tolist(), cols.tolist()):
-                if p < q and _union_if_consistent(uf, records, members, owner, flat_keys, p, q):
-                    merged += 1
+    # future -> m (member count) for in-flight cdist blocks. Each future RESOLVES to
+    # the block's already-guard-filtered, deduped (i, j) merge pairs, so the main
+    # thread needs nothing but the count for the progress estimate. Drained in
+    # COMPLETION order (not submission order) so one slow block never stalls the
+    # pool: a submission-order drain (waiting on the oldest future) idles every
+    # other worker behind a slow block and collapses throughput to ~1 core.
+    pending: dict[Future[list[tuple[int, int]]], int] = {}
+    inflight_cap = _CLUSTER_MAX_WORKERS * _CLUSTER_INFLIGHT_FACTOR
 
+    def _apply(m: int, pairs: list[tuple[int, int]]) -> None:
+        """Union a block's pre-guarded merge pairs (the ONLY stateful, serial step).
+
+        ``pairs`` are ``(i, j)`` record indices that already cleared every stateless
+        guard in the worker; all that remains is the union-find ``already-merged``
+        check + union, both O(α(n)) ≈ O(1), so the main thread is no longer the
+        bottleneck even across hundreds of millions of candidate pairs.
+        """
+        nonlocal scored, merged, next_log
+        for i, j in pairs:
+            if uf.find(i) != uf.find(j):
+                uf.union(i, j)
+                merged += 1
         scored += m * (m - 1) // 2
         if scored >= next_log:
             next_log = scored + _CLUSTER_PROGRESS_INTERVAL
@@ -528,6 +597,57 @@ def cluster_records(
                 merged=merged,
                 elapsed_seconds=round(time.monotonic() - t0, 1),
             )
+
+    def _drain_completed(block_until_one: bool) -> None:
+        """Apply every finished block's pairs; optionally block until ≥1 finishes.
+
+        Union-find is mutated only here on the main thread (it is not thread-safe).
+        Final clusters are connected components, which are invariant to union order,
+        so draining in completion order is deterministic (the equivalence test holds).
+        """
+        if not pending:
+            return
+        done: set[Future[list[tuple[int, int]]]] = (
+            wait(pending.keys(), return_when=FIRST_COMPLETED).done
+            if block_until_one
+            else {f for f in pending if f.done()}
+        )
+        for f in done:
+            _apply(pending.pop(f), f.result())
+
+    with ThreadPoolExecutor(max_workers=_CLUSTER_MAX_WORKERS) as pool:
+        for members in blocks:
+            m = len(members)
+            if m < 2:
+                continue
+            flat_keys, owner = _flatten(members)
+
+            if m <= _SCALAR_BLOCK_MAX:
+                # Tiny block: plain scalar loop + the stateless guards inline — fewer
+                # pairs than the cost of a future round-trip, so score on this thread.
+                seen: set[tuple[int, int]] = set()
+                for p in range(len(flat_keys)):
+                    for q in range(p + 1, len(flat_keys)):
+                        if fuzz.token_set_ratio(flat_keys[p], flat_keys[q]) >= threshold:
+                            pair = _stateless_merge_ok(records, members, owner, flat_keys, p, q)
+                            if pair is not None:
+                                seen.add(pair)
+                _apply(m, list(seen))
+                continue
+
+            # Larger block: dispatch cdist + guard-filtering to the shared pool.
+            pending[
+                pool.submit(_block_merge_pairs, records, members, owner, flat_keys, threshold)
+            ] = m
+            # Opportunistically reap anything already done (free slots, no blocking);
+            # only block once the in-flight set hits the cap.
+            _drain_completed(block_until_one=False)
+            if len(pending) >= inflight_cap:
+                _drain_completed(block_until_one=True)
+
+        # Drain the remaining in-flight blocks.
+        while pending:
+            _drain_completed(block_until_one=True)
 
     logger.info(
         "cluster_pairs_scored",

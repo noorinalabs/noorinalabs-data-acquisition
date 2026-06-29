@@ -15,8 +15,13 @@ Background (da#247): on the pre-fix resolve output 39.9% of canonical narrators
    Latin+Arabic. Stripped here (recovers ``"ابو عبيده"``), not dropped.
 2. thaqalayn parser dumping whole hadith bodies into the name field — hundreds of
    tokens of Arabic + English text. Caught by the token-count cap.
-3. mubham (unnamed) collective descriptors minted as named narrators
-   (``"رجل من اصحاب النبي"``, ``"جماعه من اصحاب"``) and bare honorific phrases.
+3. mubham (unnamed) descriptors minted as named narrators — both *collective*
+   phrases (``"رجل من اصحاب النبي"``, ``"جماعه من اصحاب"``) and bare *relational
+   pronouns* (``"ابيه"`` "his father", ``"جده"`` "his grandfather"), plus bare
+   honorific phrases. The relational-pronoun sub-class was the residual after the
+   first da#247 pass: ``ابيه`` alone remained the single most-mentioned "narrator"
+   (65,755) on the #723 stage reload because it has no partitive ``من`` for the
+   collective guard to catch.
 
 The phrase constants are in **normalized-Arabic** form (post
 ``normalize_arabic``) because this runs on ``name_normalized``.
@@ -78,6 +83,47 @@ _MUBHAM_LEADERS = frozenset(
     }
 )
 
+# Bare relational-pronoun (mubham) references — "his father", "my father", "his
+# grandfather", "his son", … — minted as named narrators. Like the collective
+# descriptors above these are unnamed-narrator references (da#247 root cause 3),
+# but they carry no partitive ``من`` so the ``_MUBHAM_LEADERS`` guard misses them.
+# On the #723 graph ``ابيه`` ("his father") alone was the single MOST-mentioned
+# "narrator" (65,755 mentions) — a spurious node into which every chain's elided
+# ancestor wrongly collapsed, fabricating cross-chain links. Normalized-Arabic
+# forms (post ``normalize_arabic``: hamza/diacritics stripped). A span is dropped
+# only when the WHOLE name is exactly ONE of these (see clean step 6), so a real
+# multi-token kunya like ``"ابي اسحاق"`` (Abū Isḥāq) is never touched.
+_MUBHAM_RELATIONAL = frozenset(
+    {
+        "ابيه",  # his father        "ابي",   # my father (bare, incomplete kunya)
+        "ابي",
+        "ابيها",  # her father
+        "امه",  # his mother         "امها",  # her mother
+        "امها",
+        "ابنه",  # his son           "ابنها"
+        "ابنها",
+        "ابنته",  # his daughter     "ابنتها"
+        "ابنتها",
+        "جده",  # his grandfather    "جدها"
+        "جدها",
+        "جدته",  # his grandmother   "جدتها"
+        "جدتها",
+        "اخيه",  # his brother       "اخيها"
+        "اخيها",
+        "اخته",  # his sister        "اختها"
+        "اختها",
+        "عمه",  # his paternal uncle "عمها","عمته"
+        "عمها",
+        "عمته",
+        "خاله",  # his maternal uncle "خالها","خالته"
+        "خالها",
+        "خالته",
+        "زوجته",  # his wife          "زوجها" his/her spouse
+        "زوجها",
+        "عنه",  # "from him" — transmission particle, never a name
+    }
+)
+
 # A narrator name longer than this many whitespace tokens is a phrase / sentence /
 # mis-parsed text body (thaqalayn dumps whole hadith bodies of 50–500+ tokens),
 # not a name. The cap is set high (30) on purpose: classical full nasab lineages
@@ -121,8 +167,16 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
         if phrase in text:
             text = text.replace(phrase, " ")
 
-    # 3. Tokenize, dropping the editorial connective.
-    tokens = [t for t in text.split() if t and t not in _CONNECTIVE_TOKENS]
+    # 3. Tokenize: strip edge punctuation from each token, then drop the editorial
+    #    connective and any pure-punctuation tokens. Without the per-token strip a
+    #    stray trailing mark ("ابيه،", "ابي ،", "ابيه :") shields a mubham token
+    #    from the relational / collective guards below (da#247 residual: 7 such
+    #    refs survived the first scrub purely on a trailing Arabic comma).
+    tokens = [
+        stripped
+        for t in text.split()
+        if (stripped := t.strip(_EDGE_PUNCT)) and stripped not in _CONNECTIVE_TOKENS
+    ]
     if not tokens:
         return None
 
@@ -132,6 +186,13 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
 
     # 5. Mubham (anonymous collective) descriptor → not a named narrator.
     if tokens[0] in _MUBHAM_LEADERS and "من" in tokens:
+        return None
+
+    # 6. Bare relational-pronoun reference ("his father", "his grandfather", "my
+    #    father") → an unnamed (mubham) narrator, not a person. Drop ONLY when the
+    #    WHOLE name is exactly one such token, so multi-token kunya names
+    #    ("ابي اسحاق" = Abū Isḥāq) survive untouched (precision guard).
+    if len(tokens) == 1 and tokens[0] in _MUBHAM_RELATIONAL:
         return None
 
     return " ".join(tokens)

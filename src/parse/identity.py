@@ -104,6 +104,11 @@ SOURCE_CORPORA: frozenset[str] = frozenset(c.value for c in SourceCorpus)
 
 ID_DELIMITER = ":"
 
+# Running count of double-corpus-prefix collapses this process, used to SAMPLE the
+# per-collapse warning in ``_collapse_double_corpus`` (it fires on a path called
+# millions of times; #723). Process-local; not reset between calls by design.
+_double_corpus_collapse_count = 0
+
 HADITH_ID_PREFIX = "hdt:"
 COLLECTION_ID_PREFIX = "col:"
 NARRATOR_ID_PREFIX = "nar:"
@@ -146,12 +151,23 @@ def _collapse_double_corpus(body: str) -> str:
         segments.pop(0)
         collapsed += 1
     if collapsed:
-        logger.warning(
-            "collapsed_double_corpus_prefix",
-            original=body,
-            canonical=ID_DELIMITER.join(segments),
-            collapsed_segments=collapsed,
-        )
+        global _double_corpus_collapse_count
+        _double_corpus_collapse_count += 1
+        # This fires on the hot id-canonicalization path — every hadith/chain/
+        # grading id build, and the PARALLEL_OF loader calls it 13M+ times. The
+        # sanadset double-prefix bug (main#139) trips it on millions of rows: the
+        # #723 stage reload emitted 8.45M of these warnings (a 4.3 GB container
+        # log) and the per-call structlog rendering measurably slowed the load.
+        # Sample it — surface the condition once, then every 100k-th, with the
+        # running magnitude in ``occurrences`` — instead of one line per record.
+        if _double_corpus_collapse_count == 1 or _double_corpus_collapse_count % 100_000 == 0:
+            logger.warning(
+                "collapsed_double_corpus_prefix",
+                original=body,
+                canonical=ID_DELIMITER.join(segments),
+                collapsed_segments=collapsed,
+                occurrences=_double_corpus_collapse_count,
+            )
     return ID_DELIMITER.join(segments)
 
 

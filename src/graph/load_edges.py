@@ -9,6 +9,7 @@ for idempotent re-runs.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -64,10 +65,39 @@ def _chunked_read(
 
 
 def _read_parquet_rows(path: Path) -> list[dict[str, Any]]:
-    """Read a Parquet file and return row dicts."""
+    """Read a Parquet file and return row dicts (whole-file, in memory).
+
+    Fine for the small mention/network/hadith files. For multi-million-row files
+    (``parallel_links.parquet`` — 6.66M rows at the #723 reload) use
+    :func:`_iter_parquet_row_batches` instead: materializing the whole table via
+    ``to_pylist()`` plus a second transformed copy peaked the loader past the
+    host's RAM and the container was OOM-killed (137, #723 stage load).
+    """
     table = pq.read_table(path)
     rows: list[dict[str, Any]] = table.to_pylist()
     return rows
+
+
+# Row-batch size for streaming large edge inputs. Independent of the Neo4j write
+# ``batch_size`` (1000): this bounds how many parquet rows are materialized as
+# Python dicts at once, so loader peak memory is ~constant regardless of file
+# size. 50k rows ≈ tens of MB, well under the host's per-process headroom.
+_READ_BATCH_ROWS = 50_000
+
+
+def _iter_parquet_row_batches(
+    path: Path, batch_rows: int = _READ_BATCH_ROWS
+) -> Iterator[list[dict[str, Any]]]:
+    """Yield row-dict batches from a Parquet file without materializing it whole.
+
+    The streaming counterpart to :func:`_read_parquet_rows`. Lets a loader process
+    millions of rows (transform → endpoint-check → write → discard per batch) while
+    holding only ``batch_rows`` rows at a time — the fix for the #723 PARALLEL_OF
+    OOM, where the 6.66M-row ``parallel_links.parquet`` was read whole.
+    """
+    parquet_file = pq.ParquetFile(path)
+    for record_batch in parquet_file.iter_batches(batch_size=batch_rows):
+        yield record_batch.to_pylist()
 
 
 def _parquet_files(directory: Path, prefix: str) -> list[Path]:
@@ -502,32 +532,57 @@ def _load_parallel_of(
         logger.warning("parallel_links_missing", path=str(path))
         return EdgeLoadResult("PARALLEL_OF", 0, 0, 0)
 
-    rows = _read_parquet_rows(path)
-    batch: list[dict[str, Any]] = []
+    # Stream parquet row-batches so loader memory stays bounded regardless of file
+    # size: the #723 reload's parallel_links.parquet has 6.66M rows, and reading it
+    # whole (plus the transformed copy) OOM-killed the loader (137). Each batch is
+    # transformed → endpoint-checked → written → discarded; totals accumulate across
+    # batches so the da#160 silent-failure warnings below still key on file totals.
+    candidates = 0
     skipped = 0
+    missing = 0
+    created = 0
+    for rows in _iter_parquet_row_batches(path):
+        batch: list[dict[str, Any]] = []
+        for row in rows:
+            id_a = row.get("hadith_id_a")
+            id_b = row.get("hadith_id_b")
+            if not id_a or not id_b:
+                skipped += 1
+                continue
+            # Ensure lower ID -> higher ID for consistent directionality
+            full_a = hadith_node_id(id_a)
+            full_b = hadith_node_id(id_b)
+            if full_a > full_b:
+                full_a, full_b = full_b, full_a
+            batch.append(
+                {
+                    "id_a": full_a,
+                    "id_b": full_b,
+                    "score": _val(row, "similarity_score", 0.0),
+                    "variant_type": _val(row, "variant_type", "unknown"),
+                    "cross_sect": _val(row, "cross_sect", False),
+                }
+            )
 
-    for row in rows:
-        id_a = row.get("hadith_id_a")
-        id_b = row.get("hadith_id_b")
-        if not id_a or not id_b:
-            skipped += 1
+        if not batch:
             continue
-        # Ensure lower ID -> higher ID for consistent directionality
-        full_a = hadith_node_id(id_a)
-        full_b = hadith_node_id(id_b)
-        if full_a > full_b:
-            full_a, full_b = full_b, full_a
-        batch.append(
-            {
-                "id_a": full_a,
-                "id_b": full_b,
-                "score": _val(row, "similarity_score", 0.0),
-                "variant_type": _val(row, "variant_type", "unknown"),
-                "cross_sect": _val(row, "cross_sect", False),
-            }
-        )
+        candidates += len(batch)
 
-    if not batch:
+        # Check endpoints for this batch only
+        check_results = _chunked_read(client, _PARALLEL_OF_CHECK, batch, batch_size)
+        valid_batch: list[dict[str, Any]] = []
+        for item, check in zip(batch, check_results):
+            if check.get("a_exists") and check.get("b_exists"):
+                valid_batch.append(item)
+            else:
+                missing += 1
+
+        if valid_batch:
+            created += client.execute_write_batch(
+                _PARALLEL_OF_QUERY, valid_batch, batch_size=batch_size
+            )
+
+    if candidates == 0:
         # An empty parallel_links.parquet means the dedup / parallel-detection
         # stage produced nothing — /compare Browse Parallels will be empty. Surface
         # it as a WARNING rather than a silent INFO (da#160 conformance).
@@ -537,28 +592,13 @@ def _load_parallel_of(
         )
         return EdgeLoadResult("PARALLEL_OF", 0, skipped, 0)
 
-    # Check endpoints
-    check_results = _chunked_read(client, _PARALLEL_OF_CHECK, batch, batch_size)
-    valid_batch: list[dict[str, Any]] = []
-    missing = 0
-    for item, check in zip(batch, check_results):
-        if check.get("a_exists") and check.get("b_exists"):
-            valid_batch.append(item)
-        else:
-            missing += 1
-
-    created = (
-        client.execute_write_batch(_PARALLEL_OF_QUERY, valid_batch, batch_size=batch_size)
-        if valid_batch
-        else 0
-    )
     # Detected links that resolved to zero loaded edges is a silent-failure mode
     # (every endpoint missing — e.g. an id-scheme mismatch): warn, do not pass it
     # by at INFO (da#160).
     if created == 0:
         logger.warning(
             "parallel_of_loaded_zero",
-            candidates=len(batch),
+            candidates=candidates,
             skipped=skipped,
             missing_endpoints=missing,
             msg="parallel links present but 0 PARALLEL_OF edges loaded",
