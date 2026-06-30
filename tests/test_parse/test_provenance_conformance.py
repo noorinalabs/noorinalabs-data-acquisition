@@ -66,6 +66,9 @@ _NON_PARSER_MODULES = frozenset(
         # da#164: pure life-date notation parser used BY the source parsers to fill
         # the bound/precision columns — emits no schema/parquet of its own.
         "narrator_dates",
+        # da#247: narrator name-quality cleaning/validation used BY the NER stage —
+        # a pure string filter, emits no schema/parquet of its own.
+        "name_quality",
     }
 )
 

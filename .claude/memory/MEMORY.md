@@ -18,6 +18,8 @@ Recording convention: create/edit `.claude/memory/<kebab-slug>.md` with the stan
 - [Itqan license: proceed](project_itqan_license_proceed.md) — Owner 2026-06-12: use Itqan narrator source despite no upstream license (nonprofit + own-schema). PR#110.
 - [P5W5 corpus-load findings](project_p5w5_corpus_load_findings.md) — lk=Sunni not al-Kafi; staging NOT empty; thaqalayn parser fixture-masked; Four Books partial→da#182.
 - [Staging graph-load transport](project_staging_graph_load_transport.md) — Neo4j only on noorinalabs_backend (no host port/egress); bake-deps-then-attach loader. da#174/PR#180.
+- [Chain nodes hollow — read staging not curated](project_chain_hollow_reads_staging.md) — _load_chains read staging mentions (no canonical_narrator_id) → all chains empty; fix=curated resolved. #723 chains-empty root cause.
+- [Relational-pronoun pollution + scrub equivalence](project_relational_pollution_scrub_equiv.md) — أبيه "his father" was #1 narrator; name_quality filter; scrubbing curated ≡ NER-with-filter (singleton clusters). da#247 residual.
 
 ## Engineering gotchas (feedback)
 
@@ -26,3 +28,4 @@ Recording convention: create/edit `.claude/memory/<kebab-slug>.md` with the stan
 - [Neo4j SET null removes property](feedback_neo4j_set_null_removes_property.md) — MERGE {prop:null} aborts; null-safe=property-less MERGE+SET, but SET prop=null REMOVES the key. da#69.
 - [count>=0 masks empty graph](feedback_count_ge_zero_masks_empty_graph.md) — real-DB count(r)>=0 asserts nothing; read back the graph (concrete count + per-row keys).
 - [WSL2 local Docker](feedback_wsl2_no_local_docker.md) — RESOLVED 2026-06-12: local Docker works (neo4j:5 ran locally+CI); keep skip-guard, CI may flake. da#89.
+- [structural-ontology gate commit friction](feedback_structural_gate_commit_friction.md) — regen index w/ python3 NOT uv run (line-number drift); untracked .claude/worktrees breaks pre-commit stash. #723.

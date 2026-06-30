@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
+from src.parse.narrator_extraction import IsnadSegmentationError, extract_narrator_mentions
 from src.parse.schemas import NARRATOR_MENTION_SCHEMA
 from src.resolve.ner import _extract_from_hadiths, _load_phase1_mentions, run
 from src.resolve.schemas import NARRATOR_MENTIONS_RESOLVED_SCHEMA
@@ -158,6 +160,57 @@ class TestArabicExtraction:
         write_hadiths(tmp_path / "hadiths_thaqalayn.parquet", hadiths)
         rows = _extract_from_hadiths(tmp_path, "thaqalayn", "ar")
         assert len(rows) > 0
+
+    def test_unsegmentable_hadith_skipped_not_fatal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """da#244: a single hadith whose isnad cannot be segmented (e.g. matn in
+        the isnad field — thaqalayn :807) must be SKIPPED, not abort the whole NER
+        pass. Previously one IsnadSegmentationError propagated out of
+        ``_extract_from_hadiths`` and cascaded to skip disambiguate, stranding the
+        entire resolve. The good hadith's mentions must still be extracted."""
+
+        def _base(source_id: str, isnad: str) -> dict:
+            return {
+                "source_id": source_id,
+                "source_corpus": "thaqalayn",
+                "collection_name": "al-kafi",
+                "isnad_raw_ar": isnad,
+                "isnad_raw_en": None,
+                "full_text_ar": None,
+                "full_text_en": None,
+                "matn_ar": "text",
+                "matn_en": None,
+                "grade": None,
+                "sect": "shia",
+                "book_number": 1,
+                "chapter_number": 1,
+                "hadith_number": 1,
+                "chapter_name_ar": None,
+                "chapter_name_en": None,
+            }
+
+        good = "حدثنا محمد عن علي"
+        bad = "UNSEGMENTABLE_MATN_BLOB"
+        write_hadiths(
+            tmp_path / "hadiths_thaqalayn.parquet",
+            [_base("th-good", good), _base("th-bad", bad)],
+        )
+
+        real = extract_narrator_mentions
+
+        def _maybe_raise(isnad_text: str, language: str):  # type: ignore[no-untyped-def]
+            if isnad_text == bad:
+                raise IsnadSegmentationError("partial chain blob (simulated :807)")
+            return real(isnad_text, language)
+
+        monkeypatch.setattr("src.resolve.ner.extract_narrator_mentions", _maybe_raise)
+
+        # Must NOT raise — the bad hadith is skipped, the good one still extracted.
+        rows = _extract_from_hadiths(tmp_path, "thaqalayn", "ar")
+        assert len(rows) > 0
+        assert all(r["hadith_id"] == "th-good" for r in rows)
+        assert not any(r["hadith_id"] == "th-bad" for r in rows)
 
 
 # ---------------------------------------------------------------------------

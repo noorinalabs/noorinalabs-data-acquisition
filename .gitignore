@@ -1,9 +1,10 @@
-# Data directories (keep .gitkeep)
-data/raw/*
-data/staging/*
-data/curated/*
-data/reports/*
-!data/**/.gitkeep
+# Data directories — ignore the entire data/ tree.
+# The old form (data/<sub>/*) only matched the four canonical subdirs, so sibling
+# snapshot dirs like data/curated.pre-rerun-2026-06-28/ leaked as untracked (1.5 GB
+# risk during commits). `data/` ignores the whole tree. The four
+# data/{raw,staging,curated,reports}/.gitkeep markers are ALREADY tracked and stay
+# tracked (git ignore rules never untrack), so the dir structure survives a fresh clone.
+data/
 *.parquet
 *.arrow
 *.feather
@@ -66,3 +67,5 @@ logs/
 
 .claude/.consulted/
 .claude/.librarian-consulted/
+.claude/worktrees/
+.claude/scratch/
