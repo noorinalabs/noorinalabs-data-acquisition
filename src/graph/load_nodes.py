@@ -546,6 +546,17 @@ def _load_chains(
             nid = row.get("canonical_narrator_id")
             if not hid or not nid:
                 continue
+            # Skip curated muhaddithat orphan-link rows (da#228): they carry a
+            # ``provenance`` value and are NARRATED-only links, NOT isnad chain
+            # members. The ``narrator_mentions_resolved*`` glob also matches
+            # ``narrator_mentions_resolved_muhaddithat.parquet``, so without this
+            # guard each orphan narrator would be injected into the hadith's
+            # ``narrator_ids`` (inflating ``chain_length``) — exactly the chain
+            # pollution #723 removes. Mirrors the ``_load_transmitted_to`` guard
+            # in load_edges.py; an ordinary chain mention has no ``provenance``
+            # column (row.get → None), so this only drops the orphan-links.
+            if row.get("provenance"):
+                continue
             pos = row.get("position_in_chain") or 0
             seen_hadiths.setdefault(hid, []).append((pos, nid))
 

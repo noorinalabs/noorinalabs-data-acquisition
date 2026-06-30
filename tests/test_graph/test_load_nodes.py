@@ -679,6 +679,64 @@ class TestLoadChains:
         assert h1["chain_length"] == 2
         assert h1["is_complete"] is True
 
+    def test_chains_exclude_provenance_orphan_links(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        # Regression: the narrator_mentions_resolved* glob also matches the curated
+        # muhaddithat orphan-link file (da#228), whose rows carry `provenance` +
+        # position_in_chain=0 and a REAL hadith_id (e.g. sunnah:bukhari:2). Those
+        # orphan narrators are NARRATED-only links, NOT isnad chain members — they
+        # must not be folded into Chain.narrator_ids (which would inflate
+        # chain_length and re-introduce the #723 chain pollution). _load_chains must
+        # skip provenance-bearing rows, mirroring the _load_transmitted_to guard.
+        from src.resolve.muhaddithat_links import (
+            build_muhaddithat_mention_links,
+            canonical_id_for,
+        )
+
+        orphan_hid = "sunnah:bukhari:2"
+        orphan_nid = canonical_id_for("عائشة بنت أبي بكر")
+
+        # Real isnad chain for the same hadith the orphan-link attests.
+        write_narrator_mentions_resolved(
+            curated_dir,
+            [
+                {
+                    "mention_id": "m1",
+                    "hadith_id": orphan_hid,
+                    "position_in_chain": 0,
+                    "canonical_narrator_id": "nar:real-0",
+                },
+                {
+                    "mention_id": "m2",
+                    "hadith_id": orphan_hid,
+                    "position_in_chain": 1,
+                    "canonical_narrator_id": "nar:real-1",
+                },
+            ],
+        )
+        # Producer writes narrator_mentions_resolved_muhaddithat.parquet (provenance-
+        # bearing), which the _load_chains glob also matches.
+        build_muhaddithat_mention_links(curated_dir)
+
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+
+        chain_batches = [
+            batch
+            for _query, batch in mock_client.calls
+            if isinstance(batch, list)
+            and batch
+            and "id" in batch[0]
+            and batch[0]["id"].startswith("chn:")
+        ]
+        by_id = {row["id"]: row for batch in chain_batches for row in batch}
+        chain = by_id[chain_node_id(orphan_hid, 0)]
+        # The provenance-bearing orphan narrator is absent; only the two real isnad
+        # mentions remain (pre-fix code would fold it in and report chain_length 3).
+        assert orphan_nid not in chain["narrator_ids"]
+        assert chain["narrator_ids"] == ["nar:real-0", "nar:real-1"]
+        assert chain["chain_length"] == 2
+
 
 class TestLoadGradings:
     def test_gradings_from_hadiths(
