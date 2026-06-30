@@ -146,3 +146,6 @@ unioned
 
 # --- Project-memory corpus vocabulary (da#203 — CLAUDE.md § Project Memory) ---
 wikilinks
+
+# --- #723 prod-reload runbook: Arabic relational-pollution token (documented, not a real narrator) ---
+أبيه
