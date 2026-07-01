@@ -7,7 +7,11 @@ index, and identifies parallel hadith pairs across collections and sects.
 from __future__ import annotations
 
 import json
+import math
+import multiprocessing
+import os
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -19,6 +23,8 @@ from src.resolve.schemas import PARALLEL_LINKS_SCHEMA
 from src.utils.logging import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import faiss as faiss_mod
     import numpy as np
     import numpy.typing as npt
@@ -34,6 +40,16 @@ _SHIA_SOURCES: frozenset[str] = frozenset({"thaqalayn"})
 # Sentence-transformer used for hadith-matn embeddings. Pinned name so the resume
 # meta can refuse to reuse embeddings produced by a different model.
 _MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
+
+# Ceiling for the *auto* (unset / non-positive) encode-worker count. Each worker
+# holds its own copy of the ~0.5 GB sentence-transformer, so more processes than
+# this trade RAM for throughput we do not need; an explicit request may exceed it
+# but is still capped at the physical core count (see `_resolve_encode_workers`).
+_AUTO_WORKER_CAP = 8
+
+# Split each worker's share into several chunks so a straggler chunk cannot
+# leave one core idle while the others finish — cheap load balancing.
+_CHUNKS_PER_WORKER = 4
 
 
 def _classify_pair(score: float) -> VariantType:
@@ -90,12 +106,228 @@ def _load_hadith_texts(
     return ids, texts, corpora
 
 
+def _build_default_model() -> object:
+    """Construct the pinned sentence-transformer.
+
+    Used both by the serial path and — as the per-worker ``model_provider`` — by
+    each parallel encode worker, so every process builds its own model from the
+    same pinned name (models are not fork/pickle-safe to share across processes).
+    """
+    from sentence_transformers import SentenceTransformer
+
+    return SentenceTransformer(_MODEL_NAME)
+
+
+def _resolve_encode_workers(requested: int | None, n_items: int) -> int:
+    """Resolve the effective encode-worker count, guarding against oversubscription.
+
+    ``requested`` is the configured value (``DEDUP_ENCODE_WORKERS`` / the
+    ``encode_workers`` argument): ``None`` or ``<= 0`` means *auto* (scale to the
+    box, capped at :data:`_AUTO_WORKER_CAP`); a positive value is honoured but
+    still clamped to the physical core count so we never spin more CPU-bound
+    embedding processes than there are cores. Never returns less than 1.
+    """
+    cpu = os.cpu_count() or 1
+    if requested is None or requested <= 0:
+        workers = min(cpu, _AUTO_WORKER_CAP)
+    else:
+        workers = min(requested, cpu)
+    # Nothing to gain from more workers than items.
+    workers = min(workers, max(1, n_items))
+    return max(1, workers)
+
+
+# --- Parallel-encode worker plumbing --------------------------------------
+# Each worker process holds one model in a module global (populated by the pool
+# initializer) so the model is built once per worker rather than once per chunk.
+_WORKER_MODEL: object | None = None
+
+
+def _set_thread_limit(thread_limit: int) -> None:
+    """Pin per-process BLAS/torch intra-op threads.
+
+    Without this, every worker's torch/OpenBLAS would each try to use all cores,
+    so ``workers × cores`` threads would thrash a single machine. One thread per
+    worker keeps the fan-out to exactly ``workers`` busy cores.
+    """
+    for var in (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        os.environ[var] = str(thread_limit)
+    try:
+        import torch
+
+        torch.set_num_threads(thread_limit)
+    except Exception:  # noqa: BLE001  (torch optional / already-configured — best effort)
+        pass
+
+
+def _worker_init(model_provider: Callable[[], object], thread_limit: int) -> None:
+    """Pool initializer: pin threads and build this worker's model once."""
+    global _WORKER_MODEL
+    _set_thread_limit(thread_limit)
+    _WORKER_MODEL = model_provider()
+
+
+def _worker_encode_chunk(
+    task: tuple[int, list[str], int],
+) -> tuple[int, npt.NDArray[np.float32]]:
+    """Encode one contiguous chunk of texts and return ``(start_offset, embeddings)``.
+
+    Runs in a worker process. The returned ``start_offset`` lets the parent place
+    the block at a fixed row range regardless of completion order — this is what
+    makes the parallel output byte-identical to the serial output.
+    """
+    import numpy as np
+
+    start_offset, batch_texts, batch_size = task
+    model = _WORKER_MODEL
+    assert model is not None, "worker model not initialized"
+    parts: list[npt.NDArray[np.float32]] = []
+    for s in range(0, len(batch_texts), batch_size):
+        parts.append(
+            model.encode(  # type: ignore[attr-defined]
+                batch_texts[s : s + batch_size],
+                batch_size=batch_size,
+                show_progress_bar=False,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+            )
+        )
+    return start_offset, np.vstack(parts).astype(np.float32)
+
+
+def _encode_range_serial(
+    texts: list[str],
+    emb: npt.NDArray[np.float32],
+    start: int,
+    n: int,
+    batch_size: int,
+    prog_path: Path,
+    model: object,
+) -> None:
+    """Serial fallback: encode ``[start, n)`` in-process, one batch at a time."""
+    import resource
+
+    t0 = time.monotonic()
+    for s in range(start, n, batch_size):
+        e = min(s + batch_size, n)
+        emb[s:e] = model.encode(  # type: ignore[attr-defined]
+            texts[s:e],
+            batch_size=batch_size,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+        )
+        prog_path.write_text(str(e))
+        elapsed = time.monotonic() - t0
+        rate = (e - start) / elapsed if elapsed > 0 else 0.0
+        logger.info(
+            "dedup_encoding_progress",
+            processed=e,
+            total=n,
+            pct=round(e / n * 100, 1),
+            rate_per_s=round(rate, 1),
+            eta_s=round((n - e) / rate) if rate > 0 else None,
+            rss_mb=round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024),
+        )
+
+
+def _encode_range_parallel(
+    texts: list[str],
+    emb: npt.NDArray[np.float32],
+    start: int,
+    n: int,
+    batch_size: int,
+    workers: int,
+    model_provider: Callable[[], object],
+    prog_path: Path,
+    mp_start_method: str,
+) -> None:
+    """Encode ``[start, n)`` across a process pool, writing each block in place.
+
+    The remaining rows are split into ``workers × _CHUNKS_PER_WORKER`` chunks;
+    each worker encodes a chunk and returns its block, which the parent writes to
+    the fixed memmap slice ``emb[cs:ce]``. Because placement is by row index, not
+    completion order, the result is identical to the serial encode. The resume
+    marker advances only over the *contiguous* completed prefix, so a crash
+    mid-fan-out resumes correctly (any already-written non-contiguous block is
+    simply, and idempotently, re-encoded).
+    """
+    import resource
+
+    remaining = n - start
+    n_chunks = min(remaining, max(1, workers * _CHUNKS_PER_WORKER))
+    chunk_size = math.ceil(remaining / n_chunks)
+    bounds: list[tuple[int, int]] = []
+    s = start
+    while s < n:
+        e = min(s + chunk_size, n)
+        bounds.append((s, e))
+        s = e
+
+    logger.info(
+        "dedup_encoding_parallel",
+        workers=workers,
+        chunks=len(bounds),
+        chunk_size=chunk_size,
+        start_method=mp_start_method,
+    )
+
+    ctx = multiprocessing.get_context(mp_start_method)
+    completed: dict[int, int] = {}
+    contiguous = start
+    done = 0
+    t0 = time.monotonic()
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        mp_context=ctx,
+        initializer=_worker_init,
+        initargs=(model_provider, 1),
+    ) as pool:
+        fut_bounds = {
+            pool.submit(_worker_encode_chunk, (cs, texts[cs:ce], batch_size)): (cs, ce)
+            for cs, ce in bounds
+        }
+        for fut in as_completed(fut_bounds):
+            cs, ce = fut_bounds[fut]
+            _, block = fut.result()
+            emb[cs:ce] = block
+            completed[cs] = ce
+            # Advance the resume marker over the contiguous completed prefix only.
+            while contiguous in completed:
+                contiguous = completed[contiguous]
+            emb.flush()  # type: ignore[attr-defined]  # emb is a np.memmap at runtime
+            prog_path.write_text(str(contiguous))
+            done += ce - cs
+            elapsed = time.monotonic() - t0
+            rate = done / elapsed if elapsed > 0 else 0.0
+            logger.info(
+                "dedup_encoding_progress",
+                processed=start + done,
+                total=n,
+                pct=round((start + done) / n * 100, 1),
+                rate_per_s=round(rate, 1),
+                eta_s=round((remaining - done) / rate) if rate > 0 else None,
+                rss_mb=round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024),
+                workers=workers,
+            )
+    prog_path.write_text(str(n))
+
+
 def _encode_with_resume(
     texts: list[str],
     hadith_ids: list[str],
     staging_dir: Path,
     model: object,
     batch_size: int,
+    *,
+    workers: int = 1,
+    model_provider: Callable[[], object] | None = None,
+    mp_start_method: str = "spawn",
 ) -> npt.NDArray[np.float32]:
     """Encode hadith matn into a disk-backed, crash-resumable embedding memmap.
 
@@ -107,10 +339,17 @@ def _encode_with_resume(
     instead of redoing the multi-hour encode after any later-stage crash. Each
     chunk logs throughput, ETA, and an RSS watermark so an approaching OOM shows
     up in the logs rather than as a silent kill.
+
+    When ``workers > 1`` and a ``model_provider`` is supplied, the remaining
+    encode is fanned out across a process pool (da#246): each worker builds its
+    own model and encodes a chunk, and the parent writes each block to its fixed
+    row range so the output is byte-identical to the serial path regardless of
+    completion order. ``workers <= 1`` (or too few rows to be worth the process
+    overhead) uses the serial fallback. ``mp_start_method`` defaults to ``spawn``
+    so a torch-initialized parent does not fork into a deadlock.
     """
     import hashlib
     import json as _json
-    import resource
 
     import numpy as np
 
@@ -146,29 +385,27 @@ def _encode_with_resume(
         logger.info("dedup_encoding_resume_complete", count=n)
         return emb
 
-    logger.info("dedup_encoding", count=n, batch_size=batch_size, resume_from=start)
-    t0 = time.monotonic()
-    for s in range(start, n, batch_size):
-        e = min(s + batch_size, n)
-        emb[s:e] = model.encode(  # type: ignore[attr-defined]
-            texts[s:e],
-            batch_size=batch_size,
-            show_progress_bar=False,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
+    remaining = n - start
+    # Only fan out when the process/model-build overhead is amortized by enough
+    # remaining work; otherwise the serial path is faster and simpler.
+    use_parallel = (
+        workers > 1 and model_provider is not None and remaining >= max(2 * batch_size, 2)
+    )
+    logger.info(
+        "dedup_encoding",
+        count=n,
+        batch_size=batch_size,
+        resume_from=start,
+        workers=workers if use_parallel else 1,
+    )
+    if use_parallel:
+        assert model_provider is not None  # narrowed by use_parallel
+        _encode_range_parallel(
+            texts, emb, start, n, batch_size, workers, model_provider, prog_path, mp_start_method
         )
-        prog_path.write_text(str(e))
-        elapsed = time.monotonic() - t0
-        rate = (e - start) / elapsed if elapsed > 0 else 0.0
-        logger.info(
-            "dedup_encoding_progress",
-            processed=e,
-            total=n,
-            pct=round(e / n * 100, 1),
-            rate_per_s=round(rate, 1),
-            eta_s=round((n - e) / rate) if rate > 0 else None,
-            rss_mb=round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024),
-        )
+    else:
+        _encode_range_serial(texts, emb, start, n, batch_size, prog_path, model)
+
     emb.flush()
     logger.info("dedup_embeddings_saved", shape=[n, dim], dir=str(staging_dir))
     return emb
@@ -181,6 +418,7 @@ def run_dedup(
     top_k: int = 50,
     threshold: float = 0.70,
     index_type: str = "flat",
+    encode_workers: int | None = None,
 ) -> Path:
     """Run full hadith deduplication pipeline.
 
@@ -197,6 +435,11 @@ def run_dedup(
     index_type:
         FAISS index type -- ``"flat"`` for IndexFlatIP,
         ``"ivf"`` for IndexIVFFlat (better for large datasets).
+    encode_workers:
+        Number of processes for the embedding encode (da#246). ``None`` (the
+        default) reads ``DEDUP_ENCODE_WORKERS`` from settings; ``0``/unset means
+        auto-scale to the box; ``1`` forces the serial fallback. Any value is
+        clamped to the physical core count to avoid oversubscription.
 
     Returns
     -------
@@ -238,7 +481,21 @@ def run_dedup(
     # ------------------------------------------------------------------
     # `embeddings` is the memmap itself: already float32 and C-contiguous, so it
     # feeds FAISS directly without an extra full-size in-RAM copy.
-    embeddings = _encode_with_resume(texts, hadith_ids, staging_dir, model, batch_size)
+    from src.config import get_settings
+
+    workers_setting = (
+        encode_workers if encode_workers is not None else get_settings().dedup_encode_workers
+    )
+    workers = _resolve_encode_workers(workers_setting, len(texts))
+    embeddings = _encode_with_resume(
+        texts,
+        hadith_ids,
+        staging_dir,
+        model,
+        batch_size,
+        workers=workers,
+        model_provider=_build_default_model,
+    )
 
     # ------------------------------------------------------------------
     # 4. Build FAISS index & search
