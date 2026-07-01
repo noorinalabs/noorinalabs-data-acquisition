@@ -238,15 +238,23 @@ _EDGE_PUNCT = " \t\r\n,،.;؛:-_\"'«»()[]"
 
 
 def strip_markup(name: str | None) -> str:
-    """Remove angle-bracket markup tags + stray brackets and trim edge punctuation.
+    """Clean the voweled DISPLAY name: markup + colon-joined prose + edge punct.
 
-    Display-safe cleaner for the voweled ``name_raw`` (keeps diacritics); the
-    normalized name goes through :func:`clean_narrator_name` instead.
+    Display-safe cleaner for the voweled ``name_raw`` (keeps diacritics). It strips
+    angle-bracket markup tags + stray brackets, then truncates a
+    ``<name>:<English-prose>`` colon-join at the prose boundary (da#253) via
+    :func:`_truncate_colon_prose` — so the DISPLAY field never carries a hadith matn
+    (the reported prod node ``nar:00063b2c…`` was an English fallback narrator whose
+    ``name_ar`` was the matn). The parallel normalized clustering key goes through
+    :func:`clean_narrator_name`; this keeps the two in lock-step. Only colon spans
+    whose tail begins with an English leader are cut — Arabic voweled names and
+    ordinary names (no such colon) are returned unchanged.
     """
     if not name:
         return ""
     cleaned = _MARKUP_RE.sub(" ", name).replace("<", " ").replace(">", " ")
-    return " ".join(cleaned.split()).strip(_EDGE_PUNCT).strip()
+    cleaned = _truncate_colon_prose(" ".join(cleaned.split()))
+    return cleaned.strip(_EDGE_PUNCT).strip()
 
 
 def _truncate_colon_prose(text: str) -> str:

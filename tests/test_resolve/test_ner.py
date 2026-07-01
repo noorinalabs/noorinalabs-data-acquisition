@@ -84,6 +84,32 @@ class TestLoadPhase1Mentions:
         rows = _load_phase1_mentions(tmp_path, "lk", "narrator_mentions_lk.parquet")
         assert rows[0]["name_raw"] == "\u0639\u0644\u064a"
 
+    def test_colon_join_display_and_key_both_cleaned(self, tmp_path: Path) -> None:
+        """da#253 coupling: an English-only mention whose name is a "<name>:<matn>"
+        colon-join (the reported prod node nar:00063b2c… shape) must have BOTH its
+        clustering key (name_normalized, via clean_narrator_name) AND its DISPLAY
+        field (name_raw, via strip_markup) cleaned. Exercises _load_phase1_mentions
+        end-to-end — the stage coupling clean_narrator_name in isolation can't cover.
+        Pre-fix, strip_markup left name_raw = the full matn (display still polluted)."""
+        polluted = "Thawban:The Messenger of Allah (\ufdfa) sacrificed during a journey and then"
+        mentions = [
+            {
+                "mention_id": "m-253",
+                "source_hadith_id": "h-253",
+                "source_corpus": "sunnah",
+                "position_in_chain": 0,
+                "name_ar": None,
+                "name_en": polluted,
+                "name_ar_normalized": None,
+                "transmission_method": None,
+            },
+        ]
+        _write_narrator_mentions_parquet(tmp_path / "narrator_mentions_sunnah.parquet", mentions)
+        rows = _load_phase1_mentions(tmp_path, "sunnah", "narrator_mentions_sunnah.parquet")
+        assert len(rows) == 1
+        assert rows[0]["name_raw"] == "Thawban"  # DISPLAY field cleaned (the CR gap)
+        assert rows[0]["name_normalized"] == "Thawban"  # clustering key cleaned
+
     def test_falls_back_to_english_name(self, tmp_path: Path) -> None:
         mentions = [
             {

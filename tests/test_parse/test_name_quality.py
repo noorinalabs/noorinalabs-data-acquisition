@@ -15,6 +15,8 @@ class TestStripMarkup:
             ("<NAR> <NAR> عبد الرحمن", "عبد الرحمن"),
             ("اسماعيل <IDF> يعني</IDF> ابن عليه", "اسماعيل يعني ابن عليه"),
             ("شيخ من اهل المدينه ,", "شيخ من اهل المدينه"),
+            # da#253: colon-joined English matn truncated to the bare display name
+            ("Thawban:The Messenger of Allah sacrificed and then", "Thawban"),
             ("", ""),
             (None, ""),
         ],
