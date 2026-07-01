@@ -19,6 +19,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from rapidfuzz import fuzz
 
+from src.models.enums import DatePrecision
 from src.parse.identity import make_canonical_id
 from src.resolve.fuzzy_cluster import (
     cluster_assignment,
@@ -281,3 +282,23 @@ def test_empty_and_missing_inputs_are_noops(tmp_path: Path) -> None:
     _write_canonical(empty, [])
     m2 = cluster_canonical_narrators(empty)
     assert m2.input_records == 0 and m2.merged_records == 0
+
+
+def test_unset_precision_defaults_to_unknown(tmp_path: Path) -> None:
+    """da#239: records carrying no precision key must round-trip through the
+    builder with both precision columns defaulted to UNKNOWN — never null."""
+    # Two distinct narrators (no merge) — each _rec leaves precision unset (None).
+    a = _rec("محمد بن اسماعيل البخاري", source_corpora=["itqan"])
+    b = _rec("فاطمة بنت قيس", source_corpora=["muhaddithat"])
+    canonical = tmp_path / "narrators_canonical.parquet"
+    _write_canonical(canonical, [a, b])
+
+    cluster_canonical_narrators(canonical)
+
+    rows = pq.read_table(canonical).to_pylist()
+    assert len(rows) == 2
+    for rec in rows:
+        assert rec["birth_date_precision"] == DatePrecision.UNKNOWN.value
+        assert rec["death_date_precision"] == DatePrecision.UNKNOWN.value
+        assert rec["birth_date_precision"] is not None
+        assert rec["death_date_precision"] is not None

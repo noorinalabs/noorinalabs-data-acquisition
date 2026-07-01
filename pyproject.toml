@@ -95,6 +95,10 @@ module = ["sentence_transformers", "sentence_transformers.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+module = ["torch", "torch.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 module = ["testcontainers", "testcontainers.*"]
 ignore_missing_imports = true
 

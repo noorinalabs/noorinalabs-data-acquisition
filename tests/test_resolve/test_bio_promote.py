@@ -8,6 +8,7 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from src.models.enums import DatePrecision
 from src.parse.identity import make_canonical_id
 from src.parse.schemas import NARRATOR_ALIAS_SCHEMA, NARRATOR_BIO_SCHEMA
 from src.resolve.bio_promote import promote_bios_to_canonical
@@ -307,3 +308,34 @@ def test_alias_source_filter_respected(tmp_path: Path) -> None:
         r for r in pq.read_table(path).to_pylist() if r["canonical_id"] == make_canonical_id(norm)
     )
     assert rec["aliases"] == []
+
+
+def test_unset_precision_defaults_to_unknown(tmp_path: Path) -> None:
+    """da#239: bio-only narrators carry no precision key, so the builder must
+    default both precision columns to UNKNOWN — never null (matches disambiguate
+    and the da#161 Narrator non-Optional invariant)."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+    name = "سعيد بن سماك"
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:320",
+                "source": "itqan",
+                "name_ar": name,
+                "name_ar_normalized": normalize_arabic(name),
+            }
+        ],
+    )
+
+    path = promote_bios_to_canonical(staging, out_dir)
+    assert path is not None
+    rec = pq.read_table(path).to_pylist()[0]
+    assert rec["birth_date_precision"] == DatePrecision.UNKNOWN.value
+    assert rec["death_date_precision"] == DatePrecision.UNKNOWN.value
+    assert rec["birth_date_precision"] is not None
+    assert rec["death_date_precision"] is not None

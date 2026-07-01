@@ -19,6 +19,16 @@ Background (da#247): on the pre-fix resolve output 39.9% of canonical narrators
    "name" that is really a sentence fragment (``"It was narrated…"``, ``"The
    Prophet said…"``, ``"his father"``). Caught by an English non-name leader-word
    guard; romanized real names (``"Abu Huraira"``, ``"Al-Zuhri"``) are kept.
+2c. English ``<name>:<matn>`` colon-joins (da#253) — a companion name colon-joined
+   to a hadith body (``"Thawban:The Messenger of Allah (ﷺ) sacrificed during a
+   journey and then…"``). This defeats BOTH 2b guards: the leader guard only
+   inspects ``tokens[0]`` (here ``"Thawban:The"`` — the colon is *internal*, so
+   ``"thawban:the"`` is not a leader), and the ~11-token body sits under the token
+   cap. Handled two ways: (i) truncate the span at the first colon whose tail
+   begins with an English leader — recovering the pre-colon name (``"Thawban"``);
+   (ii) a residual embedded-prose guard drops any span carrying two or more
+   whole-token English function/stop words (real romanized names carry zero;
+   Arabic script never matches an ASCII word).
 3. mubham (unnamed) descriptors minted as named narrators — both *collective*
    phrases (``"رجل من اصحاب النبي"``, ``"جماعه من اصحاب"``) and bare *relational
    pronouns* (``"ابيه"`` "his father", ``"جده"`` "his grandfather"), plus bare
@@ -212,20 +222,60 @@ _EN_NONNAME_LEADERS = frozenset(
 # thaqalayn parser fix, not this backstop, is the real remedy for the text dumps).
 _MAX_NAME_TOKENS = 30
 
+# An English/romanized span carrying at least this many WHOLE-token non-name leader
+# words (articles, pronouns, prepositions, transmission verbs — "of", "the", "and",
+# "then", "narrated", …) is translated isnad PROSE, not a name (da#253). A real
+# romanized narrator name carries ZERO such tokens — the genuine name-leaders
+# (abu/ibn/abd/umm/al/an/…) are deliberately excluded from _EN_NONNAME_LEADERS —
+# and an Arabic-script token can never equal an ASCII word, so this guard has no
+# false-positive surface on real names while catching embedded matn prose that
+# neither leads with a leader (step 7) nor exceeds the token cap (step 4). Set to 2:
+# a lone leading leader is already handled by step 7's first-token check.
+_MIN_PROSE_LEADER_TOKENS = 2
+
 # Trailing / edge punctuation seen on extracted spans ("شيخ من اهل المدينه ,").
 _EDGE_PUNCT = " \t\r\n,،.;؛:-_\"'«»()[]"
 
 
 def strip_markup(name: str | None) -> str:
-    """Remove angle-bracket markup tags + stray brackets and trim edge punctuation.
+    """Clean the voweled DISPLAY name: markup + colon-joined prose + edge punct.
 
-    Display-safe cleaner for the voweled ``name_raw`` (keeps diacritics); the
-    normalized name goes through :func:`clean_narrator_name` instead.
+    Display-safe cleaner for the voweled ``name_raw`` (keeps diacritics). It strips
+    angle-bracket markup tags + stray brackets, then truncates a
+    ``<name>:<English-prose>`` colon-join at the prose boundary (da#253) via
+    :func:`_truncate_colon_prose` — so the DISPLAY field never carries a hadith matn
+    (the reported prod node ``nar:00063b2c…`` was an English fallback narrator whose
+    ``name_ar`` was the matn). The parallel normalized clustering key goes through
+    :func:`clean_narrator_name`; this keeps the two in lock-step. Only colon spans
+    whose tail begins with an English leader are cut — Arabic voweled names and
+    ordinary names (no such colon) are returned unchanged.
     """
     if not name:
         return ""
     cleaned = _MARKUP_RE.sub(" ", name).replace("<", " ").replace(">", " ")
-    return " ".join(cleaned.split()).strip(_EDGE_PUNCT).strip()
+    cleaned = _truncate_colon_prose(" ".join(cleaned.split()))
+    return cleaned.strip(_EDGE_PUNCT).strip()
+
+
+def _truncate_colon_prose(text: str) -> str:
+    """Cut a ``<name>:<English-prose>`` colon-join at the prose boundary (da#253).
+
+    Returns ``text`` up to (excluding) the first ``:`` whose following segment
+    begins with an English non-name leader word; if no such colon exists the text
+    is returned unchanged. This recovers the pre-colon name (``"Thawban"``) from a
+    ``"Thawban:The Messenger …"`` matn-join, while leaving colon-free names and
+    ``"name:name"`` joins (whose tail is a real name, not a leader) untouched.
+    """
+    if ":" not in text:
+        return text
+    segments = text.split(":")
+    kept = [segments[0]]
+    for seg in segments[1:]:
+        head = seg.strip(_EDGE_PUNCT).split()
+        if head and head[0].lower() in _EN_NONNAME_LEADERS:
+            break
+        kept.append(seg)
+    return ":".join(kept)
 
 
 def clean_narrator_name(name_normalized: str | None) -> str | None:
@@ -245,6 +295,15 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
     for phrase in _HONORIFIC_PHRASES:
         if phrase in text:
             text = text.replace(phrase, " ")
+
+    # 2b. Colon-joined English prose (da#253). Some sources emit "<name>:<matn>" —
+    #     a companion name colon-joined to a hadith body ("Thawban:The Messenger of
+    #     Allah … sacrificed …"). The colon is INTERNAL to the whitespace token
+    #     ("Thawban:The"), so it hides the prose leader "The" from step 7's tokens[0]
+    #     check, and an ~11-token body stays under the step-4 cap. Truncate at the
+    #     first colon whose tail begins with an English leader, keeping the pre-colon
+    #     name to be re-validated by every guard below (recovers "Thawban").
+    text = _truncate_colon_prose(text)
 
     # 3. Tokenize: strip edge punctuation from each token, then drop the editorial
     #    connective and any pure-punctuation tokens. Without the per-token strip a
@@ -279,6 +338,15 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
     #    "his father"). Name-leaders (abu/ibn/abd/al/…) are excluded from the set,
     #    so romanized narrators are never touched. Case-folded; a no-op on Arabic.
     if tokens[0].lower() in _EN_NONNAME_LEADERS:
+        return None
+
+    # 8. Embedded English prose without a leading leader (da#253). A "<name>:<matn>"
+    #    join whose tail step 2b could not fully strip, or a name+prose run, still
+    #    reads as a sentence: it carries multiple English function/stop words ("of",
+    #    "and", "then", "narrated"). A real romanized name carries ZERO leader tokens
+    #    and an Arabic name can never match an ASCII word — so >= 2 signals prose.
+    leader_tokens = sum(1 for t in tokens if t.lower() in _EN_NONNAME_LEADERS)
+    if leader_tokens >= _MIN_PROSE_LEADER_TOKENS:
         return None
 
     return " ".join(tokens)

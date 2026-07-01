@@ -57,6 +57,10 @@ class Settings(BaseSettings):
         "end_times",
     ]
 
+    # Dedup embedding-encode parallelism (da#246). 0 = auto (scale to the box,
+    # capped in dedup); 1 = serial; >1 = that many workers, clamped to cores.
+    dedup_encode_workers: int = 0
+
     log_level: str = "INFO"
     log_format: str = "console"
 
