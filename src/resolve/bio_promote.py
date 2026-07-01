@@ -25,6 +25,7 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from src.models.enums import DatePrecision
 from src.parse.base import safe_str, write_parquet
 from src.parse.identity import make_canonical_id
 from src.resolve.schemas import NARRATORS_CANONICAL_SCHEMA
@@ -219,6 +220,11 @@ def promote_bios_to_canonical(
 
     table_rows = list(canonical_map.values())
     arrays = {f.name: [r.get(f.name) for r in table_rows] for f in NARRATORS_CANONICAL_SCHEMA}
+    # Precision columns default to UNKNOWN (never null), matching disambiguate and
+    # the da#161 Narrator non-Optional invariant — bio-only narrators carry no
+    # precision key, so the generic projection above would leave them null (da#239).
+    for col in ("birth_date_precision", "death_date_precision"):
+        arrays[col] = [r.get(col) or DatePrecision.UNKNOWN.value for r in table_rows]
     out_table = pa.table(arrays, schema=NARRATORS_CANONICAL_SCHEMA)
     write_parquet(out_table, canonical_path, schema=NARRATORS_CANONICAL_SCHEMA)
 

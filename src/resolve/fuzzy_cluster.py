@@ -76,6 +76,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from rapidfuzz import fuzz, process
 
+from src.models.enums import DatePrecision
 from src.parse.base import safe_str, write_parquet
 from src.parse.identity import make_canonical_id
 from src.resolve.schemas import NARRATOR_MENTIONS_RESOLVED_SCHEMA, NARRATORS_CANONICAL_SCHEMA
@@ -811,6 +812,11 @@ def _merge_cluster(members: list[dict[str, Any]]) -> dict[str, Any]:
 def _build_table(rows: list[dict[str, Any]]) -> pa.Table:
     """Project merged rows onto NARRATORS_CANONICAL_SCHEMA."""
     arrays = {f.name: [r.get(f.name) for r in rows] for f in NARRATORS_CANONICAL_SCHEMA}
+    # Precision columns default to UNKNOWN (never null), matching disambiguate and
+    # the da#161 Narrator non-Optional invariant — merged rows may carry no precision
+    # key, so the generic projection above would leave them null (da#239).
+    for col in ("birth_date_precision", "death_date_precision"):
+        arrays[col] = [r.get(col) or DatePrecision.UNKNOWN.value for r in rows]
     return pa.table(arrays, schema=NARRATORS_CANONICAL_SCHEMA)
 
 
