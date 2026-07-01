@@ -135,6 +135,51 @@ class TestCleanNarratorName:
     def test_romanized_name_preserved(self, romanized: str) -> None:
         assert clean_narrator_name(romanized) == romanized
 
+    # --- English "<name>:<matn>" colon-join (da#253) ---
+    # The reported prod node nar:00063b2c-… had name_en = a companion name
+    # colon-joined to a hadith matn. The internal colon hides the "The" leader
+    # from step 7's tokens[0] check and the ~11-token body sits under the token
+    # cap, so the pre-fix filter passed it through. The fix truncates at the colon
+    # whose tail begins with an English leader, recovering the bare name.
+    def test_colon_joined_matn_recovers_bare_name(self) -> None:
+        polluted = "Thawban:The Messenger of Allah (ﷺ) sacrificed during a journey and then"
+        assert clean_narrator_name(polluted) == "Thawban"
+
+    @pytest.mark.parametrize(
+        "polluted,expected",
+        [
+            # short colon-join (escapes the >=2-leader guard; caught by colon-split)
+            ("Anas:He said this", "Anas"),
+            ("Jabir:It was narrated", "Jabir"),
+            ("Aisha:The Prophet said", "Aisha"),
+            # a pre-colon name that is itself prose still fails the leader guard
+            ("The Messenger:said something", None),
+        ],
+    )
+    def test_colon_join_variants(self, polluted: str, expected: str | None) -> None:
+        assert clean_narrator_name(polluted) == expected
+
+    # --- embedded English prose with no leading leader (da#253, step 8) ---
+    # A name+matn run carrying >= 2 whole-token English function/stop words is a
+    # sentence, not a name — even when it neither leads with a leader nor exceeds
+    # the token cap.
+    @pytest.mark.parametrize(
+        "prose",
+        [
+            "Thawban sacrificed during a journey and then narrated",
+            "Bilal called the people to prayer and stood",
+        ],
+    )
+    def test_embedded_prose_rejected(self, prose: str) -> None:
+        assert clean_narrator_name(prose) is None
+
+    # --- PRECISION: a "name:name" colon-join (tail is a real name, not a leader)
+    # must NOT be dropped — only prose tails are stripped. ---
+    def test_colon_join_name_name_preserved(self) -> None:
+        result = clean_narrator_name("Sufyan:Ibn Uyayna")
+        assert result is not None
+        assert "Uyayna" in result
+
     # --- over-long span (thaqalayn whole-text) rejected ---
     def test_overlong_text_rejected(self) -> None:
         long_text = " ".join(["كلمه"] * 40)
