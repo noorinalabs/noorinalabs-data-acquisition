@@ -37,6 +37,40 @@ Background (da#247): on the pre-fix resolve output 39.9% of canonical narrators
    (65,755) on the #723 stage reload because it has no partitive ``من`` for the
    collective guard to catch.
 
+The Arabic-script residual (da#258) — the direct sibling of da#253's English
+``<name>:<matn>`` fix — is three more classes that leak *Arabic* isnad/matn text
+into the name field, none catchable by a token-count cap (real ``ibn``-lineage
+names reach ~30 tokens):
+
+4. **Genuine matn body** — a whole sentence dumped in the name field
+   (``"كان علي بن ابي طالب بالكوفه في الجامع اذ قام اليه رجل …"`` "Ali ibn Abi
+   Talib was in Kufa in the mosque when a man stood …"). Signalled by Arabic
+   matn/verb function words (``كان``/``قال``/``اذ``/``الذي``/``لما``/…), NOT by
+   length. Dropped — but only when no real leading name precedes the matn.
+5. **Chain-connective fragments** — a real name followed by an isnad connective
+   that opens the *next* link: ``"ابو عبد الرحمن عن ابي هريره"`` ("Abu Abd
+   al-Rahman FROM Abu Huraira"), ``"سالم بن عبد الله ان عبد الله بن عمر"``,
+   ``"ابو العنبس الذي …"``, ``"بندار هو محمد بن بشار"`` (an editorial gloss).
+   Truncated at the connective, keeping the leading name (recovers ``"بندار"`` =
+   Ibn Bashshar, ``"عاءشه"`` from ``"عاءشه قالت كان"``) — the Arabic mirror of
+   da#253's :func:`_truncate_colon_prose`.
+6. **Compound co-narrator joins** — multiple REAL narrators joined by ``و … جميعا``
+   / ``X و Y و Z قالوا`` ("… together" / "… they said"): ``"سعد بن عبد الله و عبد
+   الله بن جعفر الحميري جميعا"``. These must be **split into separate narrators,
+   not dropped** — losing the co-narrators (and their mention edges) is a
+   regression. :func:`split_compound_narrators` is the detection+split primitive;
+   emitting one mention row per split member is a resolve-stage (``ner.py``) change
+   tracked as a scoped follow-up, so :func:`clean_narrator_name` deliberately does
+   **not** drop an un-split compound (no matn token fires on a name-only ``و``-join).
+
+Classes 4+5 unify into a single **truncate-at-first-isnad-boundary** rule
+(:data:`_ISNAD_BOUNDARY`): cut the span at the first matn-verb / connective /
+relative-pronoun / gloss token and keep the preceding real name; if that boundary
+token *leads* the span (no name before it) the span is dropped (the real narrator
+sits after an elided-grammar verb and is unrecoverable here). A residual
+matn-density backstop (:data:`_MATN_DENSITY`, ≥2) drops any sentence whose first
+boundary is a non-verb preposition the truncation cannot anchor on.
+
 The phrase constants are in **normalized-Arabic** form (post
 ``normalize_arabic``) because this runs on ``name_normalized``.
 """
@@ -45,7 +79,7 @@ from __future__ import annotations
 
 import re
 
-__all__ = ["clean_narrator_name", "strip_markup"]
+__all__ = ["clean_narrator_name", "split_compound_narrators", "strip_markup"]
 
 # Angle-bracket markup that leaks from source isnad fields (sanadset <NAR>/<IDF>
 # tags, frequently unclosed or nested). Stripped, not rejected — the tag usually
@@ -233,6 +267,95 @@ _MAX_NAME_TOKENS = 30
 # a lone leading leader is already handled by step 7's first-token check.
 _MIN_PROSE_LEADER_TOKENS = 2
 
+# --- Arabic isnad/matn residual (da#258) ---------------------------------------
+# Whole-token (normalized-Arabic) boundary markers: the first one seen in a span
+# ends the *name* and begins isnad/matn text. Truncating at the first boundary and
+# keeping the preceding tokens recovers the real leading narrator (class 5, chain
+# connectives + editorial glosses), and dropping when the boundary *leads* the span
+# handles the matn body whose name was elided (class 4). NONE of these is ever a
+# legitimate name component — they are transmission/matn verbs, the isnad
+# subordinators عن ("from") / ان ("that"), relative pronouns, temporal particles,
+# and the "هو … / قيل …" identification glosses — so a real name (verified: every
+# ibn-lineage nasab in the da#247 test set) contains zero of them and is never cut.
+# The compound conjunction و and the co-narrator marker جميعا are deliberately
+# EXCLUDED: a name-only "X و Y جميعا" join is a class-6 compound to be SPLIT
+# (split_compound_narrators), not truncated/dropped — losing co-narrators regresses.
+_ISNAD_BOUNDARY = frozenset(
+    {
+        # transmission / matn verbs
+        "كان",
+        "كانت",
+        "قال",
+        "قالت",
+        "قالوا",
+        "فقال",
+        "فقالت",
+        "يقول",
+        "تقول",
+        "حدثنا",
+        "حدثني",
+        "اخبرنا",
+        "اخبرني",
+        "انبانا",
+        "سمعت",
+        "حدثاه",
+        "جاء",
+        "قام",
+        "سال",
+        "فساله",
+        # isnad subordinators / relative pronouns / clause-opening particles
+        "عن",
+        "ان",
+        "الذي",
+        "التي",
+        "الذين",
+        "اذ",
+        "حين",
+        "حينما",
+        "لما",
+        "فلما",
+        "ثم",
+        "حتى",
+        "والله",
+        # editorial identification glosses ("he is …", "it is said …")
+        "هو",
+        "وهو",
+        "قيل",
+        "يقال",
+    }
+)
+
+# Matn-density backstop: a span whose leading tokens form a real name but whose tail
+# is matn NOT anchored by an _ISNAD_BOUNDARY verb (e.g. a bare-preposition run) is
+# still a sentence. ≥2 whole-token matn/particle words → drop. A real name carries
+# zero; the threshold of 2 protects a lone trailing particle and, crucially, a
+# class-6 compound that ends in a single قالوا join-marker (density 1 → preserved).
+_MATN_DENSITY = frozenset(
+    {
+        "كان",
+        "كانت",
+        "قال",
+        "قالت",
+        "قالوا",
+        "فقال",
+        "يقول",
+        "اذ",
+        "حين",
+        "لما",
+        "فلما",
+        "ثم",
+        "حتى",
+        "والله",
+        "هو",
+        "وهو",
+    }
+)
+
+# Compound co-narrator join marker: a span ending in one of these ("… together",
+# "… they said") is multiple narrators (class 6). Used by split_compound_narrators
+# to confirm a compound and to strip the trailing marker before splitting.
+_COMPOUND_TRAILING_MARKERS = frozenset({"جميعا", "قالوا"})
+
 # Trailing / edge punctuation seen on extracted spans ("شيخ من اهل المدينه ,").
 _EDGE_PUNCT = " \t\r\n,،.;؛:-_\"'«»()[]"
 
@@ -278,12 +401,89 @@ def _truncate_colon_prose(text: str) -> str:
     return ":".join(kept)
 
 
+def _truncate_at_isnad_boundary(tokens: list[str]) -> list[str] | None:
+    """Cut a span at the first isnad/matn boundary token (da#258 classes 4+5).
+
+    Returns the leading tokens up to (excluding) the first token in
+    :data:`_ISNAD_BOUNDARY` — recovering the real narrator that precedes an isnad
+    connective / matn verb / editorial gloss (``"ابو محمد بصري عن محمد بن علي"`` →
+    ``["ابو","محمد","بصري"]``; ``"عاءشه قالت كان"`` → ``["عاءشه"]``). Returns
+    ``None`` when the boundary *leads* the span (``"كان علي …"``, ``"قالوا"``) —
+    the real narrator sits after an elided-grammar verb and cannot be recovered
+    here. When no boundary token is present the tokens are returned unchanged.
+    """
+    for i, tok in enumerate(tokens):
+        if tok in _ISNAD_BOUNDARY:
+            if i == 0:
+                return None
+            return tokens[:i]
+    return tokens
+
+
+def split_compound_narrators(name_normalized: str | None) -> list[str]:
+    """Split a compound co-narrator join into its member names (da#258 class 6).
+
+    Detection + split primitive for the ``X و Y … جميعا`` / ``X و Y و Z قالوا``
+    form — multiple REAL narrators joined by the conjunction ``و`` ("and") and a
+    trailing co-narrator marker (``جميعا`` "together" / ``قالوا`` "they said").
+    Returns the list of member name strings (each still to be run through
+    :func:`clean_narrator_name` by the caller); returns a single-element list
+    ``[name]`` when the span is not a compound, and ``[]`` for empty input.
+
+    The trailing marker is stripped first, then the span is split on the
+    conjunction in both its shapes: a standalone ``و`` token (``"سعد … و عبد الله
+    …"``) and a proclitic ``و`` prefix on a member (``"… وقتيبه وابن حجر"``). The
+    proclitic split fires **only inside a confirmed compound** (a standalone ``و``
+    or a trailing marker is present) so it never mutates a lone ``و``-initial real
+    name (``وكيع`` "Waki'", ``وهب`` "Wahb") outside that context.
+
+    NOTE (scope): this is the detection/split *primitive*. Emitting one narrator
+    mention row per member is a resolve-stage change to ``src/resolve/ner.py``'s two
+    call sites (they currently map one span → one row) and is tracked as a scoped
+    follow-up; until it is wired in, an un-split compound survives unchanged (it is
+    never dropped — see :func:`clean_narrator_name`), so no co-narrator is lost.
+    """
+    if not name_normalized:
+        return []
+    tokens = [s for t in name_normalized.split() if (s := t.strip(_EDGE_PUNCT))]
+    if not tokens:
+        return []
+
+    has_standalone_waw = "و" in tokens
+    has_trailing_marker = tokens[-1] in _COMPOUND_TRAILING_MARKERS
+    # A single proclitic-و member alone (e.g. "وقتيبه") is NOT a compound; require a
+    # standalone-و OR a trailing جميعا/قالوا marker to confirm a multi-narrator join.
+    if not (has_standalone_waw or has_trailing_marker):
+        return [name_normalized.strip()]
+
+    # Strip the trailing co-narrator marker(s) before splitting.
+    while tokens and tokens[-1] in _COMPOUND_TRAILING_MARKERS:
+        tokens.pop()
+
+    members: list[list[str]] = [[]]
+    for tok in tokens:
+        if tok == "و":  # standalone conjunction → member boundary
+            members.append([])
+        elif tok.startswith("و") and len(tok) > 1 and members[-1]:
+            # proclitic-و on a non-first member ("وقتيبه") → boundary + keep tail
+            members.append([tok[1:]])
+        else:
+            members[-1].append(tok)
+
+    parts = [" ".join(m) for m in members if m]
+    return parts or [name_normalized.strip()]
+
+
 def clean_narrator_name(name_normalized: str | None) -> str | None:
     """Clean a normalized narrator name; return the cleaned name or ``None`` to drop.
 
     Strips markup tags, the editorial ``يعني`` connective and honorific phrases,
-    then drops the span when it is empty, over-long (phrase / text body), or a
-    mubham collective descriptor. Operates in normalized-Arabic space.
+    truncates a colon-joined English matn (da#253) or an Arabic isnad/matn tail
+    (da#258 classes 4+5, recovering the leading narrator), then drops the span when
+    it is empty, over-long (phrase / text body), a mubham collective descriptor, an
+    English prose fragment, or a matn body. Operates in normalized-Arabic space.
+    An un-split class-6 compound (``X و Y جميعا``) is preserved, not dropped — see
+    :func:`split_compound_narrators`.
     """
     if not name_normalized:
         return None
@@ -318,6 +518,20 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
     if not tokens:
         return None
 
+    # 3c. Arabic isnad/matn boundary truncation (da#258 classes 4+5). Cut the span
+    #     at the first matn-verb / isnad-connective / relative-pronoun / gloss token
+    #     ("عن", "ان", "الذي", "كان", "قالت", "هو", …), keeping the real leading
+    #     narrator that precedes it ("ابو محمد بصري عن محمد بن علي" → "ابو محمد
+    #     بصري"; "عاءشه قالت كان" → "عاءشه"; "بندار هو محمد بن بشار" → "بندار"). A
+    #     boundary that LEADS the span ("كان علي …", bare "قالوا"/"ثم") leaves no
+    #     name → drop. None of these tokens is ever a name component, so real nasab
+    #     lineages are never cut. Runs before the token cap so a truncated lead is
+    #     re-measured, not the raw sentence.
+    truncated = _truncate_at_isnad_boundary(tokens)
+    if truncated is None:
+        return None
+    tokens = truncated
+
     # 4. Over-long span → phrase / sentence / mis-parsed hadith body.
     if len(tokens) > _MAX_NAME_TOKENS:
         return None
@@ -347,6 +561,15 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
     #    and an Arabic name can never match an ASCII word — so >= 2 signals prose.
     leader_tokens = sum(1 for t in tokens if t.lower() in _EN_NONNAME_LEADERS)
     if leader_tokens >= _MIN_PROSE_LEADER_TOKENS:
+        return None
+
+    # 9. Arabic matn-density backstop (da#258 class 4). A span whose leading tokens
+    #    read like a name but whose tail is matn NOT anchored by an _ISNAD_BOUNDARY
+    #    verb (a bare-particle run the step-3c truncation could not cut on) still
+    #    carries >= 2 whole-token matn/particle words. A real name carries zero; a
+    #    class-6 compound ending in a single قالوا marker carries one (density 1) and
+    #    is preserved for splitting.
+    if sum(1 for t in tokens if t in _MATN_DENSITY) >= _MIN_PROSE_LEADER_TOKENS:
         return None
 
     return " ".join(tokens)
