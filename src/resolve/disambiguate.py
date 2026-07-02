@@ -26,6 +26,7 @@ from src.models.enums import DatePrecision
 from src.parse.base import safe_str, write_parquet
 from src.parse.identity import make_canonical_id
 from src.resolve.geography import regions_plausible, resolve_region
+from src.resolve.mononym_split import refine_mononym_name
 from src.resolve.schemas import (
     AMBIGUOUS_NARRATORS_SCHEMA,
     NARRATOR_MENTIONS_RESOLVED_SCHEMA,
@@ -544,6 +545,27 @@ def _backfill_mention_canonical_ids(
 
 
 # ---------------------------------------------------------------------------
+# Mononym-split evidence (da#248)
+# ---------------------------------------------------------------------------
+def _adjacent_death_years(
+    death_year_index: dict[str, int | None], hadith_id: str, position: int
+) -> list[int]:
+    """Death years of the mention's immediate chain neighbours (positions ±1).
+
+    Reads the incrementally-populated ``death_year_index`` (the same soft signal
+    the temporal filter uses), returning only the neighbours already resolved to a
+    dated candidate. This is the chain-context evidence the da#248 mononym split
+    uses to re-resolve a bare over-merged mononym to a specific person.
+    """
+    years: list[int] = []
+    for offset in (-1, 1):
+        year = death_year_index.get(f"{hadith_id}:{position + offset}")
+        if year is not None:
+            years.append(year)
+    return years
+
+
+# ---------------------------------------------------------------------------
 # Canonical ID generation
 # ---------------------------------------------------------------------------
 def _make_canonical_id(name_normalized: str) -> str:
@@ -959,17 +981,36 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
 
             mention_id = str(mention.get("mention_id", ""))
             mention_text = str(mention.get("name_normalized") or mention.get("name_raw") or "")
+            hadith_id = str(mention.get("hadith_id", ""))
+            position = int(mention.get("position_in_chain") or 0)
 
             if best and best.score >= _CONFIDENCE_THRESHOLD:
                 # Resolved to a biographical candidate.
                 source_resolved[corpus] = source_resolved.get(corpus, 0) + 1
                 c = best.candidate
                 norm_name = c.name_ar_normalized or normalize_arabic(c.name_ar or "")
+                name_ar = c.name_ar
+                name_en = c.name_en
+                candidate: Candidate | None = c
+
+                # da#248: split an over-merged bare mononym (e.g. سفيان) into the
+                # specific person the chain neighbours' generations select. Abstains
+                # (leaves norm_name unchanged) for every non-registered name and for
+                # ambiguous/absent evidence, so no single-person node is fragmented.
+                # On a split we drop the ambiguous mononym bio (candidate/name_en) so
+                # its dates/external_id are not stamped onto the specific person.
+                person = refine_mononym_name(
+                    norm_name, _adjacent_death_years(death_year_index, hadith_id, position)
+                )
+                if person is not None:
+                    norm_name = person.norm_name
+                    name_ar = person.name_ar
+                    name_en = None
+                    candidate = None
+
                 canonical_id = _make_canonical_id(norm_name)
 
                 # Update death-year + location indexes for chain context.
-                hadith_id = str(mention.get("hadith_id", ""))
-                position = int(mention.get("position_in_chain") or 0)
                 death_year_index[f"{hadith_id}:{position}"] = c.death_year_ah
                 cand_location = c.death_location or c.birth_location
                 if cand_location:
@@ -979,10 +1020,10 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
                     canonical_map,
                     canonical_id,
                     norm_name=norm_name,
-                    name_ar=c.name_ar,
-                    name_en=c.name_en,
+                    name_ar=name_ar,
+                    name_en=name_en,
                     alias=mention_text,
-                    candidate=c,
+                    candidate=candidate,
                     corpus=corpus,
                 )
                 naive_identity_pairs.add((corpus, canonical_id))
@@ -1010,12 +1051,23 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
                     str(mention.get("name_raw") or "")
                 )
                 if fallback_name:
+                    fallback_name_ar = str(mention.get("name_raw") or "") or None
+                    # da#248: same mononym split on the self-canonicalized path — a
+                    # bare over-merged mononym with no bio match still resolves to the
+                    # specific person the chain neighbours select (or abstains).
+                    person = refine_mononym_name(
+                        fallback_name,
+                        _adjacent_death_years(death_year_index, hadith_id, position),
+                    )
+                    if person is not None:
+                        fallback_name = person.norm_name
+                        fallback_name_ar = person.name_ar
                     fallback_id = _make_canonical_id(fallback_name)
                     _upsert_canonical(
                         canonical_map,
                         fallback_id,
                         norm_name=fallback_name,
-                        name_ar=(str(mention.get("name_raw") or "") or None),
+                        name_ar=fallback_name_ar,
                         name_en=None,
                         alias=None,
                         candidate=None,
