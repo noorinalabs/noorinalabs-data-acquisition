@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from neo4j import GraphDatabase
+from neo4j import GraphDatabase, unit_of_work
 from neo4j import exceptions as neo4j_exc
 
 from src.config import get_settings
@@ -42,12 +42,28 @@ class Neo4jClient:
     # --- reads -----------------------------------------------------------
 
     def execute_read(
-        self, query: str, parameters: dict[str, Any] | None = None
+        self,
+        query: str,
+        parameters: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
     ) -> list[dict[str, Any]]:
-        """Run a read transaction and return a list of record dicts."""
+        """Run a read transaction and return a list of record dicts.
+
+        When *timeout* (seconds) is given, it is applied as a server-side
+        transaction/statement timeout so Neo4j aborts a runaway query and
+        releases its resources rather than running unbounded. On a tripped
+        timeout the driver raises a ``TransactionTimedOut`` error, which
+        propagates to the caller.
+        """
+
+        def _work(tx: Any) -> list[dict[str, Any]]:
+            return list(tx.run(query, parameters or {}).data())
+
+        work = unit_of_work(timeout=timeout)(_work) if timeout is not None else _work
         try:
             with self._driver.session() as session:
-                return session.execute_read(lambda tx: list(tx.run(query, parameters or {}).data()))
+                return session.execute_read(work)
         except neo4j_exc.Neo4jError as exc:
             log.error("neo4j_read_failed", query=query, error=str(exc))
             raise

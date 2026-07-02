@@ -41,7 +41,11 @@ class MockNeo4jClient:
         return self._nodes_created if self._nodes_created else len(batch)
 
     def execute_read(
-        self, query: str, parameters: dict[str, Any] | None = None
+        self,
+        query: str,
+        parameters: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
     ) -> list[dict[str, Any]]:
         self.calls.append((query, parameters or {}))
         return self._read_results

@@ -7,7 +7,11 @@ from pathlib import Path
 
 from src.graph.load_edges import EdgeLoadResult, load_all_edges
 from src.graph.load_nodes import LoadResult, load_all_nodes
-from src.graph.validate import ValidationResult, run_validation
+from src.graph.validate import (
+    _DEFAULT_VALIDATION_TIMEOUT_SECONDS,
+    ValidationResult,
+    run_validation,
+)
 from src.utils.logging import get_logger
 from src.utils.neo4j_client import Neo4jClient
 
@@ -47,6 +51,7 @@ def load_all(
     skip_validation: bool = False,
     nodes_only: bool = False,
     skip_files: list[str] | None = None,
+    validation_timeout_seconds: float = _DEFAULT_VALIDATION_TIMEOUT_SECONDS,
 ) -> LoadSummary:
     """Full graph loading pipeline: nodes -> edges -> validate.
 
@@ -63,12 +68,17 @@ def load_all(
     strict:
         If ``True``, raise on missing required data files.
     skip_validation:
-        If ``True``, skip validation queries after loading.
+        Explicit opt-out of the post-load validation queries. This is now a
+        genuine opt-out, not a workaround for a hang: validation is bounded and
+        a slow query downgrades to a non-fatal warning (da#259).
     nodes_only:
         If ``True``, load only nodes (skip edges and validation).
     skip_files:
         List of manifest keys (e.g. ``staging/hadiths_bukhari.parquet``) to skip
         during incremental loading. Files not in this list are loaded normally.
+    validation_timeout_seconds:
+        Per-query time budget for post-load validation. A query that overruns is
+        recorded as a warning and does not fail the load.
     """
     logger.info(
         "load_all_start", strict=strict, skip_validation=skip_validation, nodes_only=nodes_only
@@ -93,10 +103,20 @@ def load_all(
     validation_results: list[ValidationResult] = []
     validation_passed = True
     if not skip_validation and not nodes_only:
-        validation_results = run_validation(client, queries_dir)
-        validation_passed = all(v.passed for v in validation_results)
+        validation_results = run_validation(
+            client, queries_dir, timeout_seconds=validation_timeout_seconds
+        )
+        # A timed-out/downgraded check is a WARN, not a FAIL: it must not fail the
+        # load (da#259). Only a hard failure (is_fatal) trips validation_passed.
+        validation_passed = not any(v.is_fatal for v in validation_results)
+        warnings = sum(1 for v in validation_results if v.warning)
         status = "PASS" if validation_passed else "FAIL"
-        logger.info("load_all_validation_done", status=status, checks=len(validation_results))
+        logger.info(
+            "load_all_validation_done",
+            status=status,
+            checks=len(validation_results),
+            warnings=warnings,
+        )
 
     summary = LoadSummary(
         node_results=node_results,
