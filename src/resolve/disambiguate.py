@@ -1010,11 +1010,24 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
 
                 canonical_id = _make_canonical_id(norm_name)
 
-                # Update death-year + location indexes for chain context.
-                death_year_index[f"{hadith_id}:{position}"] = c.death_year_ah
-                cand_location = c.death_location or c.birth_location
-                if cand_location:
-                    location_index[f"{hadith_id}:{position}"] = cand_location
+                # Update death-year + location indexes for chain context (da#266).
+                # On a mononym split the chain-context slot must carry the REFINED
+                # person's real death year, not the ambiguous pre-split mononym bio's
+                # (`c`) — else an immediately chain-adjacent registered mononym reads a
+                # stale year and can mis-select among genuinely-distinct persons. The
+                # split already drops `c` (candidate/name_en set None above); the soft
+                # signals must follow. The registry carries no per-person location, and
+                # `c`'s location belongs to whichever person the merged bio represented
+                # (possibly the wrong one post-split), so it is suppressed on a split —
+                # the neighbour simply contributes no geographic signal, same as an
+                # absent-location neighbour.
+                if person is not None:
+                    death_year_index[f"{hadith_id}:{position}"] = person.death_year_ah
+                else:
+                    death_year_index[f"{hadith_id}:{position}"] = c.death_year_ah
+                    cand_location = c.death_location or c.birth_location
+                    if cand_location:
+                        location_index[f"{hadith_id}:{position}"] = cand_location
 
                 _upsert_canonical(
                     canonical_map,
