@@ -119,7 +119,11 @@ def _cmd_resolve() -> None:
 
 
 def _cmd_load(
-    *, skip_validation: bool = False, nodes_only: bool = False, incremental: bool = False
+    *,
+    skip_validation: bool = False,
+    nodes_only: bool = False,
+    incremental: bool = False,
+    validation_timeout: float | None = None,
 ) -> None:
     """Run the Phase 3 graph loading pipeline."""
     import time
@@ -132,6 +136,7 @@ def _cmd_load(
     _check_neo4j()
 
     from src.graph import load_all
+    from src.graph.validate import _DEFAULT_VALIDATION_TIMEOUT_SECONDS
     from src.pipeline.audit import create_audit_entry, write_audit_entry
     from src.pipeline.manifest import (
         LAST_LOADED_MANIFEST_FILENAME,
@@ -174,6 +179,12 @@ def _cmd_load(
                 entry["md5_before"] = previous_manifest[f]["md5"]
             changed_file_details.append(entry)
 
+    timeout_seconds = (
+        validation_timeout
+        if validation_timeout is not None
+        else _DEFAULT_VALIDATION_TIMEOUT_SECONDS
+    )
+
     with Neo4jClient() as client:
         summary = load_all(
             client,
@@ -184,6 +195,7 @@ def _cmd_load(
             skip_validation=skip_validation,
             nodes_only=nodes_only,
             skip_files=skipped_files if incremental else None,
+            validation_timeout_seconds=timeout_seconds,
         )
 
     duration = time.monotonic() - start
@@ -221,44 +233,58 @@ def _cmd_load(
     if summary.validation_results:
         print("\n=== Validation ===")
         for vr in summary.validation_results:
-            status = "PASS" if vr.passed else "FAIL"
-            print(f"  [{status}] {vr.query_name}: {vr.details}")
+            print(f"  [{vr.status}] {vr.query_name}: {vr.details}")
+        warned = [vr for vr in summary.validation_results if vr.warning]
         if not summary.validation_passed:
             print("\nWARNING: Some validation checks failed.")
             sys.exit(1)
+        elif warned:
+            # Non-fatal: the load succeeded and no check hard-failed; one or more
+            # checks were downgraded (e.g. timed out). da#259.
+            print(f"\nLoad OK. {len(warned)} validation check(s) downgraded to warning.")
         else:
             print("\nAll validation checks passed.")
 
 
-def _cmd_validate() -> None:
+def _cmd_validate(*, validation_timeout: float | None = None) -> None:
     """Run graph validation queries against an existing Neo4j database."""
     from pathlib import Path
 
     _check_neo4j()
 
-    from src.graph.validate import run_validation
+    from src.graph.validate import _DEFAULT_VALIDATION_TIMEOUT_SECONDS, run_validation
     from src.utils.neo4j_client import Neo4jClient
 
     queries_dir = Path("queries")
+    timeout_seconds = (
+        validation_timeout
+        if validation_timeout is not None
+        else _DEFAULT_VALIDATION_TIMEOUT_SECONDS
+    )
 
     with Neo4jClient() as client:
-        results = run_validation(client, queries_dir)
+        results = run_validation(client, queries_dir, timeout_seconds=timeout_seconds)
 
     if not results:
         print("No validation queries found.")
         sys.exit(0)
 
     print("=== Validation Results ===")
-    all_passed = True
+    any_fatal = False
+    warned = 0
     for vr in results:
-        status = "PASS" if vr.passed else "FAIL"
-        print(f"  [{status}] {vr.query_name}: {vr.details}")
-        if not vr.passed:
-            all_passed = False
+        print(f"  [{vr.status}] {vr.query_name}: {vr.details}")
+        if vr.is_fatal:
+            any_fatal = True
+        elif vr.warning:
+            warned += 1
 
-    if not all_passed:
+    if any_fatal:
         print("\nWARNING: Some validation checks failed.")
         sys.exit(1)
+    elif warned:
+        # Timed-out/downgraded checks are non-fatal (da#259).
+        print(f"\nValidation OK. {warned} check(s) downgraded to warning.")
     else:
         print("\nAll validation checks passed.")
 
@@ -424,6 +450,8 @@ def _cmd_pipeline() -> None:
 
 def main() -> None:
     """Run the isnad-ingest CLI."""
+    from src.graph.validate import _DEFAULT_VALIDATION_TIMEOUT_SECONDS
+
     parser = argparse.ArgumentParser(description="isnad-ingest: Hadith Data Ingestion Pipeline")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -434,7 +462,13 @@ def main() -> None:
 
     load_parser = subparsers.add_parser("load", help="Load graph database")
     load_parser.add_argument(
-        "--skip-validation", action="store_true", help="Skip validation queries after loading"
+        "--skip-validation",
+        action="store_true",
+        help=(
+            "Explicitly skip post-load validation queries. Not required for a full "
+            "graph load: validation is time-bounded and a slow query downgrades to "
+            "a non-fatal warning (da#259)."
+        ),
     )
     load_parser.add_argument(
         "--nodes-only", action="store_true", help="Load only nodes (skip edges and validation)"
@@ -443,6 +477,16 @@ def main() -> None:
         "--incremental",
         action="store_true",
         help="Only load Parquet files whose hash changed since last load",
+    )
+    load_parser.add_argument(
+        "--validation-timeout",
+        type=float,
+        default=None,
+        help=(
+            "Per-query validation time budget in seconds (default: "
+            f"{int(_DEFAULT_VALIDATION_TIMEOUT_SECONDS)}). On overrun the check "
+            "is reported as a WARN and does not fail the load."
+        ),
     )
 
     enrich_parser = subparsers.add_parser("enrich", help="Compute metrics and enrichment")
@@ -464,7 +508,17 @@ def main() -> None:
         help="Only re-enrich data affected by changed Parquet files",
     )
 
-    subparsers.add_parser("validate", help="Run graph validation queries")
+    validate_parser = subparsers.add_parser("validate", help="Run graph validation queries")
+    validate_parser.add_argument(
+        "--validation-timeout",
+        type=float,
+        default=None,
+        help=(
+            "Per-query validation time budget in seconds (default: "
+            f"{int(_DEFAULT_VALIDATION_TIMEOUT_SECONDS)}). On overrun the check "
+            "is reported as a WARN and is non-fatal."
+        ),
+    )
 
     vs_parser = subparsers.add_parser("validate-staging", help="Validate staging Parquet files")
     vs_parser.add_argument(
@@ -514,11 +568,12 @@ def main() -> None:
             skip_validation=args.skip_validation,
             nodes_only=args.nodes_only,
             incremental=args.incremental,
+            validation_timeout=args.validation_timeout,
         )
     elif args.command == "enrich":
         _cmd_enrich(only=args.only, skip=args.skip, incremental=args.incremental)
     elif args.command == "validate":
-        _cmd_validate()
+        _cmd_validate(validation_timeout=args.validation_timeout)
     elif args.command == "validate-staging":
         from pathlib import Path
 
