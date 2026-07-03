@@ -1073,8 +1073,21 @@ def cluster_canonical_narrators(
         digests, _rows = hash_parquet_column_groups(
             canonical_path, {"content": _FINGERPRINT_CANONICAL_COLS}
         )
+        # The da#270 caps (_MAX_MATCH_KEYS_PER_RECORD / _MAX_BLOCKING_TOKENS_PER_RECORD)
+        # are module constants, not threaded params, but they shape the block
+        # UNIVERSE — the match-key cap feeds keys_cache/tok_cache and the
+        # blocking-token cap feeds pair_index → the `blocks` list membership,
+        # order, and count. Because the resume skip-set is POSITIONAL block indices,
+        # a resume across a cap change would otherwise match the fingerprint yet
+        # restore indices pointing at different blocks. Hashing the caps discards
+        # the checkpoint on any cap change (da#303).
         fingerprint = hash_strings(
-            digests["content"], round(threshold, 6), max_block_size, len(records)
+            digests["content"],
+            round(threshold, 6),
+            max_block_size,
+            len(records),
+            _MAX_MATCH_KEYS_PER_RECORD,
+            _MAX_BLOCKING_TOKENS_PER_RECORD,
         )
 
     clusters = cluster_records(

@@ -89,6 +89,20 @@ extrapolate a head rate to a full-run ETA for a stage whose rate is known to dri
 with position — take a larger `N`, or probe a few separate offsets, before
 trusting the number as a whole-run estimate.
 
+## Resuming across a code change
+
+A checkpoint only resumes when the stage's **input fingerprint** still matches;
+the fingerprint covers the input content plus every knob that shapes the stage's
+output (thresholds, block caps, …). So a code change that alters the fingerprint
+computation — e.g. adding a new field to it (da#303) — makes any checkpoint
+written by the **pre-change** binary mismatch and be **discarded** on resume: the
+stage cold-restarts. That is the safe direction (never a silent misaligned
+resume), but it means if a long run crashes mid-stage and you want to **keep** its
+checkpoint progress, resume with the **same commit that launched the run**, not a
+newer head that changed the fingerprint. (Concretely: run 4 launched from
+`9cd97be`; keeping its cluster-stage checkpoint after a crash means resuming from
+`9cd97be`, not a post-da#303 head.)
+
 ## See also
 
 - [`src/resolve/_checkpoint.py`](../src/resolve/_checkpoint.py) — the shared

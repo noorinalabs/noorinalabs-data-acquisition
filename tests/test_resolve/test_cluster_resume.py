@@ -176,6 +176,33 @@ def test_stale_fingerprint_cold_starts(tmp_path: Path) -> None:
     assert metrics.merged_records == 4, "stale checkpoint must be discarded, not collapse to 1"
 
 
+def test_cap_change_across_resume_discards_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resume across a da#270 cap change must DISCARD the checkpoint (da#303).
+
+    The caps (`_MAX_MATCH_KEYS_PER_RECORD` / `_MAX_BLOCKING_TOKENS_PER_RECORD`)
+    shape the block universe, and the skip-set is POSITIONAL block indices, so
+    accepting a checkpoint taken at a different cap would restore an old-universe
+    union-find against a new-universe block list — silent corruption. This is the
+    true discriminator: it fails if the caps are absent from the fingerprint.
+    """
+    staging, canonical = _setup(tmp_path, "capchange")
+    monkeypatch.setattr(fuzzy_cluster, "_CLUSTER_CHECKPOINT_SCORED_INTERVAL", 1)
+    # A real partial checkpoint at the default caps, carrying non-trivial merges.
+    with pytest.raises(StopAfterReached):
+        fuzzy_cluster.cluster_canonical_narrators(canonical, staging_dir=staging, stop_after=1)
+    ckpt = _checkpoint.load_checkpoint(_checkpoint.checkpoint_dir(staging, "cluster"))
+    assert ckpt is not None and ckpt["merged"] > 0
+
+    # Collapse the blocking-token cap to 1 → no composite key can form, so the NEW
+    # universe has zero candidate pairs and the correct cold result is 0 merges. A
+    # wrongly-accepted checkpoint would instead surface the old-cap merges (>0).
+    monkeypatch.setattr(fuzzy_cluster, "_MAX_BLOCKING_TOKENS_PER_RECORD", 1)
+    metrics = fuzzy_cluster.cluster_canonical_narrators(canonical, staging_dir=staging)
+    assert metrics.merged_records == 0, "cap change must discard the checkpoint (cold re-cluster)"
+
+
 def test_no_resume_ignores_checkpoint(tmp_path: Path) -> None:
     staging, canonical = _setup(tmp_path, "noresume")
     _checkpoint.save_checkpoint(
