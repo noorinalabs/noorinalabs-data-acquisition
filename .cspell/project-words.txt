@@ -149,3 +149,20 @@ wikilinks
 
 # --- #723 prod-reload runbook: Arabic relational-pollution token (documented, not a real narrator) ---
 أبيه
+
+# --- da#279 corpora-shape audit: corpus keys, transliterations, and normalization terms (docs/reports/corpora-shape-audit-da279.md) ---
+halimbahae
+Huraira
+Hurairah
+Hurayra
+Aishah
+Umrah
+bulugh
+maram
+mishkat
+Sanad
+alif
+tatweel
+gradings
+textless
+unsplit
