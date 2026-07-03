@@ -101,7 +101,7 @@ def _cmd_parse() -> None:
     print(f"Parsing complete. {total_files} staging files produced.")
 
 
-def _cmd_resolve() -> None:
+def _cmd_resolve(*, from_step: str | None = None) -> None:
     """Run the Phase 2 entity resolution pipeline."""
     from pathlib import Path
 
@@ -109,10 +109,13 @@ def _cmd_resolve() -> None:
     from src.resolve import run_all as resolve_all
 
     settings = get_settings()
+    if from_step:
+        print(f"Resuming resolve from step: {from_step}")
     results = resolve_all(
         Path(settings.data_raw_dir),
         Path(settings.data_staging_dir),
         Path(settings.data_curated_dir),
+        from_step=from_step,
     )
     total = sum(len(v) for v in results.values())
     print(f"\nResolution complete. {total} output files.")
@@ -455,10 +458,23 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="isnad-ingest: Hadith Data Ingestion Pipeline")
     subparsers = parser.add_subparsers(dest="command")
 
+    from src.resolve import RESOLVE_STEP_ORDER
+
     subparsers.add_parser("info", help="Show configuration and database status")
     subparsers.add_parser("acquire", help="Download data sources")
     subparsers.add_parser("parse", help="Parse raw data to staging")
-    subparsers.add_parser("resolve", help="Entity resolution")
+    resolve_parser = subparsers.add_parser("resolve", help="Entity resolution")
+    resolve_parser.add_argument(
+        "--from-step",
+        choices=list(RESOLVE_STEP_ORDER),
+        default=None,
+        help=(
+            "Resume the pipeline from this step, skipping earlier steps whose "
+            "outputs already exist (da#268). Use --from-step disambiguate to "
+            "recover a mid-disambiguate crash: NER is skipped so the existing "
+            "mentions file and disambiguate's checkpoint are reused."
+        ),
+    )
 
     load_parser = subparsers.add_parser("load", help="Load graph database")
     load_parser.add_argument(
@@ -562,7 +578,7 @@ def main() -> None:
     elif args.command == "parse":
         _cmd_parse()
     elif args.command == "resolve":
-        _cmd_resolve()
+        _cmd_resolve(from_step=args.from_step)
     elif args.command == "load":
         _cmd_load(
             skip_validation=args.skip_validation,

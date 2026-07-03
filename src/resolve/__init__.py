@@ -33,7 +33,37 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-__all__ = ["ResolveMetrics", "run_all"]
+__all__ = ["RESOLVE_STEP_ORDER", "ResolveMetrics", "run_all"]
+
+# Canonical execution order of the resolve steps. ``run_all(from_step=...)`` skips
+# every step BEFORE the named one (their outputs must already exist on disk) and
+# starts from it — used to resume a crashed pipeline without redoing completed
+# stages (da#268). The order is load-bearing: ``disambiguate`` OVERWRITES
+# ``narrators_canonical.parquet`` while ``bio_promote`` MERGEs into it, so nothing
+# may reorder them (da#99/da#117). ``dedup`` and ``parallels`` are the two
+# PARALLEL_OF detectors composed at the end; ``--from-step dedup`` re-runs both.
+RESOLVE_STEP_ORDER = (
+    "ner",
+    "disambiguate",
+    "bio_promote",
+    "cluster",
+    "reconcile",
+    "tabaqa_dates",
+    "muhaddithat_links",
+    "dedup",
+    "parallels",
+)
+
+
+def _resolve_start_index(from_step: str | None) -> int:
+    """Index into :data:`RESOLVE_STEP_ORDER` to start at; 0 when ``from_step`` is None."""
+    if from_step is None:
+        return 0
+    if from_step not in RESOLVE_STEP_ORDER:
+        raise ValueError(
+            f"unknown resolve step {from_step!r}; expected one of {', '.join(RESOLVE_STEP_ORDER)}"
+        )
+    return RESOLVE_STEP_ORDER.index(from_step)
 
 
 @dataclass
@@ -229,7 +259,13 @@ def _collect_ner_metrics(metrics: ResolveMetrics, output_dir: Path) -> None:
         logger.warning("ner_metrics_read_failed", path=str(path))
 
 
-def run_all(raw_dir: Path, staging_dir: Path, output_dir: Path) -> dict[str, list[Path]]:
+def run_all(
+    raw_dir: Path,
+    staging_dir: Path,
+    output_dir: Path,
+    *,
+    from_step: str | None = None,
+) -> dict[str, list[Path]]:
     """Run full entity resolution pipeline.
 
     Order: ``NER -> disambiguate -> bio_promote -> (dedup + detect_parallels)``.
@@ -243,8 +279,23 @@ def run_all(raw_dir: Path, staging_dir: Path, output_dir: Path) -> dict[str, lis
     ``output_dir`` is the curated dir — the same location the graph loader reads
     ``narrators_canonical.parquet`` from; it is passed to both ``disambiguate``
     and ``bio_promote`` so they reconcile against one canonical artifact (da#112).
+
+    ``from_step`` (da#268) skips every step BEFORE the named one in
+    :data:`RESOLVE_STEP_ORDER`, resuming a crashed run without redoing completed
+    stages. Skipped steps' outputs must already be on disk; a skipped ``ner`` is
+    treated as complete iff ``narrator_mentions_resolved.parquet`` exists (so
+    ``disambiguate`` then reads that file and resumes its own mid-stream
+    checkpoint). Recovering a mid-``disambiguate`` crash is
+    ``run_all(..., from_step="disambiguate")``: NER is skipped so the existing
+    mentions file — and disambiguate's checkpoint keyed off it — is reused.
     """
-    logger.info("resolve_pipeline_start")
+    start_idx = _resolve_start_index(from_step)
+
+    def _do(step: str) -> bool:
+        """True when ``step`` should run for this invocation's ``from_step``."""
+        return RESOLVE_STEP_ORDER.index(step) >= start_idx
+
+    logger.info("resolve_pipeline_start", from_step=from_step or "ner")
 
     from src.resolve import (
         bio_promote,
@@ -284,16 +335,27 @@ def run_all(raw_dir: Path, staging_dir: Path, output_dir: Path) -> dict[str, lis
 
     # Step 1: NER
     ner_ok = False
-    try:
-        logger.info("resolve_step", step="ner", status="running")
-        results["ner"] = ner.run(staging_dir, output_dir)
-        ner_ok = True
-        logger.info("resolve_step", step="ner", status="complete", files=len(results["ner"]))
-    except Exception:  # noqa: BLE001
-        logger.error("resolve_step_failed", step="ner", traceback=traceback.format_exc())
+    if _do("ner"):
+        try:
+            logger.info("resolve_step", step="ner", status="running")
+            results["ner"] = ner.run(staging_dir, output_dir)
+            ner_ok = True
+            logger.info("resolve_step", step="ner", status="complete", files=len(results["ner"]))
+        except Exception:  # noqa: BLE001
+            logger.error("resolve_step_failed", step="ner", traceback=traceback.format_exc())
+    else:
+        # Precomputed by an earlier run (--from-step past ner): its mention output
+        # must already exist for disambiguate to consume + resume against.
+        mentions_present = (output_dir / "narrator_mentions_resolved.parquet").exists()
+        ner_ok = mentions_present
+        logger.info(
+            "resolve_step_skipped_precomputed",
+            step="ner",
+            outputs_present=mentions_present,
+        )
 
     # Step 2: Disambiguation (skip if NER failed — needs mention output).
-    if ner_ok:
+    if _do("disambiguate") and ner_ok:
         try:
             logger.info("resolve_step", step="disambiguate", status="running")
             results["disambiguate"] = disambiguate.run(staging_dir, output_dir)
@@ -309,6 +371,8 @@ def run_all(raw_dir: Path, staging_dir: Path, output_dir: Path) -> dict[str, lis
                 step="disambiguate",
                 traceback=traceback.format_exc(),
             )
+    elif not _do("disambiguate"):
+        logger.info("resolve_step_skipped_precomputed", step="disambiguate")
     else:
         logger.warning(
             "resolve_step_skipped",
@@ -321,18 +385,23 @@ def run_all(raw_dir: Path, staging_dir: Path, output_dir: Path) -> dict[str, lis
     # order clobbers promoted bio-only narrators (da#99/da#117). Runs regardless
     # of NER/disambiguation status — it is merge-safe against whatever canonical
     # table already exists (or none).
-    try:
-        logger.info("resolve_step", step="bio_promote", status="running")
-        promoted = bio_promote.promote_bios_to_canonical(staging_dir, output_dir)
-        results["bio_promote"] = [promoted] if promoted is not None else []
-        logger.info(
-            "resolve_step",
-            step="bio_promote",
-            status="complete",
-            files=len(results["bio_promote"]),
-        )
-    except Exception:  # noqa: BLE001
-        logger.error("resolve_step_failed", step="bio_promote", traceback=traceback.format_exc())
+    if _do("bio_promote"):
+        try:
+            logger.info("resolve_step", step="bio_promote", status="running")
+            promoted = bio_promote.promote_bios_to_canonical(staging_dir, output_dir)
+            results["bio_promote"] = [promoted] if promoted is not None else []
+            logger.info(
+                "resolve_step",
+                step="bio_promote",
+                status="complete",
+                files=len(results["bio_promote"]),
+            )
+        except Exception:  # noqa: BLE001
+            logger.error(
+                "resolve_step_failed", step="bio_promote", traceback=traceback.format_exc()
+            )
+    else:
+        logger.info("resolve_step_skipped_precomputed", step="bio_promote")
 
     # Step 3.5: Fuzzy cross-source clustering (da#118) — recall increment on the
     # exact-name pass. Merges high-confidence cross-source name variants the
@@ -340,24 +409,27 @@ def run_all(raw_dir: Path, staging_dir: Path, output_dir: Path) -> dict[str, lis
     # steps produced. Routes every merge through make_canonical_id and is
     # idempotent, so it never perturbs the disambiguate→bio_promote ordering. The
     # mentions file is remapped so graph NARRATED edges follow the merge (#109).
-    try:
-        logger.info("resolve_step", step="cluster", status="running")
-        canonical_path = output_dir / "narrators_canonical.parquet"
-        mentions_path = output_dir / "narrator_mentions_resolved.parquet"
-        cluster_metrics = fuzzy_cluster.cluster_canonical_narrators(
-            canonical_path,
-            mentions_path=mentions_path if mentions_path.exists() else None,
-        )
-        results["cluster"] = [canonical_path] if cluster_metrics.merged_records else []
-        logger.info(
-            "resolve_step",
-            step="cluster",
-            status="complete",
-            merged=cluster_metrics.merged_records,
-            clusters=cluster_metrics.multi_member_clusters,
-        )
-    except Exception:  # noqa: BLE001
-        logger.error("resolve_step_failed", step="cluster", traceback=traceback.format_exc())
+    if _do("cluster"):
+        try:
+            logger.info("resolve_step", step="cluster", status="running")
+            canonical_path = output_dir / "narrators_canonical.parquet"
+            mentions_path = output_dir / "narrator_mentions_resolved.parquet"
+            cluster_metrics = fuzzy_cluster.cluster_canonical_narrators(
+                canonical_path,
+                mentions_path=mentions_path if mentions_path.exists() else None,
+            )
+            results["cluster"] = [canonical_path] if cluster_metrics.merged_records else []
+            logger.info(
+                "resolve_step",
+                step="cluster",
+                status="complete",
+                merged=cluster_metrics.merged_records,
+                clusters=cluster_metrics.multi_member_clusters,
+            )
+        except Exception:  # noqa: BLE001
+            logger.error("resolve_step_failed", step="cluster", traceback=traceback.format_exc())
+    else:
+        logger.info("resolve_step_skipped_precomputed", step="cluster")
 
     # Step 3.6: Multi-source date reconciliation (da#165). After bio_promote and
     # cluster have built the final canonical set, fold each narrator's per-source
@@ -365,20 +437,23 @@ def run_all(raw_dir: Path, staging_dir: Path, output_dir: Path) -> dict[str, lis
     # concrete precision, written onto the canonical date columns. Runs AFTER
     # cluster so it keys on final canonical ids and its always-concrete-precision
     # invariant holds on the emitted table; a no-op if no canonical table exists.
-    try:
-        logger.info("resolve_step", step="reconcile_dates", status="running")
-        reconciled = date_reconcile.reconcile_canonical_dates(staging_dir, output_dir)
-        results["reconcile"] = [reconciled] if reconciled is not None else []
-        logger.info(
-            "resolve_step",
-            step="reconcile_dates",
-            status="complete",
-            files=len(results["reconcile"]),
-        )
-    except Exception:  # noqa: BLE001
-        logger.error(
-            "resolve_step_failed", step="reconcile_dates", traceback=traceback.format_exc()
-        )
+    if _do("reconcile"):
+        try:
+            logger.info("resolve_step", step="reconcile_dates", status="running")
+            reconciled = date_reconcile.reconcile_canonical_dates(staging_dir, output_dir)
+            results["reconcile"] = [reconciled] if reconciled is not None else []
+            logger.info(
+                "resolve_step",
+                step="reconcile_dates",
+                status="complete",
+                files=len(results["reconcile"]),
+            )
+        except Exception:  # noqa: BLE001
+            logger.error(
+                "resolve_step_failed", step="reconcile_dates", traceback=traceback.format_exc()
+            )
+    else:
+        logger.info("resolve_step_skipped_precomputed", step="reconcile")
 
     # Step 3.65: ṭabaqa → estimated-window fallback (da#166). The LAST date stage:
     # after reconciliation has folded every *attested* dating into the canonical
@@ -387,18 +462,23 @@ def run_all(raw_dir: Path, staging_dir: Path, output_dir: Path) -> dict[str, lis
     # death window tagged ``tabaqa_estimate`` so the timeline isn't blank where the
     # rijāl sources are silent. Runs AFTER reconcile so it only ever fills the gaps
     # reconcile left; never overwrites a reconciled/parsed date; idempotent.
-    try:
-        logger.info("resolve_step", step="tabaqa_dates", status="running")
-        estimated = tabaqa_dates.apply_tabaqa_fallback(output_dir)
-        results["tabaqa_dates"] = [estimated] if estimated is not None else []
-        logger.info(
-            "resolve_step",
-            step="tabaqa_dates",
-            status="complete",
-            files=len(results["tabaqa_dates"]),
-        )
-    except Exception:  # noqa: BLE001
-        logger.error("resolve_step_failed", step="tabaqa_dates", traceback=traceback.format_exc())
+    if _do("tabaqa_dates"):
+        try:
+            logger.info("resolve_step", step="tabaqa_dates", status="running")
+            estimated = tabaqa_dates.apply_tabaqa_fallback(output_dir)
+            results["tabaqa_dates"] = [estimated] if estimated is not None else []
+            logger.info(
+                "resolve_step",
+                step="tabaqa_dates",
+                status="complete",
+                files=len(results["tabaqa_dates"]),
+            )
+        except Exception:  # noqa: BLE001
+            logger.error(
+                "resolve_step_failed", step="tabaqa_dates", traceback=traceback.format_exc()
+            )
+    else:
+        logger.info("resolve_step_skipped_precomputed", step="tabaqa_dates")
 
     # Step 3.7: Curated muhaddithat orphan mention-links (da#228 / ADR-004 item #3).
     # The 8 bio-only muhaddithat narrators promoted by bio_promote carry no chain
@@ -408,55 +488,74 @@ def run_all(raw_dir: Path, staging_dir: Path, output_dir: Path) -> dict[str, lis
     # exists in the canonical master first (no link to a non-promoted narrator).
     # Runs after bio_promote + cluster so the canonical master is final; the output
     # rides the existing resolved-mentions glob into the NARRATED loader.
-    try:
-        logger.info("resolve_step", step="muhaddithat_links", status="running")
-        canonical_path = output_dir / "narrators_canonical.parquet"
-        link_path = muhaddithat_links.build_muhaddithat_mention_links(
-            output_dir,
-            canonical_path=canonical_path if canonical_path.exists() else None,
-        )
-        results["muhaddithat_links"] = [link_path] if link_path is not None else []
-        logger.info(
-            "resolve_step",
-            step="muhaddithat_links",
-            status="complete",
-            files=len(results["muhaddithat_links"]),
-        )
-    except Exception:  # noqa: BLE001
-        logger.error(
-            "resolve_step_failed", step="muhaddithat_links", traceback=traceback.format_exc()
-        )
+    if _do("muhaddithat_links"):
+        try:
+            logger.info("resolve_step", step="muhaddithat_links", status="running")
+            canonical_path = output_dir / "narrators_canonical.parquet"
+            link_path = muhaddithat_links.build_muhaddithat_mention_links(
+                output_dir,
+                canonical_path=canonical_path if canonical_path.exists() else None,
+            )
+            results["muhaddithat_links"] = [link_path] if link_path is not None else []
+            logger.info(
+                "resolve_step",
+                step="muhaddithat_links",
+                status="complete",
+                files=len(results["muhaddithat_links"]),
+            )
+        except Exception:  # noqa: BLE001
+            logger.error(
+                "resolve_step_failed", step="muhaddithat_links", traceback=traceback.format_exc()
+            )
+    else:
+        logger.info("resolve_step_skipped_precomputed", step="muhaddithat_links")
 
     # Step 4: Dedup (semantic; degrades to an empty table without the embedding
     # model). Runs independently of NER/disambiguation. Capture its output before
     # detect_parallels overwrites the shared artifact, so the two can be composed.
     semantic_links: pa.Table | None = None
-    try:
-        logger.info("resolve_step", step="dedup", status="running")
-        results["dedup"] = dedup.run(staging_dir, output_dir)
-        semantic_links = _read_parallel_links(staging_dir)
-        logger.info("resolve_step", step="dedup", status="complete", files=len(results["dedup"]))
-    except Exception:  # noqa: BLE001
-        logger.error("resolve_step_failed", step="dedup", traceback=traceback.format_exc())
+    if _do("dedup"):
+        try:
+            logger.info("resolve_step", step="dedup", status="running")
+            results["dedup"] = dedup.run(staging_dir, output_dir)
+            semantic_links = _read_parallel_links(staging_dir)
+            logger.info(
+                "resolve_step", step="dedup", status="complete", files=len(results["dedup"])
+            )
+        except Exception:  # noqa: BLE001
+            logger.error("resolve_step_failed", step="dedup", traceback=traceback.format_exc())
+    else:
+        logger.info("resolve_step_skipped_precomputed", step="dedup")
+        # dedup skipped but parallels will re-run and overwrite the shared artifact;
+        # preserve the already-composed links (which include the semantic side) so
+        # the recompose below doesn't drop them.
+        if _do("parallels"):
+            semantic_links = _read_parallel_links(staging_dir)
 
     # Step 5: Deterministic lexical parallels (offline/CI complement + no-model
     # fallback). Overwrites parallel_links.parquet — capture its output too.
     deterministic_links: pa.Table | None = None
-    try:
-        logger.info("resolve_step", step="parallels", status="running")
-        results["parallels"] = parallels.run(staging_dir, output_dir)
-        deterministic_links = _read_parallel_links(staging_dir)
-        logger.info(
-            "resolve_step", step="parallels", status="complete", files=len(results["parallels"])
-        )
-    except Exception:  # noqa: BLE001
-        logger.error("resolve_step_failed", step="parallels", traceback=traceback.format_exc())
+    if _do("parallels"):
+        try:
+            logger.info("resolve_step", step="parallels", status="running")
+            results["parallels"] = parallels.run(staging_dir, output_dir)
+            deterministic_links = _read_parallel_links(staging_dir)
+            logger.info(
+                "resolve_step", step="parallels", status="complete", files=len(results["parallels"])
+            )
+        except Exception:  # noqa: BLE001
+            logger.error("resolve_step_failed", step="parallels", traceback=traceback.format_exc())
+    else:
+        logger.info("resolve_step_skipped_precomputed", step="parallels")
 
     # Step 6: Compose both detectors' links into the single shared artifact so a
-    # no-model run still emits the deterministic cross-sect edges (da#117).
-    composed = _compose_parallel_links(staging_dir, semantic_links, deterministic_links)
-    if composed is not None:
-        results["parallels"] = [composed]
+    # no-model run still emits the deterministic cross-sect edges (da#117). Only
+    # recompose when at least one detector re-ran this invocation; otherwise the
+    # existing composed artifact from the prior run is left untouched.
+    if _do("dedup") or _do("parallels"):
+        composed = _compose_parallel_links(staging_dir, semantic_links, deterministic_links)
+        if composed is not None:
+            results["parallels"] = [composed]
 
     # Collect metrics from output files.
     metrics = ResolveMetrics(
