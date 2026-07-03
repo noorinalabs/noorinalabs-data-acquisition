@@ -1,4 +1,4 @@
-.PHONY: help setup setup-hooks acquire parse resolve load enrich pipeline test test-integration lint format typecheck check clean validate validate-staging profile-data
+.PHONY: help setup setup-hooks acquire parse resolve load enrich pipeline test test-integration lint format typecheck check clean validate validate-staging profile-data duck
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -69,3 +69,6 @@ validate-staging: ## Validate staging Parquet files (warn mode)
 
 profile-data: ## Profile staging Parquet files
 	uv run python scripts/data_profile.py
+
+duck: ## Explore staging+curated Parquet in DuckDB (interactive; QUERY="select ..." for one-shot)
+	uv run python -m src.tools.duck $(if $(QUERY),--query "$(QUERY)",)
