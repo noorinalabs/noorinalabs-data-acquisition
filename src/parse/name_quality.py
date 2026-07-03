@@ -71,6 +71,16 @@ sits after an elided-grammar verb and is unrecoverable here). A residual
 matn-density backstop (:data:`_MATN_DENSITY`, ≥2) drops any sentence whose first
 boundary is a non-verb preposition the truncation cannot anchor on.
 
+Benediction / Prophet-reference residual (da#271) — two more classes surfaced by
+the candidate-pair-inflation audit, both concentrated in thaqalayn/lk:
+
+7. **Bare Shia taṣliya** — ``صلى الله عليه واله`` (without the trailing ``وسلم`` the
+   existing honorific set required), which left "رسول الله صلى الله عليه واله" (an
+   mc-365 false narrator) intact. Added to :data:`_HONORIFIC_PHRASES`.
+8. **Prophet references** — after the taṣliya is stripped the residue is a bare
+   title (``رسول الله``, ``النبي``, ``نبي الله``): the Prophet is the matn source,
+   not an isnad narrator. Dropped by :func:`_is_prophet_reference` (leader-anchored).
+
 The phrase constants are in **normalized-Arabic** form (post
 ``normalize_arabic``) because this runs on ``name_normalized``.
 """
@@ -95,6 +105,13 @@ _CONNECTIVE_TOKENS = frozenset({"يعني"})
 _HONORIFIC_PHRASES: tuple[str, ...] = (
     "صلى الله عليه واله وسلم",
     "صلى الله عليه وسلم",
+    # Shia taṣliya without the trailing وسلم (da#271): the dominant benediction in
+    # thaqalayn/lk — the bare "صلى الله عليه واله" (and its spaced "و اله" variant)
+    # was NOT covered by the two forms above, so "رسول الله صلى الله عليه واله" (a
+    # mc-365 false narrator) survived. Listed AFTER the longer وسلم-suffixed form so
+    # that one is stripped first where present.
+    "صلى الله عليه واله",
+    "صلى الله عليه و اله",
     "عليه السلام",
     "عليهم السلام",
     "عليها السلام",
@@ -171,6 +188,17 @@ _MUBHAM_RELATIONAL = frozenset(
         "عنه",  # "from him" — transmission particle, never a name
     }
 )
+
+# Prophet-reference titles (da#271). The Prophet is the matn's ultimate source,
+# not an isnad narrator, yet honorific-laden references to him get minted as
+# narrator nodes ("رسول الله صلى الله عليه واله" — mc 365 on the run-3 stage —
+# "النبي …"). After the taṣliya is stripped (honorific phrases above) the residue
+# is a bare title; a span that LEADS with one is such a reference and is dropped.
+# Keyed on the leader (definite-article "the Prophet/Messenger", or رسول/نبي only
+# when immediately followed by الله) so a real name is never touched by mere
+# coincidence of its first token. See :func:`_is_prophet_reference`.
+_PROPHET_TITLE_SOLE = frozenset({"النبي", "الرسول"})
+_PROPHET_TITLE_LEADERS = frozenset({"رسول", "نبي"})
 
 # English non-name *leader* words. Several English-only sources (halimbahae,
 # sunnah translations) put translated isnad prose in the name field, so a "name"
@@ -420,6 +448,22 @@ def _truncate_at_isnad_boundary(tokens: list[str]) -> list[str] | None:
     return tokens
 
 
+def _is_prophet_reference(tokens: list[str]) -> bool:
+    """True when the span is a reference to the Prophet by title, not a narrator (da#271).
+
+    A span LEADING with a sole Prophet title (``النبي`` / ``الرسول``) or with
+    ``رسول``/``نبي`` immediately followed by ``الله`` ("Messenger/Prophet of Allah")
+    is a reference to the Prophet — the matn source, never an isnad narrator. The
+    ``+ الله`` requirement means a real name whose first token merely equals
+    ``رسول``/``نبي`` (without ``الله`` after) is never dropped.
+    """
+    if not tokens:
+        return False
+    if tokens[0] in _PROPHET_TITLE_SOLE:
+        return True
+    return tokens[0] in _PROPHET_TITLE_LEADERS and len(tokens) >= 2 and tokens[1] == "الله"
+
+
 def split_compound_narrators(name_normalized: str | None) -> list[str]:
     """Split a compound co-narrator join into its member names (da#258 class 6).
 
@@ -545,6 +589,14 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
     #    WHOLE name is exactly one such token, so multi-token kunya names
     #    ("ابي اسحاق" = Abū Isḥāq) survive untouched (precision guard).
     if len(tokens) == 1 and tokens[0] in _MUBHAM_RELATIONAL:
+        return None
+
+    # 6b. Prophet reference (da#271): after the taṣliya was stripped (step 2) the
+    #     residue is a bare title — "رسول الله", "النبي", "نبي الله". The Prophet is
+    #     the matn's source, not an isnad narrator, so a span leading with one of
+    #     these is dropped. Leader-anchored + the "الله" requirement keep it from
+    #     touching a real name.
+    if _is_prophet_reference(tokens):
         return None
 
     # 7. English non-name fragment (translated isnad prose in the name field):

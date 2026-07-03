@@ -14,8 +14,29 @@ from src.utils.arabic import (
     normalize_hamza,
     normalize_taa_marbuta,
     strip_diacritics,
+    strip_format_marks,
     transliterate,
 )
+
+
+class TestStripFormatMarks:
+    """da#271 — bidi / zero-width / format control marks are removed."""
+
+    @pytest.mark.parametrize(
+        "codepoint",
+        [0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0x202A, 0x202C, 0x2066, 0xFEFF, 0x06DD],
+    )
+    def test_mark_stripped(self, codepoint: int) -> None:
+        assert strip_format_marks(f"عبد{chr(codepoint)}الله") == "عبدالله"
+
+    def test_normalize_arabic_drops_marks(self) -> None:
+        # an RLM (U+200F) inside an otherwise-identical name must not fork it
+        marked = "رسول الله" + chr(0x200F) + " صلى"
+        assert normalize_arabic(marked) == normalize_arabic("رسول الله صلى")
+
+    def test_plain_text_unchanged(self) -> None:
+        assert strip_format_marks("عبد الله") == "عبد الله"
+
 
 # ---------------------------------------------------------------------------
 # strip_diacritics
