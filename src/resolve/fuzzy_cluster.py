@@ -163,6 +163,37 @@ _CLUSTER_INFLIGHT_FACTOR = 4
 # :func:`cluster_records`).
 _CLUSTER_PROGRESS_INTERVAL = 500_000
 
+# Per-record match-key cap (da#270). Block scoring is a ``process.cdist`` over the
+# block's flattened match keys (name + aliases of every member); its cost is
+# O(K²) in that flattened key count, and profiling the real ~210k-canonical set
+# showed it is ~99% of clustering wall-time. A pathological tail of records — a
+# handful of prolific narrators that accreted hundreds of alias spellings across
+# sources, plus pollution nodes whose "name" is a captured isnad fragment — carry
+# up to ~740 match keys (p99 is 19), so a single such record inside a block blows
+# that block's K (and thus its cdist cost) super-linearly, and because those
+# records also carry hundreds of significant tokens they land in a huge number of
+# blocks. Capping each record to its first ``_MAX_MATCH_KEYS_PER_RECORD`` keys
+# (name always first, then aliases in their existing deterministic order) bounds
+# every record's per-block contribution. At 64 this touches only ~0.1% of records
+# (>64 keys) yet cut cdist time ~3.5× on the worst real blocks; the only lost
+# merges are those justified *solely* by a record's 65th-plus alias spelling — the
+# least-reliable tail. ``None`` disables the cap (exact pre-da#270 behaviour, used
+# by the equivalence/precision-recall harness). Applied in :func:`_match_keys` so
+# every consumer — blocking, cdist, and the scalar path — sees one bounded key set.
+_MAX_MATCH_KEYS_PER_RECORD: int | None = 64
+
+# Per-record blocking-token cap (da#270). Composite blocking enumerates
+# ``C(t, 2)`` token pairs per record for its ``t`` significant tokens; a pollution
+# record with a 1,000-token "name" contributes ~500k posting entries and joins
+# that many blocks, which is what made the blocking build itself balloon to
+# multi-GB. Only the first ``_MAX_BLOCKING_TOKENS_PER_RECORD`` significant tokens
+# (deterministic sorted order) generate blocking pairs; the record is still fully
+# scored inside whatever blocks it does join, and the precision guards still read
+# its full token set. At 64 this affects <1% of records (the same pathological
+# tail) and never a normal name (p99 significant-token count is 34). ``None``
+# disables the cap.
+_MAX_BLOCKING_TOKENS_PER_RECORD: int | None = 64
+
 # Name tokens that carry no disambiguating signal (Arabic genealogical
 # connectors / honorific particles). Excluded as *blocking* keys so a block does
 # not balloon to "every name containing بن"; still scored as part of the name.
@@ -208,7 +239,13 @@ class ClusterMetrics:
 # Match keys & scoring
 # ---------------------------------------------------------------------------
 def _match_keys(record: dict[str, Any]) -> list[str]:
-    """Every normalized name string a record can match on: its name + aliases (da#94)."""
+    """Every normalized name string a record can match on: its name + aliases (da#94).
+
+    Truncated to :data:`_MAX_MATCH_KEYS_PER_RECORD` (da#270): the name is always
+    kept first, then aliases in their existing deterministic order, so a
+    pathological record with hundreds of alias spellings cannot blow up the O(K²)
+    per-block ``cdist``. ``None`` keeps every key (exact pre-da#270 behaviour).
+    """
     keys: list[str] = []
     name = safe_str(record.get("name_ar_normalized"))
     if name:
@@ -219,6 +256,8 @@ def _match_keys(record: dict[str, Any]) -> list[str]:
             av = safe_str(a)
             if av and av not in keys:
                 keys.append(av)
+    if _MAX_MATCH_KEYS_PER_RECORD is not None:
+        return keys[:_MAX_MATCH_KEYS_PER_RECORD]
     return keys
 
 
@@ -501,9 +540,21 @@ def cluster_records(
     # name/alias tokens include both members of the pair (composite blocking).
     # Each record contributes C(t, 2) keys for its t significant tokens (t is
     # small — a name has a handful of tokens), so the index stays compact.
+    #
+    # ``_MAX_BLOCKING_TOKENS_PER_RECORD`` (da#270) caps t per record before the
+    # C(t, 2) fan-out: a pollution record whose "name" is a captured isnad fragment
+    # can carry >1,000 significant tokens, and its ~500k posting entries were what
+    # ballooned this build to multi-GB. Taking the first N sorted tokens is
+    # deterministic and bounds the fan-out; the record is still fully scored inside
+    # whatever blocks it joins, and the precision guards below read its full token
+    # set (``tok_cache``), so only the *reach* of the pathological tail is trimmed.
+    max_block_tokens = _MAX_BLOCKING_TOKENS_PER_RECORD
     pair_index: dict[tuple[str, str], list[int]] = defaultdict(list)
     for i in range(n):
-        for key in itertools.combinations(sorted(tok_cache[i]), 2):
+        block_tokens = sorted(tok_cache[i])
+        if max_block_tokens is not None:
+            block_tokens = block_tokens[:max_block_tokens]
+        for key in itertools.combinations(block_tokens, 2):
             pair_index[key].append(i)
 
     # Apply the common-name cap: drop over-dense blocks up front so neither the
