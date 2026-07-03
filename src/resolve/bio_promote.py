@@ -128,6 +128,14 @@ def promote_bios_to_canonical(
 
     Returns the canonical Parquet path, or ``None`` when there are no bios to
     promote (no file written).
+
+    Crash-resume (da#272): EXEMPT from intra-stage checkpointing. This is a
+    sub-minute merge over the handful of ``narrators_bio_*`` shards (not a
+    multi-hour stream), and it is already idempotent — a MERGE into the canonical
+    table (da#99/da#117), so simply re-running it after a crash reproduces the
+    same result. A checkpoint would add machinery and a serialized-state failure
+    surface for no recovery-time saving. Recovery re-runs it via
+    ``resolve --from-step bio_promote``.
     """
     bio_files = sorted(staging_dir.glob("narrators_bio_*.parquet"))
     if not bio_files:

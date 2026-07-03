@@ -21,6 +21,7 @@ Recording convention: create/edit `.claude/memory/<kebab-slug>.md` with the stan
 - [Chain nodes hollow — read staging not curated](project_chain_hollow_reads_staging.md) — _load_chains read staging mentions (no canonical_narrator_id) → all chains empty; fix=curated resolved. #723 chains-empty root cause.
 - [Relational-pronoun pollution + scrub equivalence](project_relational_pollution_scrub_equiv.md) — أبيه "his father" was #1 narrator; name_quality filter; scrubbing curated ≡ NER-with-filter (singleton clusters). da#247 residual.
 - [Disambiguate checkpoint resume](project_disambiguate_checkpoint_resume.md) — da#268; mention_id is uuid4 (random per NER run) → resume must reuse file via `--from-step disambiguate`; fingerprint = content_hash+mention_id_hash; graph keys canonical_narrator_id not mention_id.
+- [Unified resolve checkpoint](project_resolve_checkpoint_unified.md) — da#272; shared src/resolve/_checkpoint.py (7 conventions); dedup FAISS-phase (reload index on resume) + parallels anchor-scan now resume; ner/bio_promote exempt; CLI --no-resume; fuzzy_cluster deferred.
 
 ## Engineering gotchas (feedback)
 

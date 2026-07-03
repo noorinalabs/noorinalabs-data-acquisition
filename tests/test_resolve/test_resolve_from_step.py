@@ -119,3 +119,29 @@ def test_no_from_step_runs_everything(tmp_path: Path, monkeypatch: pytest.Monkey
 
     for step in ("ner", "disambiguate", "bio_promote", "cluster", "dedup", "parallels"):
         assert step in called, f"{step} should run in a full pipeline"
+
+
+def test_resume_flag_threads_to_resumable_stages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``run_all(resume=...)`` (CLI ``--no-resume``, da#272) must reach every stage
+    that keeps an intra-stage checkpoint: disambiguate, dedup, parallels."""
+    _install_spies(monkeypatch)
+    staging, output = _staging_with_parquet(tmp_path)
+    (output / "narrator_mentions_resolved.parquet").write_bytes(b"placeholder")
+
+    seen: dict[str, bool] = {}
+
+    def _spy(name: str, ret: object):  # type: ignore[no-untyped-def]
+        def _fn(*_a: object, resume: bool = True, **_k: object) -> object:
+            seen[name] = resume
+            return ret
+
+        return _fn
+
+    monkeypatch.setattr(disambiguate, "run", _spy("disambiguate", []))
+    monkeypatch.setattr(dedup, "run", _spy("dedup", []))
+    monkeypatch.setattr(parallels, "run", _spy("parallels", []))
+
+    run_all(tmp_path / "raw", staging, output, resume=False)
+    assert seen == {"disambiguate": False, "dedup": False, "parallels": False}

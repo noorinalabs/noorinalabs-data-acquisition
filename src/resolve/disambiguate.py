@@ -12,10 +12,6 @@ mentions in batches to keep memory under 4GB.
 from __future__ import annotations
 
 import csv
-import hashlib
-import json
-import os
-import shutil
 from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -30,6 +26,14 @@ from rapidfuzz.distance import Levenshtein
 from src.models.enums import DatePrecision
 from src.parse.base import safe_str, write_parquet
 from src.parse.identity import make_canonical_id
+from src.resolve._checkpoint import (
+    checkpoint_dir,
+    clear_checkpoint,
+    hash_parquet_column_groups,
+    load_checkpoint,
+    resolve_cadence,
+    save_checkpoint,
+)
 from src.resolve.geography import regions_plausible, resolve_region
 from src.resolve.mononym_split import refine_mononym_name
 from src.resolve.schemas import (
@@ -932,7 +936,9 @@ def _upsert_canonical(
 
 
 # ---------------------------------------------------------------------------
-# Crash-resume checkpoint plumbing (da#268)
+# Crash-resume checkpoint plumbing (da#268, unified under src/resolve/_checkpoint
+# by da#272 — dir/save/load/clear/cadence + the column hasher are shared; only
+# this stage's fingerprint SPLIT and state SHAPE stay local).
 # ---------------------------------------------------------------------------
 # Columns hashed for the input fingerprint. Split into the STABLE disambiguation
 # drivers and the mention_id join key so a resume can tell a changed corpus apart
@@ -946,9 +952,6 @@ _FINGERPRINT_CONTENT_COLS = (
     "name_normalized",
     "transmission_method",
 )
-# ASCII unit/record separators keep the streamed field/row hashing unambiguous.
-_FP_UNIT_SEP = "\x1f"
-_FP_ROW_SEP = "\x1e"
 
 
 def _compute_input_fingerprint(mentions_path: Path) -> tuple[str, str, int]:
@@ -962,80 +965,20 @@ def _compute_input_fingerprint(mentions_path: Path) -> tuple[str, str, int]:
     matches, id differs ⇒ cold start *with a precise "reuse the file via --from-step
     disambiguate" hint*, since ``mention_id`` is the backfill/audit join key baked into
     the outputs). Excludes ``canonical_narrator_id``/``confidence`` (rewritten by the
-    end-of-run backfill) and mtime. Streams row-group by row-group so peak memory is
-    one row-group, not the whole file.
+    end-of-run backfill) and mtime.
+
+    Delegates the streaming SHA-256 to the shared
+    :func:`~src.resolve._checkpoint.hash_parquet_column_groups`, which hashes both
+    groups in a single row-group pass (peak memory one row-group, not the whole
+    3.3M-row file). The per-group digests are byte-identical to hashing each
+    column set on its own, so a checkpoint written by the pre-da#272 code resumes
+    unchanged.
     """
-    content = hashlib.sha256()
-    mid = hashlib.sha256()
-    total = 0
-    if not mentions_path.exists():
-        return "", "", 0
-
-    pf = pq.ParquetFile(mentions_path)
-    cols = ["mention_id", *_FINGERPRINT_CONTENT_COLS]
-    for rg_idx in range(pf.metadata.num_row_groups):
-        table = pf.read_row_group(rg_idx, columns=cols)
-        n = table.num_rows
-        total += n
-        columns = {name: table.column(name).to_pylist() for name in cols}
-        for i in range(n):
-            row = _FP_UNIT_SEP.join(str(columns[c][i]) for c in _FINGERPRINT_CONTENT_COLS)
-            content.update(row.encode("utf-8"))
-            content.update(_FP_ROW_SEP.encode("utf-8"))
-            mid.update(str(columns["mention_id"][i]).encode("utf-8"))
-            mid.update(_FP_ROW_SEP.encode("utf-8"))
-    return content.hexdigest(), mid.hexdigest(), total
-
-
-def _checkpoint_dir(staging_dir: Path) -> Path:
-    """Location of the crash-resume checkpoint (under the gitignored staging tree)."""
-    return staging_dir / _CHECKPOINT_DIRNAME
-
-
-def _save_checkpoint(ckpt_dir: Path, payload: dict[str, Any]) -> None:
-    """Atomically persist ``payload`` as the checkpoint state.
-
-    Writes to a sibling ``.tmp`` then ``os.replace`` so a crash mid-write never
-    leaves a half-written state file — the visible ``state.json`` is always a
-    complete checkpoint (or absent, which reads as a cold start).
-    """
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    tmp = ckpt_dir / "state.json.tmp"
-    final = ckpt_dir / "state.json"
-    tmp.write_text(json.dumps(payload), encoding="utf-8")
-    os.replace(tmp, final)
-
-
-def _load_checkpoint(ckpt_dir: Path) -> dict[str, Any] | None:
-    """Load the checkpoint payload, or ``None`` when absent/unreadable."""
-    final = ckpt_dir / "state.json"
-    if not final.exists():
-        return None
-    try:
-        loaded = json.loads(final.read_text(encoding="utf-8"))
-    except (ValueError, OSError):
-        logger.warning("disambiguate_checkpoint_unreadable", path=str(final))
-        return None
-    return loaded if isinstance(loaded, dict) else None
-
-
-def _clear_checkpoint(ckpt_dir: Path) -> None:
-    """Remove the checkpoint dir after a successful complete run (best effort)."""
-    if ckpt_dir.exists():
-        shutil.rmtree(ckpt_dir, ignore_errors=True)
-
-
-def _resolve_checkpoint_cadence(override: int | None) -> int:
-    """Effective checkpoint cadence in batches (kwarg > env > default), floored at 1."""
-    if override is not None:
-        return max(1, int(override))
-    env = os.environ.get("DISAMBIGUATE_CHECKPOINT_EVERY_N_BATCHES")
-    if env:
-        try:
-            return max(1, int(env))
-        except ValueError:
-            logger.warning("disambiguate_checkpoint_cadence_invalid", value=env)
-    return _CHECKPOINT_EVERY_N_BATCHES
+    digests, total = hash_parquet_column_groups(
+        mentions_path,
+        {"content": _FINGERPRINT_CONTENT_COLS, "mention_id": ("mention_id",)},
+    )
+    return digests["content"], digests["mention_id"], total
 
 
 # ---------------------------------------------------------------------------
@@ -1139,16 +1082,20 @@ def run(
     processed = 0
 
     # --- Crash-resume (da#268): fingerprint the input and try to restore state.
-    cadence = _resolve_checkpoint_cadence(checkpoint_every_n_batches)
-    ckpt_dir = _checkpoint_dir(staging_dir)
+    cadence = resolve_cadence(
+        checkpoint_every_n_batches,
+        "DISAMBIGUATE_CHECKPOINT_EVERY_N_BATCHES",
+        _CHECKPOINT_EVERY_N_BATCHES,
+    )
+    ckpt_dir = checkpoint_dir(staging_dir, "disambiguate")
     mentions_path = output_dir / "narrator_mentions_resolved.parquet"
     content_hash, mention_id_hash, _fp_rows = _compute_input_fingerprint(mentions_path)
     mentions_to_skip = 0
 
     if not resume:
-        _clear_checkpoint(ckpt_dir)
+        clear_checkpoint(ckpt_dir)
     else:
-        ckpt = _load_checkpoint(ckpt_dir)
+        ckpt = load_checkpoint(ckpt_dir)
         if ckpt is not None:
             valid_layout = ckpt.get("schema_version") == _CHECKPOINT_SCHEMA_VERSION
             content_ok = ckpt.get("content_hash") == content_hash
@@ -1190,10 +1137,10 @@ def run(
                     "rerun with `resolve --from-step disambiguate` to reuse the "
                     "existing mentions file and resume the checkpoint",
                 )
-                _clear_checkpoint(ckpt_dir)
+                clear_checkpoint(ckpt_dir)
             else:
                 logger.info("disambiguate_checkpoint_mismatch", reason="cold start")
-                _clear_checkpoint(ckpt_dir)
+                clear_checkpoint(ckpt_dir)
 
     def _snapshot() -> dict[str, Any]:
         """Serialize the current accumulated state for the checkpoint."""
@@ -1390,7 +1337,7 @@ def run(
         # here, so a resume skips whole batches and continues identically.
         batches_since_checkpoint += 1
         if batches_since_checkpoint >= cadence:
-            _save_checkpoint(ckpt_dir, _snapshot())
+            save_checkpoint(ckpt_dir, _snapshot())
             batches_since_checkpoint = 0
             logger.info(
                 "disambiguate_checkpoint_saved",
@@ -1483,7 +1430,7 @@ def run(
 
     # The run completed and all outputs are on disk — drop the checkpoint so the
     # next cold run doesn't spuriously resume against stale state (da#268).
-    _clear_checkpoint(ckpt_dir)
+    clear_checkpoint(ckpt_dir)
 
     logger.info(
         "disambiguate_run_complete",

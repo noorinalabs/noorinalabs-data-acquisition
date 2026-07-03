@@ -228,6 +228,15 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
 
     Reads staging Parquet files and produces resolved narrator mention tables.
     Returns list of output file paths.
+
+    Crash-resume (da#272): NER is intentionally NOT intra-stage-checkpointed. Each
+    run re-mints ``mention_id`` via ``uuid.uuid4()``, so a partial resume would
+    stitch two id-spaces into one mentions file and corrupt the mention-keyed
+    disambiguate outputs. NER is also the cheap stage (~2 min). Its "resume" is
+    therefore *reusing the whole existing mentions file*, which the CLI expresses
+    as ``resolve --from-step disambiguate``: NER is skipped entirely and the
+    already-written ``narrator_mentions_resolved.parquet`` (and disambiguate's
+    checkpoint keyed off it) is reused verbatim. See ``run_all(from_step=...)``.
     """
     logger.info("ner_run_start", staging_dir=str(staging_dir), output_dir=str(output_dir))
 

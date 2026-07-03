@@ -265,6 +265,7 @@ def run_all(
     output_dir: Path,
     *,
     from_step: str | None = None,
+    resume: bool = True,
 ) -> dict[str, list[Path]]:
     """Run full entity resolution pipeline.
 
@@ -288,6 +289,15 @@ def run_all(
     checkpoint). Recovering a mid-``disambiguate`` crash is
     ``run_all(..., from_step="disambiguate")``: NER is skipped so the existing
     mentions file — and disambiguate's checkpoint keyed off it — is reused.
+
+    ``resume`` is the uniform crash-resume switch (da#272): when ``True`` (default)
+    every stage that keeps an intra-stage checkpoint — ``disambiguate`` (da#268),
+    ``dedup``'s FAISS/collection phase, and ``detect_parallels``'s anchor scan —
+    restores it and continues; ``False`` (CLI ``--no-resume``) forces each of those
+    stages to cold-start. It is orthogonal to ``from_step`` (which step to start
+    at) and does not affect the exempt stages (``ner`` is cold-by-design because
+    it re-mints uuid4 mention_ids; ``bio_promote``/``cluster``/date stages are
+    sub-minute and simply re-run).
     """
     start_idx = _resolve_start_index(from_step)
 
@@ -358,7 +368,7 @@ def run_all(
     if _do("disambiguate") and ner_ok:
         try:
             logger.info("resolve_step", step="disambiguate", status="running")
-            results["disambiguate"] = disambiguate.run(staging_dir, output_dir)
+            results["disambiguate"] = disambiguate.run(staging_dir, output_dir, resume=resume)
             logger.info(
                 "resolve_step",
                 step="disambiguate",
@@ -517,7 +527,7 @@ def run_all(
     if _do("dedup"):
         try:
             logger.info("resolve_step", step="dedup", status="running")
-            results["dedup"] = dedup.run(staging_dir, output_dir)
+            results["dedup"] = dedup.run(staging_dir, output_dir, resume=resume)
             semantic_links = _read_parallel_links(staging_dir)
             logger.info(
                 "resolve_step", step="dedup", status="complete", files=len(results["dedup"])
@@ -538,7 +548,7 @@ def run_all(
     if _do("parallels"):
         try:
             logger.info("resolve_step", step="parallels", status="running")
-            results["parallels"] = parallels.run(staging_dir, output_dir)
+            results["parallels"] = parallels.run(staging_dir, output_dir, resume=resume)
             deterministic_links = _read_parallel_links(staging_dir)
             logger.info(
                 "resolve_step", step="parallels", status="complete", files=len(results["parallels"])

@@ -23,7 +23,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from src.resolve import disambiguate
+from src.resolve import _checkpoint, disambiguate
 from src.resolve.schemas import NARRATOR_MENTIONS_RESOLVED_SCHEMA
 from src.utils.arabic import normalize_arabic
 
@@ -159,20 +159,20 @@ def test_fingerprint_changes_on_content_change(tmp_path: Path) -> None:
 # Checkpoint roundtrip
 # ---------------------------------------------------------------------------
 def test_checkpoint_save_load_clear(tmp_path: Path) -> None:
-    ckpt_dir = disambiguate._checkpoint_dir(tmp_path)
-    assert disambiguate._load_checkpoint(ckpt_dir) is None
+    ckpt_dir = _checkpoint.checkpoint_dir(tmp_path, "disambiguate")
+    assert _checkpoint.load_checkpoint(ckpt_dir) is None
 
     payload = {"schema_version": 1, "processed": 42, "canonical_map": {"nar:x": {}}}
-    disambiguate._save_checkpoint(ckpt_dir, payload)
+    _checkpoint.save_checkpoint(ckpt_dir, payload)
     assert (ckpt_dir / "state.json").exists()
     assert not (ckpt_dir / "state.json.tmp").exists(), "temp file must be renamed away"
 
-    loaded = disambiguate._load_checkpoint(ckpt_dir)
+    loaded = _checkpoint.load_checkpoint(ckpt_dir)
     assert loaded == payload
 
-    disambiguate._clear_checkpoint(ckpt_dir)
+    _checkpoint.clear_checkpoint(ckpt_dir)
     assert not ckpt_dir.exists()
-    assert disambiguate._load_checkpoint(ckpt_dir) is None
+    assert _checkpoint.load_checkpoint(ckpt_dir) is None
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +185,9 @@ def test_resumed_run_is_output_identical_to_cold(
     cold_staging, cold_out = _setup(tmp_path, "cold")
     disambiguate.run(cold_staging, cold_out, batch_size=2, checkpoint_every_n_batches=1)
     cold = _read_outputs(cold_out)
-    assert not disambiguate._checkpoint_dir(cold_staging).exists(), "cold run clears checkpoint"
+    assert not _checkpoint.checkpoint_dir(cold_staging, "disambiguate").exists(), (
+        "cold run clears checkpoint"
+    )
 
     # Resume run against an identical, separate input.
     res_staging, res_out = _setup(tmp_path, "resume")
@@ -204,7 +206,7 @@ def test_resumed_run_is_output_identical_to_cold(
     monkeypatch.undo()
 
     # A checkpoint survived the crash with a non-trivial, partial offset.
-    ckpt = disambiguate._load_checkpoint(disambiguate._checkpoint_dir(res_staging))
+    ckpt = _checkpoint.load_checkpoint(_checkpoint.checkpoint_dir(res_staging, "disambiguate"))
     assert ckpt is not None
     assert 0 < ckpt["processed"] < len(_mention_rows(4))
 
@@ -215,7 +217,9 @@ def test_resumed_run_is_output_identical_to_cold(
     assert resumed["canonical"] == cold["canonical"]
     assert resumed["mentions"] == cold["mentions"]
     assert resumed["merge_log"] == cold["merge_log"]
-    assert not disambiguate._checkpoint_dir(res_staging).exists(), "resume clears checkpoint"
+    assert not _checkpoint.checkpoint_dir(res_staging, "disambiguate").exists(), (
+        "resume clears checkpoint"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -223,10 +227,10 @@ def test_resumed_run_is_output_identical_to_cold(
 # ---------------------------------------------------------------------------
 def test_fingerprint_mismatch_cold_starts(tmp_path: Path) -> None:
     staging, output = _setup(tmp_path, "mismatch")
-    ckpt_dir = disambiguate._checkpoint_dir(staging)
+    ckpt_dir = _checkpoint.checkpoint_dir(staging, "disambiguate")
     # A stale checkpoint whose content_hash cannot match the current input, carrying
     # a sentinel canonical id that a real run would never mint.
-    disambiguate._save_checkpoint(
+    _checkpoint.save_checkpoint(
         ckpt_dir,
         {
             "schema_version": disambiguate._CHECKPOINT_SCHEMA_VERSION,
@@ -259,10 +263,10 @@ def test_stale_mention_ids_cold_starts_with_clear(tmp_path: Path) -> None:
     content_hash, _mid, total = disambiguate._compute_input_fingerprint(
         output / "narrator_mentions_resolved.parquet"
     )
-    ckpt_dir = disambiguate._checkpoint_dir(staging)
+    ckpt_dir = _checkpoint.checkpoint_dir(staging, "disambiguate")
     # content matches the current input, but mention_id_hash does NOT — the NER
     # rewrite case. Must cold-start (sentinel absent) and clear the checkpoint.
-    disambiguate._save_checkpoint(
+    _checkpoint.save_checkpoint(
         ckpt_dir,
         {
             "schema_version": disambiguate._CHECKPOINT_SCHEMA_VERSION,
@@ -295,8 +299,8 @@ def test_resume_false_ignores_existing_checkpoint(tmp_path: Path) -> None:
     content_hash, mid_hash, total = disambiguate._compute_input_fingerprint(
         output / "narrator_mentions_resolved.parquet"
     )
-    ckpt_dir = disambiguate._checkpoint_dir(staging)
-    disambiguate._save_checkpoint(
+    ckpt_dir = _checkpoint.checkpoint_dir(staging, "disambiguate")
+    _checkpoint.save_checkpoint(
         ckpt_dir,
         {
             "schema_version": disambiguate._CHECKPOINT_SCHEMA_VERSION,
