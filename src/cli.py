@@ -101,11 +101,14 @@ def _cmd_parse() -> None:
     print(f"Parsing complete. {total_files} staging files produced.")
 
 
-def _cmd_resolve(*, from_step: str | None = None, resume: bool = True) -> None:
+def _cmd_resolve(
+    *, from_step: str | None = None, resume: bool = True, stop_after: int | None = None
+) -> None:
     """Run the Phase 2 entity resolution pipeline."""
     from pathlib import Path
 
     from src.config import get_settings
+    from src.resolve import EXIT_STOPPED_AT_LIMIT, StopAfterReached
     from src.resolve import run_all as resolve_all
 
     settings = get_settings()
@@ -113,13 +116,23 @@ def _cmd_resolve(*, from_step: str | None = None, resume: bool = True) -> None:
         print(f"Resuming resolve from step: {from_step}")
     if not resume:
         print("Crash-resume disabled (--no-resume): every stage cold-starts.")
-    results = resolve_all(
-        Path(settings.data_raw_dir),
-        Path(settings.data_staging_dir),
-        Path(settings.data_curated_dir),
-        from_step=from_step,
-        resume=resume,
-    )
+    if stop_after is not None:
+        print(f"Bounded probe: will stop after {stop_after} checkpoint(s) (--stop-after).")
+    try:
+        results = resolve_all(
+            Path(settings.data_raw_dir),
+            Path(settings.data_staging_dir),
+            Path(settings.data_curated_dir),
+            from_step=from_step,
+            resume=resume,
+            stop_after=stop_after,
+        )
+    except StopAfterReached as stopped:
+        # A stage hit its --stop-after budget: the pipeline halted with the
+        # checkpoint on disk and no partial output written. Surface the perf
+        # summary and exit with a status distinct from completion/crash (da#276).
+        print(f"\n{stopped.summary()}")
+        sys.exit(EXIT_STOPPED_AT_LIMIT)
     total = sum(len(v) for v in results.values())
     print(f"\nResolution complete. {total} output files.")
 
@@ -461,7 +474,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="isnad-ingest: Hadith Data Ingestion Pipeline")
     subparsers = parser.add_subparsers(dest="command")
 
-    from src.resolve import RESOLVE_STEP_ORDER
+    from src.resolve import RESOLVE_STEP_ORDER, RESUMABLE_STEPS
 
     subparsers.add_parser("info", help="Show configuration and database status")
     subparsers.add_parser("acquire", help="Download data sources")
@@ -486,6 +499,21 @@ def main() -> None:
             "collection phase, parallels' anchor scan) to discard its checkpoint "
             "and cold-start (da#272). Independent of --from-step, which selects "
             "WHICH step to begin at; --no-resume selects HOW that step starts."
+        ),
+    )
+    resolve_parser.add_argument(
+        "--stop-after",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Bounded partial-run probe (da#276): stop the resumable stage cleanly "
+            "after its Nth checkpoint write, leaving the checkpoint on disk (a "
+            "later bare run resumes from it) and writing NO final output, then halt "
+            "the pipeline with a perf summary and a distinct exit status. Only "
+            "applies to resumable stages (disambiguate, dedup, parallels); pairing "
+            "it with --from-step on an exempt stage is an error. Combine with "
+            "--from-step <stage> --no-resume for a cold bounded probe of one stage."
         ),
     )
 
@@ -584,6 +612,19 @@ def main() -> None:
         parser.print_help()
         sys.exit(0)
 
+    if args.command == "resolve" and args.stop_after is not None:
+        # Validate --stop-after up front (argparse exit code 2) so the bounded
+        # probe can never silently no-op (da#276).
+        if args.stop_after < 1:
+            parser.error("--stop-after N must be a positive integer")
+        if args.from_step is not None and args.from_step not in RESUMABLE_STEPS:
+            resumable = ", ".join(sorted(RESUMABLE_STEPS))
+            parser.error(
+                f"--stop-after cannot bound '{args.from_step}': it keeps no checkpoint. "
+                f"Target a resumable stage with --from-step ({resumable}), or omit "
+                f"--from-step to bound the first resumable stage (disambiguate)."
+            )
+
     if args.command == "info":
         _cmd_info()
     elif args.command == "acquire":
@@ -591,7 +632,9 @@ def main() -> None:
     elif args.command == "parse":
         _cmd_parse()
     elif args.command == "resolve":
-        _cmd_resolve(from_step=args.from_step, resume=not args.no_resume)
+        _cmd_resolve(
+            from_step=args.from_step, resume=not args.no_resume, stop_after=args.stop_after
+        )
     elif args.command == "load":
         _cmd_load(
             skip_validation=args.skip_validation,

@@ -27,6 +27,7 @@ from src.models.enums import DatePrecision
 from src.parse.base import safe_str, write_parquet
 from src.parse.identity import make_canonical_id
 from src.resolve._checkpoint import (
+    CheckpointController,
     checkpoint_dir,
     clear_checkpoint,
     hash_parquet_column_groups,
@@ -991,6 +992,7 @@ def run(
     batch_size: int = _MENTION_BATCH_SIZE,
     checkpoint_every_n_batches: int | None = None,
     resume: bool = True,
+    stop_after: int | None = None,
 ) -> list[Path]:
     """Disambiguate narrator mentions to canonical narrator records.
 
@@ -1025,6 +1027,12 @@ def run(
     resume:
         When ``False``, ignore and clear any existing checkpoint and cold-start
         (still checkpoints forward). Default ``True``.
+    stop_after:
+        Bounded partial-run probe (da#276): stop cleanly after this many
+        checkpoint writes, leaving the checkpoint on disk (a later bare run
+        resumes from it) and WITHOUT writing final output — raises
+        :class:`~src.resolve._checkpoint.StopAfterReached`. ``None`` runs to
+        completion.
     """
     logger.info(
         "disambiguate_run_start",
@@ -1162,7 +1170,7 @@ def run(
             "source_total": source_total,
         }
 
-    batches_since_checkpoint = 0
+    controller = CheckpointController(cadence, stop_after=stop_after)
 
     for batch in _iter_mention_batches(output_dir, batch_size=batch_size):
         # Skip the prefix already processed before the resume point. Checkpoints
@@ -1335,16 +1343,23 @@ def run(
 
         # Checkpoint on batch boundaries (da#268). ``processed`` is batch-aligned
         # here, so a resume skips whole batches and continues identically.
-        batches_since_checkpoint += 1
-        if batches_since_checkpoint >= cadence:
+        if controller.batch_complete():
             save_checkpoint(ckpt_dir, _snapshot())
-            batches_since_checkpoint = 0
             logger.info(
                 "disambiguate_checkpoint_saved",
                 processed=processed,
                 total=total_mentions,
                 canonical=len(canonical_map),
             )
+            if controller.checkpoint_written():
+                # --stop-after budget hit: checkpoint is on disk, no output written
+                # yet — emit perf summary and halt (da#276).
+                controller.stop(
+                    "disambiguate",
+                    processed=processed,
+                    total=total_mentions,
+                    canonical=len(canonical_map),
+                )
 
     # ---------------------------------------------------------------------------
     # Metrics

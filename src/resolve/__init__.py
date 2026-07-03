@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from src.resolve._checkpoint import EXIT_STOPPED_AT_LIMIT, StopAfterReached
 from src.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -33,7 +34,14 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-__all__ = ["RESOLVE_STEP_ORDER", "ResolveMetrics", "run_all"]
+__all__ = [
+    "EXIT_STOPPED_AT_LIMIT",
+    "RESOLVE_STEP_ORDER",
+    "RESUMABLE_STEPS",
+    "ResolveMetrics",
+    "StopAfterReached",
+    "run_all",
+]
 
 # Canonical execution order of the resolve steps. ``run_all(from_step=...)`` skips
 # every step BEFORE the named one (their outputs must already exist on disk) and
@@ -53,6 +61,13 @@ RESOLVE_STEP_ORDER = (
     "dedup",
     "parallels",
 )
+
+# The stages that keep an intra-stage checkpoint and therefore honour
+# ``--stop-after`` (da#276) / intra-stage ``resume``. The rest are exempt (``ner``
+# is cold-by-design; ``bio_promote``/``cluster``/date stages are sub-minute
+# idempotent re-runs), so ``--stop-after`` targeting them is a CLI error rather
+# than a silent no-op.
+RESUMABLE_STEPS = frozenset({"disambiguate", "dedup", "parallels"})
 
 
 def _resolve_start_index(from_step: str | None) -> int:
@@ -266,6 +281,7 @@ def run_all(
     *,
     from_step: str | None = None,
     resume: bool = True,
+    stop_after: int | None = None,
 ) -> dict[str, list[Path]]:
     """Run full entity resolution pipeline.
 
@@ -298,6 +314,16 @@ def run_all(
     at) and does not affect the exempt stages (``ner`` is cold-by-design because
     it re-mints uuid4 mention_ids; ``bio_promote``/``cluster``/date stages are
     sub-minute and simply re-run).
+
+    ``stop_after`` (da#276, CLI ``--stop-after``) is the bounded partial-run probe:
+    the first resumable stage to reach ``stop_after`` checkpoint writes stops
+    cleanly (checkpoint left on disk, final output NOT written) by raising
+    :class:`~src.resolve._checkpoint.StopAfterReached`, which propagates through
+    this orchestrator (it is a ``BaseException``, so the per-step ``except
+    Exception`` guards do not swallow it) and **halts the pipeline** — no later
+    stage runs on the partial output. The CLI catches it and exits
+    :data:`~src.resolve.EXIT_STOPPED_AT_LIMIT`. It threads only to the resumable
+    stages; the CLI rejects ``--stop-after`` aimed at an exempt ``from_step``.
     """
     start_idx = _resolve_start_index(from_step)
 
@@ -368,7 +394,9 @@ def run_all(
     if _do("disambiguate") and ner_ok:
         try:
             logger.info("resolve_step", step="disambiguate", status="running")
-            results["disambiguate"] = disambiguate.run(staging_dir, output_dir, resume=resume)
+            results["disambiguate"] = disambiguate.run(
+                staging_dir, output_dir, resume=resume, stop_after=stop_after
+            )
             logger.info(
                 "resolve_step",
                 step="disambiguate",
@@ -527,7 +555,9 @@ def run_all(
     if _do("dedup"):
         try:
             logger.info("resolve_step", step="dedup", status="running")
-            results["dedup"] = dedup.run(staging_dir, output_dir, resume=resume)
+            results["dedup"] = dedup.run(
+                staging_dir, output_dir, resume=resume, stop_after=stop_after
+            )
             semantic_links = _read_parallel_links(staging_dir)
             logger.info(
                 "resolve_step", step="dedup", status="complete", files=len(results["dedup"])
@@ -548,7 +578,9 @@ def run_all(
     if _do("parallels"):
         try:
             logger.info("resolve_step", step="parallels", status="running")
-            results["parallels"] = parallels.run(staging_dir, output_dir, resume=resume)
+            results["parallels"] = parallels.run(
+                staging_dir, output_dir, resume=resume, stop_after=stop_after
+            )
             deterministic_links = _read_parallel_links(staging_dir)
             logger.info(
                 "resolve_step", step="parallels", status="complete", files=len(results["parallels"])
