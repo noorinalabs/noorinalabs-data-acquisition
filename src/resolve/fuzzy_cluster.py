@@ -79,6 +79,17 @@ from rapidfuzz import fuzz, process
 from src.models.enums import DatePrecision
 from src.parse.base import safe_str, write_parquet
 from src.parse.identity import make_canonical_id
+from src.resolve._checkpoint import (
+    CheckpointController,
+    checkpoint_dir,
+    clear_checkpoint,
+    hash_parquet_column_groups,
+    hash_strings,
+    load_checkpoint,
+    log_resume,
+    resolve_cadence,
+    save_checkpoint,
+)
 from src.resolve.schemas import NARRATOR_MENTIONS_RESOLVED_SCHEMA, NARRATORS_CANONICAL_SCHEMA
 from src.resolve.sect_affiliation import derive_sect_affiliation, normalize_corpus, primary_corpus
 from src.utils.logging import get_logger
@@ -193,6 +204,35 @@ _MAX_MATCH_KEYS_PER_RECORD: int | None = 64
 # tail) and never a normal name (p99 significant-token count is 34). ``None``
 # disables the cap.
 _MAX_BLOCKING_TOKENS_PER_RECORD: int | None = 64
+
+# Crash-resume for the multi-day block-scoring pass (da#272, PR2). The
+# checkpointed state is the union-find parent array + the set of applied block
+# indices + the scored/merged counters. Correctness leans on two properties of
+# this stage that make it MORE robust than the streaming stages: the final
+# clusters are connected components (invariant to union order) and ``uf.union`` is
+# idempotent — so a resume that applies only the not-yet-applied blocks yields the
+# same components as an uninterrupted run regardless of order or partial re-work.
+#
+# Cadence is keyed to SCORED-PAIR progress, not block count: block cost varies by
+# orders of magnitude (an 8-member scalar block vs a 250-member cdist block), so
+# "every N blocks" would checkpoint wildly unevenly. Checkpointing every
+# ``_CLUSTER_CHECKPOINT_SCORED_INTERVAL`` scored pairs bounds crash-loss to that
+# many pairs of re-work while keeping the O(n) parent-array serialization
+# infrequent (a full ~1.7B-pair run ⇒ a few dozen writes).
+_CLUSTER_CHECKPOINT_SCORED_INTERVAL = 50_000_000
+_CLUSTER_CHECKPOINT_SCHEMA_VERSION = 1
+# Canonical columns whose content determines the clustering output (name/alias
+# match keys + the death-year/gender guards + record identity & row order, which
+# fix the block indices). A change to any of them discards the checkpoint.
+_FINGERPRINT_CANONICAL_COLS = (
+    "canonical_id",
+    "name_ar",
+    "name_en",
+    "name_ar_normalized",
+    "aliases",
+    "death_year_ah",
+    "gender",
+)
 
 # Name tokens that carry no disambiguating signal (Arabic genealogical
 # connectors / honorific particles). Excluded as *blocking* keys so a block does
@@ -490,6 +530,11 @@ def cluster_records(
     *,
     threshold: float = _CLUSTER_RATIO_THRESHOLD,
     max_block_size: int | None = _DEFAULT_MAX_BLOCK_SIZE,
+    ckpt_dir: Path | None = None,
+    fingerprint: str = "",
+    resume: bool = True,
+    stop_after: int | None = None,
+    checkpoint_every_n_intervals: int | None = None,
 ) -> list[list[int]]:
     """Cluster canonical narrator records into same-person groups (as index lists).
 
@@ -526,6 +571,20 @@ def cluster_records(
     score every ≥2-shared-token pair (exact pre-cap behaviour; the
     behaviour-identical-to-single-token-blocking mode used by the equivalence
     test and the precision/recall harness).
+
+    Crash-resume (da#272, PR2)
+    --------------------------
+    When ``ckpt_dir`` is given (by :func:`cluster_canonical_narrators`; the pure
+    callers pass ``None`` and are unaffected), the block-scoring pass checkpoints
+    the union-find parent array + the set of applied block indices + the
+    scored/merged counters every ``_CLUSTER_CHECKPOINT_SCORED_INTERVAL`` scored
+    pairs. On resume it restores that state and re-scores only the blocks not in
+    the applied set. This is output-identical to an uninterrupted run because the
+    final clusters are connected components (invariant to union order) and
+    ``uf.union`` is idempotent — order and any incidental re-work cannot change the
+    components. ``resume=False`` cold-starts; ``stop_after`` stops after N
+    checkpoint writes (``--stop-after``), leaving the checkpoint and writing no
+    output.
     """
     n = len(records)
     uf = _UnionFind(n)
@@ -601,7 +660,38 @@ def cluster_records(
     # thread (it is not thread-safe); workers return pure index-pair lists.
     scored = 0
     merged = 0
-    next_log = _CLUSTER_PROGRESS_INTERVAL
+    # Set of `blocks` indices already unioned into `uf` — the resume skip-set.
+    applied: set[int] = set()
+
+    # --- Crash-resume (da#272): restore union-find + applied-block set. See the
+    # module "Crash-resume" note: correctness holds regardless of union order.
+    controller: CheckpointController | None = None
+    if ckpt_dir is not None:
+        cadence = resolve_cadence(
+            checkpoint_every_n_intervals,
+            "CLUSTER_CHECKPOINT_EVERY_N_INTERVALS",
+            1,
+        )
+        if not resume:
+            clear_checkpoint(ckpt_dir)
+        else:
+            ckpt = load_checkpoint(ckpt_dir)
+            if ckpt is not None:
+                layout_ok = ckpt.get("schema_version") == _CLUSTER_CHECKPOINT_SCHEMA_VERSION
+                fp_ok = ckpt.get("fingerprint") == fingerprint
+                parent_ok = len(ckpt.get("parent", [])) == n
+                if layout_ok and fp_ok and parent_ok:
+                    uf._parent = [int(x) for x in ckpt["parent"]]
+                    applied = {int(b) for b in ckpt["applied_blocks"]}
+                    scored = int(ckpt["scored"])
+                    merged = int(ckpt["merged"])
+                    log_resume("cluster", skipped=len(applied), total=len(blocks), merged=merged)
+                else:
+                    clear_checkpoint(ckpt_dir)
+        controller = CheckpointController(cadence, stop_after=stop_after)
+
+    next_log = scored + _CLUSTER_PROGRESS_INTERVAL
+    next_checkpoint_at = scored + _CLUSTER_CHECKPOINT_SCORED_INTERVAL
     t0 = time.monotonic()
 
     def _flatten(members: list[int]) -> tuple[list[str], list[int]]:
@@ -614,29 +704,39 @@ def cluster_records(
                 ow.append(pos)
         return fk, ow
 
-    # future -> m (member count) for in-flight cdist blocks. Each future RESOLVES to
-    # the block's already-guard-filtered, deduped (i, j) merge pairs, so the main
-    # thread needs nothing but the count for the progress estimate. Drained in
-    # COMPLETION order (not submission order) so one slow block never stalls the
-    # pool: a submission-order drain (waiting on the oldest future) idles every
-    # other worker behind a slow block and collapses throughput to ~1 core.
-    pending: dict[Future[list[tuple[int, int]]], int] = {}
+    def _snapshot() -> dict[str, object]:
+        """Serialize the resumable state: union-find + applied blocks + counters."""
+        return {
+            "schema_version": _CLUSTER_CHECKPOINT_SCHEMA_VERSION,
+            "fingerprint": fingerprint,
+            "parent": uf._parent,
+            "applied_blocks": sorted(applied),
+            "scored": scored,
+            "merged": merged,
+        }
+
+    # future -> (block_idx, m) for in-flight cdist blocks. Each future RESOLVES to
+    # the block's already-guard-filtered, deduped (i, j) merge pairs; the block_idx
+    # lets ``_apply`` record it in the resume skip-set. Drained in COMPLETION order
+    # (not submission order) so one slow block never stalls the pool.
+    pending: dict[Future[list[tuple[int, int]]], tuple[int, int]] = {}
     inflight_cap = _CLUSTER_MAX_WORKERS * _CLUSTER_INFLIGHT_FACTOR
 
-    def _apply(m: int, pairs: list[tuple[int, int]]) -> None:
+    def _apply(block_idx: int, m: int, pairs: list[tuple[int, int]]) -> None:
         """Union a block's pre-guarded merge pairs (the ONLY stateful, serial step).
 
         ``pairs`` are ``(i, j)`` record indices that already cleared every stateless
         guard in the worker; all that remains is the union-find ``already-merged``
-        check + union, both O(α(n)) ≈ O(1), so the main thread is no longer the
-        bottleneck even across hundreds of millions of candidate pairs.
+        check + union, both O(α(n)) ≈ O(1). Runs only on the main thread, so the
+        checkpoint it may write (reading ``uf._parent``) sees a consistent state.
         """
-        nonlocal scored, merged, next_log
+        nonlocal scored, merged, next_log, next_checkpoint_at
         for i, j in pairs:
             if uf.find(i) != uf.find(j):
                 uf.union(i, j)
                 merged += 1
         scored += m * (m - 1) // 2
+        applied.add(block_idx)
         if scored >= next_log:
             next_log = scored + _CLUSTER_PROGRESS_INTERVAL
             logger.info(
@@ -649,6 +749,23 @@ def cluster_records(
                 merged=merged,
                 elapsed_seconds=round(time.monotonic() - t0, 1),
             )
+        # Checkpoint on scored-pair progress (block cost varies by orders of
+        # magnitude, so block-count is a poor cadence). da#272 / da#276.
+        if controller is not None and ckpt_dir is not None and scored >= next_checkpoint_at:
+            next_checkpoint_at = scored + _CLUSTER_CHECKPOINT_SCORED_INTERVAL
+            if controller.batch_complete():
+                save_checkpoint(ckpt_dir, _snapshot())
+                logger.info(
+                    "cluster_checkpoint_saved",
+                    applied=len(applied),
+                    total=len(blocks),
+                    scored=scored,
+                    merged=merged,
+                )
+                if controller.checkpoint_written():
+                    controller.stop(
+                        "cluster", processed=len(applied), total=len(blocks), merged=merged
+                    )
 
     def _drain_completed(block_until_one: bool) -> None:
         """Apply every finished block's pairs; optionally block until ≥1 finishes.
@@ -665,10 +782,13 @@ def cluster_records(
             else {f for f in pending if f.done()}
         )
         for f in done:
-            _apply(pending.pop(f), f.result())
+            block_idx, m = pending.pop(f)
+            _apply(block_idx, m, f.result())
 
     with ThreadPoolExecutor(max_workers=_CLUSTER_MAX_WORKERS) as pool:
-        for members in blocks:
+        for block_idx, members in enumerate(blocks):
+            if block_idx in applied:
+                continue  # already unioned before the resume point — skip
             m = len(members)
             if m < 2:
                 continue
@@ -684,13 +804,13 @@ def cluster_records(
                             pair = _stateless_merge_ok(records, members, owner, flat_keys, p, q)
                             if pair is not None:
                                 seen.add(pair)
-                _apply(m, list(seen))
+                _apply(block_idx, m, list(seen))
                 continue
 
             # Larger block: dispatch cdist + guard-filtering to the shared pool.
             pending[
                 pool.submit(_block_merge_pairs, records, members, owner, flat_keys, threshold)
-            ] = m
+            ] = (block_idx, m)
             # Opportunistically reap anything already done (free slots, no blocking);
             # only block once the in-flight set hits the cap.
             _drain_completed(block_until_one=False)
@@ -918,6 +1038,9 @@ def cluster_canonical_narrators(
     mentions_path: Path | None = None,
     threshold: float = _CLUSTER_RATIO_THRESHOLD,
     max_block_size: int | None = _DEFAULT_MAX_BLOCK_SIZE,
+    staging_dir: Path | None = None,
+    resume: bool = True,
+    stop_after: int | None = None,
 ) -> ClusterMetrics:
     """Fuzzy-cluster ``narrators_canonical.parquet`` in place; return metrics.
 
@@ -926,6 +1049,12 @@ def cluster_canonical_narrators(
     ``mentions_path`` is given, the absorbed-id → survivor-id remap is applied to
     the mentions so the graph edges follow the merge. A no-op (file untouched)
     when the table is missing/empty or nothing clusters.
+
+    Crash-resume (da#272, PR2): when ``staging_dir`` is given the block-scoring
+    pass is checkpointed under ``<staging_dir>/.cluster_checkpoint`` and resumes
+    after a crash; ``resume=False`` cold-starts and ``stop_after`` bounds the run
+    to N checkpoint writes (``--stop-after``, raising ``StopAfterReached`` before
+    the canonical table is rewritten). The checkpoint is cleared on success.
     """
     if not canonical_path.exists():
         logger.warning("cluster_canonical_missing", path=str(canonical_path))
@@ -935,7 +1064,28 @@ def cluster_canonical_narrators(
     if not records:
         return ClusterMetrics(0, 0, 0, 0, 0)
 
-    clusters = cluster_records(records, threshold=threshold, max_block_size=max_block_size)
+    # Fingerprint the clustering-driver columns of the input so a checkpoint taken
+    # against a different canonical set / threshold / cap is discarded (da#272).
+    ckpt_dir: Path | None = None
+    fingerprint = ""
+    if staging_dir is not None:
+        ckpt_dir = checkpoint_dir(staging_dir, "cluster")
+        digests, _rows = hash_parquet_column_groups(
+            canonical_path, {"content": _FINGERPRINT_CANONICAL_COLS}
+        )
+        fingerprint = hash_strings(
+            digests["content"], round(threshold, 6), max_block_size, len(records)
+        )
+
+    clusters = cluster_records(
+        records,
+        threshold=threshold,
+        max_block_size=max_block_size,
+        ckpt_dir=ckpt_dir,
+        fingerprint=fingerprint,
+        resume=resume,
+        stop_after=stop_after,
+    )
 
     merged_rows: list[dict[str, Any]] = []
     remap: dict[str, str] = {}
@@ -956,6 +1106,11 @@ def cluster_canonical_narrators(
                 cross_source += 1
 
     write_parquet(_build_table(merged_rows), canonical_path, schema=NARRATORS_CANONICAL_SCHEMA)
+
+    # Clustering completed and the canonical table is rewritten — drop the
+    # checkpoint so the next cold run doesn't spuriously resume (da#272).
+    if ckpt_dir is not None:
+        clear_checkpoint(ckpt_dir)
 
     remapped = (
         _remap_mention_canonical_ids(mentions_path, remap) if mentions_path is not None else 0

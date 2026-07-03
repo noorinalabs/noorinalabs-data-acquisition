@@ -219,12 +219,15 @@ class StopAfterReached(BaseException):
 
     Clean shutdown on the stop path: BaseException still runs ``finally`` /
     context-manager ``__exit__`` during unwind, so any ``with``-scoped resource
-    releases normally. Stages raise this only from a point where no worker pool is
-    live — dedup's encode ``ProcessPoolExecutor`` is ``with``-scoped inside
-    ``_encode_with_resume`` and has already exited before the checkpointed
-    search/collect phase, and the disambiguate/parallels loops hold only
-    GC-closed Parquet readers — so stopping never strands an executor or a
-    half-open handle.
+    releases normally. A stage's worker pool is always ``with``-scoped, so it is
+    joined cleanly whether or not it is live at the raise: dedup's encode
+    ``ProcessPoolExecutor`` has already exited before the checkpointed
+    search/collect phase; disambiguate/parallels hold only GC-closed Parquet
+    readers; and fuzzy_cluster raises with its block-scoring ``ThreadPoolExecutor``
+    still live, whose ``__exit__`` runs ``shutdown(wait=True)`` on the unwind and
+    joins the (read-only, ``uf``-untouching) workers — the in-flight results are
+    simply discarded and re-run on resume. So stopping never strands an executor or
+    a half-open handle (it may briefly block on the join before exiting).
     """
 
     def __init__(
