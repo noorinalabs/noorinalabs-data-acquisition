@@ -37,10 +37,23 @@ _PHASE1_MENTION_SOURCES: dict[str, str] = {
 }
 
 # Sources with Arabic isnads needing rule-based extraction.
-_ARABIC_SOURCES: set[str] = {"thaqalayn", "open_hadith"}
+#
+# fawaz (da#271): extracted from its Arabic full text, NOT its English translation.
+# fawaz ships an empty ``isnad_raw_en``/``isnad_raw_ar`` but a fully-populated
+# voweled ``full_text_ar`` (the extractor falls back to full text when the isnad
+# column is empty). The old English path produced romanized names ("Anas bin
+# Malik") that never share canonical identity with the Arabic corpora — the da#271
+# cross-script under-merge — and, because the English "Narrated X:" pattern only
+# surfaces the lead companion, it recovered ~1 narrator/hadith versus the full
+# ~5-narrator Arabic chain. Extracting the Arabic text is strictly better than
+# transliterating Latin→Arabic (lossy: no short vowels, bin/ibn, apostrophes) or a
+# cross-script match-key hack: it yields genuinely Arabic names that merge natively
+# AND the complete isnad chain. (sunnah stays English below: its ``full_text_ar``
+# is a samāʿ/reading-certificate blob with biographical dates, not a clean isnad.)
+_ARABIC_SOURCES: set[str] = {"thaqalayn", "open_hadith", "fawaz"}
 
 # Sources with English text needing keyword-based extraction.
-_ENGLISH_SOURCES: set[str] = {"fawaz", "sunnah"}
+_ENGLISH_SOURCES: set[str] = {"sunnah"}
 
 # Sources to skip entirely (no raw isnads).
 _SKIP_SOURCES: set[str] = {"muhaddithat"}
