@@ -9,6 +9,7 @@ from src.parse.name_quality import (
     split_compound_narrators,
     strip_markup,
 )
+from src.utils.arabic import normalize_arabic
 
 
 class TestStripMarkup:
@@ -310,6 +311,49 @@ class TestCleanNarratorName:
     @pytest.mark.parametrize("empty", [None, "", "   ", "<NAR>", "يعني"])
     def test_empty_or_pure_noise_rejected(self, empty: str | None) -> None:
         assert clean_narrator_name(empty) is None
+
+
+class TestBenedictionAndProphetReference:
+    """da#271 — bare Shia taṣliya + Prophet-title references dropped."""
+
+    # --- the bare Shia taṣliya (no trailing وسلم) and its variants → drop ---
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "رسول الله صلى الله عليه واله",  # the mc-365 run-3 false narrator
+            "النبي صلى الله عليه واله",
+            "رسول الله صلى الله عليه و اله",  # spaced و اله
+            "رسول الله‏ صلى الله عليه واله",  # RLM-marked (normalized away)
+            "النبي",
+            "نبي الله",
+            "الرسول",
+        ],
+    )
+    def test_prophet_reference_dropped(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) is None
+
+    # --- PRECISION: real names that merely start with رسول/نبي (not + الله), or
+    #     contain الله as a real theophoric, are KEPT ---
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "عبد الله بن مسلمه بن قعنب القعنبي",
+            "جابر بن عبد الله",
+            "ابو بكر الصديق",
+            "رسول بن جعفر",  # first token رسول but not followed by الله
+            "عبد الله",
+        ],
+    )
+    def test_real_names_kept(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) == normalize_arabic(name)
+
+    # --- the taṣliya is stripped even when it trails a REAL leading name (the name
+    #     is recovered, not dropped) ---
+    def test_tasliya_stripped_leaving_real_name(self) -> None:
+        # a fabricated case: real narrator followed by the benediction
+        assert clean_narrator_name(normalize_arabic("انس بن مالك صلى الله عليه واله")) == (
+            "انس بن مالك"
+        )
 
 
 class TestSplitCompoundNarrators:

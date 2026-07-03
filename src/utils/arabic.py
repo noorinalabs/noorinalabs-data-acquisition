@@ -10,6 +10,7 @@ import re
 
 __all__ = [
     "strip_diacritics",
+    "strip_format_marks",
     "normalize_alif",
     "normalize_hamza",
     "normalize_taa_marbuta",
@@ -39,6 +40,16 @@ _TAA_MARBUTA_RE: re.Pattern[str] = re.compile(r"\u0629")
 
 # Tatweel / kashida: ـ (U+0640)
 _TATWEEL_RE: re.Pattern[str] = re.compile(r"\u0640")
+
+# Bidi / zero-width / format control marks that leak from source text: zero-width
+# space + ZWNJ/ZWJ (U+200B-U+200D), LRM/RLM (U+200E/F), the bidi embedding /
+# override / isolate controls (U+202A-U+202E, U+2066-U+2069), BOM (U+FEFF), and
+# the Arabic end-of-ayah mark (U+06DD). None carry name meaning; a stray one
+# otherwise splits an identical name into a distinct canonical node (da#271: 3,114
+# canonical names carried one, e.g. an RLM embedded mid-name).
+_FORMAT_MARKS_RE: re.Pattern[str] = re.compile(
+    r"[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff\u06dd]"
+)
 
 # Multiple whitespace
 _MULTI_WS_RE: re.Pattern[str] = re.compile(r"\s+")
@@ -160,6 +171,16 @@ def strip_diacritics(text: str) -> str:
     return _DIACRITICS_RE.sub("", text)
 
 
+def strip_format_marks(text: str) -> str:
+    """Remove bidi / zero-width / format control marks (da#271).
+
+    Strips LRM/RLM, ZWNJ/ZWJ, zero-width space, the bidi embedding/isolate
+    controls, BOM, and the Arabic end-of-ayah mark — none carry name meaning, and
+    a stray one otherwise splits an identical name into a distinct canonical node.
+    """
+    return _FORMAT_MARKS_RE.sub("", text)
+
+
 def normalize_alif(text: str) -> str:
     """Normalize أ إ آ ٱ to bare alif ا."""
     return _ALIF_VARIANTS_RE.sub("\u0627", text)
@@ -184,13 +205,15 @@ def normalize_arabic(text: str) -> str:
     """Full Arabic normalization pipeline.
 
     Steps:
-    1. Strip diacritics
-    2. Normalize alif variants
-    3. Normalize hamza variants
-    4. Normalize taa marbuta
-    5. Strip tatweel (kashida)
-    6. Collapse whitespace
+    1. Strip bidi / zero-width / format control marks
+    2. Strip diacritics
+    3. Normalize alif variants
+    4. Normalize hamza variants
+    5. Normalize taa marbuta
+    6. Strip tatweel (kashida)
+    7. Collapse whitespace
     """
+    text = strip_format_marks(text)
     text = strip_diacritics(text)
     text = normalize_alif(text)
     text = normalize_hamza(text)
