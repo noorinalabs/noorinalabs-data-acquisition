@@ -171,3 +171,33 @@ def test_stop_after_threads_to_resumable_stages(
 
     run_all(tmp_path / "raw", staging, output, stop_after=5)
     assert seen == {"disambiguate": 5, "dedup": 5, "parallels": 5}
+
+
+def test_stop_after_reached_propagates_out_of_run_all_and_halts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """StopAfterReached (a BaseException) must sail OUT of run_all — the per-step
+    ``except Exception`` guards must NOT swallow it — so the pipeline halts at the
+    stopped stage and no later stage runs on the partial output (Kavitha, #285).
+    This is the orchestrator-level counterpart to the unit-level BaseException test.
+    """
+    from src.resolve import StopAfterReached
+
+    called = _install_spies(monkeypatch)
+    staging, output = _staging_with_parquet(tmp_path)
+    (output / "narrator_mentions_resolved.parquet").write_bytes(b"placeholder")
+
+    def _stop(*_a: object, **_k: object) -> object:
+        called.append("disambiguate")
+        raise StopAfterReached(
+            "disambiguate", checkpoints=1, processed=10, total=100, elapsed_s=1.0, rate_per_s=10.0
+        )
+
+    monkeypatch.setattr(disambiguate, "run", _stop)
+
+    with pytest.raises(StopAfterReached):
+        run_all(tmp_path / "raw", staging, output, stop_after=1)
+
+    # Pipeline halted at disambiguate: no later stage ran on the partial output.
+    for later in ("bio_promote", "cluster", "dedup", "parallels"):
+        assert later not in called, f"{later} must not run after a stop"

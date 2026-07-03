@@ -63,11 +63,12 @@ RESOLVE_STEP_ORDER = (
 )
 
 # The stages that keep an intra-stage checkpoint and therefore honour
-# ``--stop-after`` (da#276) / intra-stage ``resume``. The rest are exempt (``ner``
-# is cold-by-design; ``bio_promote``/``cluster``/date stages are sub-minute
-# idempotent re-runs), so ``--stop-after`` targeting them is a CLI error rather
-# than a silent no-op.
-RESUMABLE_STEPS = frozenset({"disambiguate", "dedup", "parallels"})
+# ``--stop-after`` (da#276) / intra-stage ``resume``. ``cluster`` (fuzzy_cluster)
+# is the multi-day block-scoring pass and is checkpointed by da#272 PR2. The rest
+# are exempt (``ner`` is cold-by-design; ``bio_promote``/date stages are
+# sub-minute idempotent re-runs), so ``--stop-after`` targeting them is a CLI
+# error rather than a silent no-op.
+RESUMABLE_STEPS = frozenset({"disambiguate", "cluster", "dedup", "parallels"})
 
 
 def _resolve_start_index(from_step: str | None) -> int:
@@ -308,12 +309,12 @@ def run_all(
 
     ``resume`` is the uniform crash-resume switch (da#272): when ``True`` (default)
     every stage that keeps an intra-stage checkpoint — ``disambiguate`` (da#268),
-    ``dedup``'s FAISS/collection phase, and ``detect_parallels``'s anchor scan —
-    restores it and continues; ``False`` (CLI ``--no-resume``) forces each of those
-    stages to cold-start. It is orthogonal to ``from_step`` (which step to start
-    at) and does not affect the exempt stages (``ner`` is cold-by-design because
-    it re-mints uuid4 mention_ids; ``bio_promote``/``cluster``/date stages are
-    sub-minute and simply re-run).
+    ``fuzzy_cluster``'s block-scoring pass (PR2), ``dedup``'s FAISS/collection
+    phase, and ``detect_parallels``'s anchor scan — restores it and continues;
+    ``False`` (CLI ``--no-resume``) forces each of those stages to cold-start. It is
+    orthogonal to ``from_step`` (which step to start at) and does not affect the
+    exempt stages (``ner`` is cold-by-design because it re-mints uuid4 mention_ids;
+    ``bio_promote``/date stages are sub-minute and simply re-run).
 
     ``stop_after`` (da#276, CLI ``--stop-after``) is the bounded partial-run probe:
     the first resumable stage to reach ``stop_after`` checkpoint writes stops
@@ -455,6 +456,9 @@ def run_all(
             cluster_metrics = fuzzy_cluster.cluster_canonical_narrators(
                 canonical_path,
                 mentions_path=mentions_path if mentions_path.exists() else None,
+                staging_dir=staging_dir,
+                resume=resume,
+                stop_after=stop_after,
             )
             results["cluster"] = [canonical_path] if cluster_metrics.merged_records else []
             logger.info(

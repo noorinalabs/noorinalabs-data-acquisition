@@ -495,10 +495,11 @@ def main() -> None:
         "--no-resume",
         action="store_true",
         help=(
-            "Force every crash-resumable stage (disambiguate, dedup's FAISS/"
-            "collection phase, parallels' anchor scan) to discard its checkpoint "
-            "and cold-start (da#272). Independent of --from-step, which selects "
-            "WHICH step to begin at; --no-resume selects HOW that step starts."
+            "Force every crash-resumable stage (disambiguate, fuzzy_cluster's "
+            "block-scoring pass, dedup's FAISS/collection phase, parallels' anchor "
+            "scan) to discard its checkpoint and cold-start (da#272). Independent of "
+            "--from-step, which selects WHICH step to begin at; --no-resume selects "
+            "HOW that step starts."
         ),
     )
     resolve_parser.add_argument(
@@ -511,9 +512,10 @@ def main() -> None:
             "after its Nth checkpoint write, leaving the checkpoint on disk (a "
             "later bare run resumes from it) and writing NO final output, then halt "
             "the pipeline with a perf summary and a distinct exit status. Only "
-            "applies to resumable stages (disambiguate, dedup, parallels); pairing "
-            "it with --from-step on an exempt stage is an error. Combine with "
-            "--from-step <stage> --no-resume for a cold bounded probe of one stage."
+            "applies to resumable stages (disambiguate, cluster, dedup, parallels); "
+            "pairing it with --from-step on an exempt stage is an error. Combine "
+            "with --from-step <stage> --no-resume for a cold bounded probe of one "
+            "stage."
         ),
     )
 

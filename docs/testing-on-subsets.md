@@ -24,12 +24,17 @@ rows, maps 1:1 onto the machinery and is stage-appropriately sized). On stop:
 - the process exits with a **distinct status (3)** so a script can tell
   "stopped at limit" from "completed" (0), an argument error (2), or a crash (1).
 
-Only the **resumable** stages honour it: `disambiguate`, `dedup` (its FAISS
-search + pair-collection phase), and `parallels` (its anchor scan). The exempt
-stages have no checkpoint — `ner` is cold-by-design (it re-mints uuid4
-`mention_id`s each run) and `bio_promote` / `cluster` / the date stages are
-sub-minute idempotent re-runs — so pairing `--stop-after` with `--from-step` on an
-exempt stage is a hard error, not a silent no-op.
+The budget is **per resumable stage**: `N` counts a single stage's own checkpoint
+writes, so in a multi-stage run the first resumable stage to reach `N` stops the
+pipeline (it does not sum across stages). Pin the stage you mean to probe with
+`--from-step <stage>`.
+
+Only the **resumable** stages honour it: `disambiguate`, `cluster` (fuzzy_cluster's
+multi-day block-scoring pass), `dedup` (its FAISS search + pair-collection phase),
+and `parallels` (its anchor scan). The exempt stages have no checkpoint — `ner` is
+cold-by-design (it re-mints uuid4 `mention_id`s each run) and `bio_promote` / the
+date stages are sub-minute idempotent re-runs — so pairing `--stop-after` with
+`--from-step` on an exempt stage is a hard error, not a silent no-op.
 
 ## The cold bounded probe
 

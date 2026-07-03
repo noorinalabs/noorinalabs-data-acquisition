@@ -222,6 +222,37 @@ def test_resumed_run_is_output_identical_to_cold(
     )
 
 
+def test_stop_after_then_resume_is_output_identical_to_cold(tmp_path: Path) -> None:
+    """--stop-after (da#276) on disambiguate: a bounded stop then a bare resume
+    equals an uninterrupted run — the resume-coverage counterpart the streaming
+    stages should each have (Oyunbileg, #285), via the clean --stop-after stop
+    rather than a simulated crash."""
+    from src.resolve import StopAfterReached
+
+    cold_staging, cold_out = _setup(tmp_path, "cold_sa")
+    disambiguate.run(cold_staging, cold_out, batch_size=2, checkpoint_every_n_batches=1)
+    cold = _read_outputs(cold_out)
+
+    probe_staging, probe_out = _setup(tmp_path, "probe_sa")
+    with pytest.raises(StopAfterReached) as excinfo:
+        disambiguate.run(
+            probe_staging, probe_out, batch_size=2, checkpoint_every_n_batches=1, stop_after=2
+        )
+    assert excinfo.value.stage == "disambiguate"
+    # Bounded stop left a partial checkpoint and did NOT write final canonical output.
+    ckpt = _checkpoint.load_checkpoint(_checkpoint.checkpoint_dir(probe_staging, "disambiguate"))
+    assert ckpt is not None and 0 < ckpt["processed"] < len(_mention_rows(4))
+    assert not (probe_out / "narrators_canonical.parquet").exists()
+
+    # Resume to completion — byte-identical to the uninterrupted run.
+    disambiguate.run(probe_staging, probe_out, batch_size=2, checkpoint_every_n_batches=1)
+    resumed = _read_outputs(probe_out)
+    assert resumed["canonical"] == cold["canonical"]
+    assert resumed["mentions"] == cold["mentions"]
+    assert resumed["merge_log"] == cold["merge_log"]
+    assert not _checkpoint.checkpoint_dir(probe_staging, "disambiguate").exists()
+
+
 # ---------------------------------------------------------------------------
 # Invalidation → cold start
 # ---------------------------------------------------------------------------
