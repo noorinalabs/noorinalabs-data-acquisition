@@ -159,3 +159,61 @@ def test_hash_strings_deterministic_and_sensitive() -> None:
 def test_log_resume_smoke() -> None:
     _checkpoint.log_resume("dedup", skipped=3, total=10, pairs=2)  # must not raise
     _checkpoint.log_resume("parallels", skipped=0, total=0)  # zero-division guard
+
+
+# ---------------------------------------------------------------------------
+# CheckpointController + StopAfterReached (--stop-after, da#276)
+# ---------------------------------------------------------------------------
+def test_controller_cadence_counting() -> None:
+    c = _checkpoint.CheckpointController(3)
+    # A checkpoint is due only on the 3rd, 6th, ... completed batch.
+    assert [c.batch_complete() for _ in range(6)] == [False, False, True, False, False, True]
+
+
+def test_controller_no_stop_budget_never_stops() -> None:
+    c = _checkpoint.CheckpointController(1)  # stop_after=None
+    # checkpoint_written never signals a stop when no budget is set.
+    assert [c.checkpoint_written() for _ in range(5)] == [False] * 5
+    assert c.checkpoints_written == 5
+
+
+def test_controller_stop_after_budget() -> None:
+    c = _checkpoint.CheckpointController(1, stop_after=2)
+    assert c.checkpoint_written() is False  # 1st write
+    assert c.checkpoint_written() is True  # 2nd write hits the budget
+    assert c.checkpoints_written == 2
+
+
+def test_controller_cadence_floored_at_one() -> None:
+    c = _checkpoint.CheckpointController(0)
+    assert c.batch_complete() is True  # cadence floored to 1
+
+
+def test_controller_stop_logs_and_raises_with_perf() -> None:
+    c = _checkpoint.CheckpointController(1, stop_after=1)
+    c.checkpoint_written()
+    with pytest.raises(_checkpoint.StopAfterReached) as excinfo:
+        c.stop("dedup", processed=40, total=200, pairs=7)
+    exc = excinfo.value
+    assert exc.stage == "dedup"
+    assert exc.checkpoints == 1
+    assert exc.processed == 40
+    assert exc.total == 200
+    assert exc.rate_per_s >= 0.0
+    summary = exc.summary()
+    assert "dedup" in summary and "40/200" in summary and "--from-step dedup" in summary
+
+
+def test_stop_after_reached_is_baseexception_not_exception() -> None:
+    """The load-bearing property: run_all's ``except Exception`` must NOT catch it,
+    so the pipeline halts instead of treating the stop as a step failure."""
+    exc = _checkpoint.StopAfterReached(
+        "parallels", checkpoints=2, processed=4, total=8, elapsed_s=1.0, rate_per_s=4.0
+    )
+    assert isinstance(exc, BaseException)
+    assert not isinstance(exc, Exception)
+
+
+def test_exit_code_distinct() -> None:
+    # 0=completed, 1=crash, 2=argparse/validation — stopped must differ from all.
+    assert _checkpoint.EXIT_STOPPED_AT_LIMIT not in (0, 1, 2)

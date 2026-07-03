@@ -35,8 +35,9 @@ import hashlib
 import json
 import os
 import shutil
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pyarrow.parquet as pq
 
@@ -45,6 +46,12 @@ from src.utils.logging import get_logger
 logger = get_logger(__name__)
 
 _STATE_FILENAME = "state.json"
+
+# Process exit status when a stage stopped cleanly at its ``--stop-after`` budget
+# (da#276). Distinct from 0 (completed), 2 (argparse/validation error), and 1 (an
+# uncaught crash) so a script/runbook can tell a bounded probe apart from a real
+# completion or failure.
+EXIT_STOPPED_AT_LIMIT = 3
 
 # ASCII unit / record separators keep the streamed field/row hashing
 # unambiguous — a value that happens to contain the delimiter cannot forge a
@@ -192,3 +199,122 @@ def log_resume(stage: str, *, skipped: int, total: int, **extra: object) -> None
         pct=round(skipped / max(total, 1) * 100, 1),
         **extra,
     )
+
+
+# ---------------------------------------------------------------------------
+# Bounded partial-run control: --stop-after (da#276)
+# ---------------------------------------------------------------------------
+class StopAfterReached(BaseException):
+    """Signals that a stage hit its ``--stop-after`` checkpoint budget and stopped.
+
+    Subclasses ``BaseException`` (not ``Exception``) **on purpose**: the resolve
+    orchestrator wraps each stage in ``except Exception`` and logs-and-continues,
+    so an ``Exception`` here would be swallowed as a "step failed" and the pipeline
+    would march on into the next stage — exactly what the spec forbids (downstream
+    must never consume a partial output). As a ``BaseException`` it sails through
+    those guards, halting the pipeline at the stopped stage and surfacing to the
+    CLI, which maps it to :data:`EXIT_STOPPED_AT_LIMIT`. By the time it is raised
+    the stage has persisted its checkpoint and has NOT written its final output, so
+    a later bare resume continues from that checkpoint.
+
+    Clean shutdown on the stop path: BaseException still runs ``finally`` /
+    context-manager ``__exit__`` during unwind, so any ``with``-scoped resource
+    releases normally. Stages raise this only from a point where no worker pool is
+    live — dedup's encode ``ProcessPoolExecutor`` is ``with``-scoped inside
+    ``_encode_with_resume`` and has already exited before the checkpointed
+    search/collect phase, and the disambiguate/parallels loops hold only
+    GC-closed Parquet readers — so stopping never strands an executor or a
+    half-open handle.
+    """
+
+    def __init__(
+        self,
+        stage: str,
+        *,
+        checkpoints: int,
+        processed: int,
+        total: int,
+        elapsed_s: float,
+        rate_per_s: float,
+    ) -> None:
+        self.stage = stage
+        self.checkpoints = checkpoints
+        self.processed = processed
+        self.total = total
+        self.elapsed_s = elapsed_s
+        self.rate_per_s = rate_per_s
+        super().__init__(self.summary())
+
+    def summary(self) -> str:
+        """Compact one-line perf summary (the number people run the flag to get)."""
+        pct = f"{self.processed / self.total * 100:.1f}%" if self.total else "n/a"
+        return (
+            f"Stopped '{self.stage}' after {self.checkpoints} checkpoint(s): "
+            f"{self.processed}/{self.total} items ({pct}) in {self.elapsed_s:.1f}s "
+            f"({self.rate_per_s:.1f} items/s). Checkpoint left on disk — resume with "
+            f"`resolve --from-step {self.stage}` (bare, without --no-resume)."
+        )
+
+
+class CheckpointController:
+    """Cadence counter + optional ``--stop-after`` budget, shared by every stage.
+
+    Centralises the two decisions a stage's inner loop makes each batch/block so
+    the ``--stop-after`` mechanism lives here once rather than per stage:
+
+    - :meth:`batch_complete` — call once per completed batch/block; returns ``True``
+      when a checkpoint is due (the stage then writes it and logs its own line).
+    - :meth:`checkpoint_written` — call right after persisting that checkpoint;
+      returns ``True`` when the ``--stop-after`` budget is now exhausted, at which
+      point the stage calls :meth:`stop` to emit the perf summary and halt.
+
+    ``stop_after=None`` (the default / no flag) makes :meth:`checkpoint_written`
+    always return ``False``, so the controller is a drop-in for the old inline
+    ``batches_since_checkpoint >= cadence`` counter with zero behaviour change.
+    """
+
+    def __init__(self, cadence: int, *, stop_after: int | None = None) -> None:
+        self.cadence = max(1, cadence)
+        self.stop_after = stop_after
+        self.checkpoints_written = 0
+        self._since = 0
+        self._started = time.monotonic()
+
+    def batch_complete(self) -> bool:
+        """Record one completed batch/block; ``True`` when a checkpoint is due now."""
+        self._since += 1
+        if self._since >= self.cadence:
+            self._since = 0
+            return True
+        return False
+
+    def checkpoint_written(self) -> bool:
+        """Record a checkpoint write; ``True`` when the ``--stop-after`` budget is hit."""
+        self.checkpoints_written += 1
+        return self.stop_after is not None and self.checkpoints_written >= self.stop_after
+
+    def stop(self, stage: str, *, processed: int, total: int, **extra: object) -> NoReturn:
+        """Emit ``<stage>_stopped_at_limit`` + a perf summary, then raise to halt.
+
+        Call only after the checkpoint that tripped the budget is already on disk
+        and before writing any final output — the run is partial by construction.
+        """
+        elapsed = time.monotonic() - self._started
+        rate = processed / elapsed if elapsed > 0 else 0.0
+        logger.info(
+            f"{stage}_stopped_at_limit",
+            checkpoints=self.checkpoints_written,
+            processed=processed,
+            total=total,
+            elapsed_s=round(elapsed, 2),
+            rate_per_s=round(rate, 1),
+            **extra,
+        )
+        raise StopAfterReached(
+            stage,
+            checkpoints=self.checkpoints_written,
+            processed=processed,
+            total=total,
+            elapsed_s=elapsed,
+            rate_per_s=rate,
+        )

@@ -145,3 +145,29 @@ def test_resume_flag_threads_to_resumable_stages(
 
     run_all(tmp_path / "raw", staging, output, resume=False)
     assert seen == {"disambiguate": False, "dedup": False, "parallels": False}
+
+
+def test_stop_after_threads_to_resumable_stages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``run_all(stop_after=...)`` (CLI ``--stop-after``, da#276) must reach every
+    resumable stage; the exempt stages never receive it (they take no such kwarg)."""
+    _install_spies(monkeypatch)
+    staging, output = _staging_with_parquet(tmp_path)
+    (output / "narrator_mentions_resolved.parquet").write_bytes(b"placeholder")
+
+    seen: dict[str, int | None] = {}
+
+    def _spy(name: str, ret: object):  # type: ignore[no-untyped-def]
+        def _fn(*_a: object, stop_after: int | None = None, **_k: object) -> object:
+            seen[name] = stop_after
+            return ret
+
+        return _fn
+
+    monkeypatch.setattr(disambiguate, "run", _spy("disambiguate", []))
+    monkeypatch.setattr(dedup, "run", _spy("dedup", []))
+    monkeypatch.setattr(parallels, "run", _spy("parallels", []))
+
+    run_all(tmp_path / "raw", staging, output, stop_after=5)
+    assert seen == {"disambiguate": 5, "dedup": 5, "parallels": 5}

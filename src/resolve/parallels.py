@@ -56,6 +56,7 @@ import pyarrow.parquet as pq
 
 from src.models.enums import VariantType
 from src.resolve._checkpoint import (
+    CheckpointController,
     checkpoint_dir,
     clear_checkpoint,
     hash_parquet_column_groups,
@@ -219,6 +220,7 @@ def detect_parallels(
     max_block_df: int = _DEFAULT_MAX_BLOCK_DF,
     resume: bool = True,
     checkpoint_every_n_blocks: int | None = None,
+    stop_after: int | None = None,
 ) -> Path:
     """Detect parallel hadiths by lexical matn similarity.
 
@@ -239,6 +241,10 @@ def detect_parallels(
     hadith files, and the input fingerprint discards a checkpoint taken against
     changed hadiths, so a resumed scan's output is byte-identical to a cold one.
     ``resume=False`` forces a cold scan.
+
+    ``stop_after`` (da#276): stop after this many checkpoint writes, leaving the
+    checkpoint on disk and WITHOUT writing ``parallel_links.parquet`` — raises
+    :class:`~src.resolve._checkpoint.StopAfterReached`. ``None`` runs to completion.
     """
     rows = _load_hadith_rows(staging_dir)
 
@@ -272,7 +278,6 @@ def detect_parallels(
         "PARALLELS_CHECKPOINT_EVERY_N_BLOCKS",
         _PARALLELS_CHECKPOINT_EVERY_N_BLOCKS,
     )
-    checkpoint_every_rows = cadence * _PARALLELS_ANCHORS_PER_BLOCK
 
     records: list[dict[str, object]] = []
     cross_sect_count = 0
@@ -302,6 +307,9 @@ def detect_parallels(
             "records": records,
         }
 
+    # One "batch" = `_PARALLELS_ANCHORS_PER_BLOCK` anchors; the controller writes a
+    # checkpoint every `cadence` such blocks and enforces the --stop-after budget.
+    controller = CheckpointController(cadence, stop_after=stop_after)
     for i in range(start_i, len(indexed)):
         id_i, sect_i, tok_i = indexed[i]
         for j in _candidate_partners(i, tok_i, postings, max_block_df):
@@ -324,7 +332,7 @@ def detect_parallels(
                 }
             )
         # Checkpoint on anchor-block boundaries — `i + 1` anchors are complete.
-        if (i + 1) % checkpoint_every_rows == 0:
+        if (i + 1) % _PARALLELS_ANCHORS_PER_BLOCK == 0 and controller.batch_complete():
             save_checkpoint(ckpt_dir, _snapshot(i + 1))
             logger.info(
                 "parallels_checkpoint_saved",
@@ -332,6 +340,12 @@ def detect_parallels(
                 total=len(indexed),
                 pairs=len(records),
             )
+            if controller.checkpoint_written():
+                # --stop-after budget hit (da#276): checkpoint on disk, links not
+                # written — perf summary + halt.
+                controller.stop(
+                    "parallels", processed=i + 1, total=len(indexed), pairs=len(records)
+                )
 
     output_path = _write_links(staging_dir, records)
     # Scan completed and the output is on disk — drop the checkpoint (da#272).
@@ -349,9 +363,16 @@ def detect_parallels(
     return output_path
 
 
-def run(staging_dir: Path, output_dir: Path, *, resume: bool = True) -> list[Path]:  # noqa: ARG001
+def run(
+    staging_dir: Path,
+    output_dir: Path,  # noqa: ARG001
+    *,
+    resume: bool = True,
+    stop_after: int | None = None,
+) -> list[Path]:
     """Resolve-pipeline entry point. ``output_dir`` is accepted for interface
     symmetry with the other resolve stages; links are written into *staging_dir*
     next to the hadith parquet the graph loader reads. ``resume`` (da#272) threads
-    to the anchor-scan checkpoint."""
-    return [detect_parallels(staging_dir, resume=resume)]
+    to the anchor-scan checkpoint; ``stop_after`` (da#276) bounds it to N
+    checkpoint writes then raises ``StopAfterReached`` (no links written)."""
+    return [detect_parallels(staging_dir, resume=resume, stop_after=stop_after)]

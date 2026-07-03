@@ -21,6 +21,7 @@ import pyarrow.parquet as pq
 
 from src.models.enums import VariantType
 from src.resolve._checkpoint import (
+    CheckpointController,
     checkpoint_dir,
     clear_checkpoint,
     hash_strings,
@@ -469,6 +470,7 @@ def _search_and_collect_resumable(
     build_index: Callable[[], _Searchable],
     reload_index: Callable[[], _Searchable],
     block_size: int = _DEDUP_SEARCH_BLOCK,
+    stop_after: int | None = None,
 ) -> tuple[list[str], list[str], list[float], list[str], list[bool]]:
     """Search the corpus against a FAISS-like index in resumable row-blocks and
     collect the classified parallel pairs (da#272).
@@ -534,7 +536,7 @@ def _search_and_collect_resumable(
             "cross_sects": cross_sects,
         }
 
-    blocks_since_checkpoint = 0
+    controller = CheckpointController(cadence, stop_after=stop_after)
     for block_start in range(start_row, n, block_size):
         block_end = min(block_start + block_size, n)
         scores_matrix, indices_matrix = index.search(embeddings[block_start:block_end], actual_k)
@@ -566,11 +568,13 @@ def _search_and_collect_resumable(
                     _is_cross_sect(id_to_corpus[pair_key[0]], id_to_corpus[pair_key[1]])
                 )
 
-        blocks_since_checkpoint += 1
-        if blocks_since_checkpoint >= cadence:
+        if controller.batch_complete():
             save_checkpoint(ckpt_dir, _snapshot(block_end))
-            blocks_since_checkpoint = 0
             logger.info("dedup_checkpoint_saved", processed=block_end, total=n, pairs=len(ids_a))
+            if controller.checkpoint_written():
+                # --stop-after budget hit (da#276): checkpoint on disk, output not
+                # written — perf summary + halt. run_dedup never writes its parquet.
+                controller.stop("dedup", processed=block_end, total=n, pairs=len(ids_a))
 
     return ids_a, ids_b, sim_scores, variant_types, cross_sects
 
@@ -585,6 +589,7 @@ def run_dedup(
     encode_workers: int | None = None,
     resume: bool = True,
     checkpoint_every_n_blocks: int | None = None,
+    stop_after: int | None = None,
 ) -> Path:
     """Run full hadith deduplication pipeline.
 
@@ -615,6 +620,11 @@ def run_dedup(
     checkpoint_every_n_blocks:
         Persist the pair-collection state every N query blocks. ``None`` reads
         ``DEDUP_CHECKPOINT_EVERY_N_BLOCKS`` then falls back to the default.
+    stop_after:
+        Bounded partial-run probe (da#276): stop after this many checkpoint writes,
+        leaving the checkpoint on disk and WITHOUT writing ``parallel_links.parquet``
+        — raises :class:`~src.resolve._checkpoint.StopAfterReached`. ``None`` runs to
+        completion.
 
     Returns
     -------
@@ -739,6 +749,7 @@ def run_dedup(
         index_available=index_path.exists(),
         build_index=_build_index,
         reload_index=_reload_index,
+        stop_after=stop_after,
     )
 
     # ------------------------------------------------------------------
@@ -794,14 +805,18 @@ def _write_empty_output(staging_dir: Path) -> Path:
     return output_path
 
 
-def run(staging_dir: Path, output_dir: Path, *, resume: bool = True) -> list[Path]:
+def run(
+    staging_dir: Path, output_dir: Path, *, resume: bool = True, stop_after: int | None = None
+) -> list[Path]:
     """Entry point matching the resolve pipeline interface.
 
     Delegates to ``run_dedup`` and wraps the result in a list for compatibility
     with the resolve orchestrator. ``resume`` (da#272) threads to the FAISS
     search + pair-collection checkpoint; ``False`` forces that phase to re-scan.
+    ``stop_after`` (da#276) bounds that phase to N checkpoint writes then raises
+    ``StopAfterReached`` (no output written).
     """
-    path = run_dedup(staging_dir, resume=resume)
+    path = run_dedup(staging_dir, resume=resume, stop_after=stop_after)
     if path.exists():
         return [path]
     return []
