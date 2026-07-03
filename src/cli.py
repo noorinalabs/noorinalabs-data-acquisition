@@ -101,7 +101,7 @@ def _cmd_parse() -> None:
     print(f"Parsing complete. {total_files} staging files produced.")
 
 
-def _cmd_resolve(*, from_step: str | None = None) -> None:
+def _cmd_resolve(*, from_step: str | None = None, resume: bool = True) -> None:
     """Run the Phase 2 entity resolution pipeline."""
     from pathlib import Path
 
@@ -111,11 +111,14 @@ def _cmd_resolve(*, from_step: str | None = None) -> None:
     settings = get_settings()
     if from_step:
         print(f"Resuming resolve from step: {from_step}")
+    if not resume:
+        print("Crash-resume disabled (--no-resume): every stage cold-starts.")
     results = resolve_all(
         Path(settings.data_raw_dir),
         Path(settings.data_staging_dir),
         Path(settings.data_curated_dir),
         from_step=from_step,
+        resume=resume,
     )
     total = sum(len(v) for v in results.values())
     print(f"\nResolution complete. {total} output files.")
@@ -475,6 +478,16 @@ def main() -> None:
             "mentions file and disambiguate's checkpoint are reused."
         ),
     )
+    resolve_parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help=(
+            "Force every crash-resumable stage (disambiguate, dedup's FAISS/"
+            "collection phase, parallels' anchor scan) to discard its checkpoint "
+            "and cold-start (da#272). Independent of --from-step, which selects "
+            "WHICH step to begin at; --no-resume selects HOW that step starts."
+        ),
+    )
 
     load_parser = subparsers.add_parser("load", help="Load graph database")
     load_parser.add_argument(
@@ -578,7 +591,7 @@ def main() -> None:
     elif args.command == "parse":
         _cmd_parse()
     elif args.command == "resolve":
-        _cmd_resolve(from_step=args.from_step)
+        _cmd_resolve(from_step=args.from_step, resume=not args.no_resume)
     elif args.command == "load":
         _cmd_load(
             skip_validation=args.skip_validation,
