@@ -356,6 +356,237 @@ class TestBenedictionAndProphetReference:
         )
 
 
+class TestMatnSentenceGate:
+    """da#308 — matn / grading-commentary sentences dropped, real names spared.
+
+    ``clean_narrator_name`` scrubbed honorifics but kept whole hadith-matn /
+    grading-commentary spans as canonical narrators (~15% / 25,971 of run-4b). The
+    drop-gate returns ``None`` for structurally-matn spans while a nasab-density
+    precision guard spares genuine lineages, nisba tails, and kunya compounds.
+    """
+
+    # --- DROP: matn / grading-commentary spans (the issue's evidence set) ---
+    @pytest.mark.parametrize(
+        "matn",
+        [
+            # the two canonical examples from the issue body
+            "قلت لابي عبد الله عليه السلام ذهبت ارمي فاذا في يدي ست حصيات",
+            "صلى النبي صلى الله عليه وسلم الظهر خمسا. فقيل له: ازيد في الصلاه؟",
+            # high-mention-count matn/commentary from the evidence bullets
+            "نعم ، هو بالاراك بعرفه يرعى ابل القوم ، فركب عمر",  # mc=853 pure matn
+            "ابو عيسى هذا حديث حسن صحيح",  # mc=552 al-Tirmidhī grading formula
+            "نهى رسول الله صلى الله عليه وسلم ان نستقبل القبلتين ببول او غاءط",  # mc=319
+            # residual verb-led openers that _ISNAD_BOUNDARY does not cut
+            "كنا مع النبي في سفر فنزلنا منزلا",
+            "قلنا يا رسول الله كيف نصلي عليك",
+            "امر النبي بقتل الاسودين في الصلاه",
+            "رايت النبي يمسح على الخفين",
+            "صلى بنا رسول الله الظهر ثم انصرف",
+            # grading verdicts
+            "هذا حديث صحيح على شرط الشيخين",
+            "حديث حسن صحيح لا باس به",
+            # lone matn answer particle (post-truncation residue)
+            "نعم",
+        ],
+    )
+    def test_matn_sentence_dropped(self, matn: str) -> None:
+        assert clean_narrator_name(normalize_arabic(matn)) is None
+
+    # --- KEEP: real names pass through unchanged (honorific-scrubbed only) ---
+    # Covers the issue's precision-guard set: long nasab chain, nisba tail,
+    # vocalized بْنُ, kunya compound, and an 8+-token real nasab lineage.
+    @pytest.mark.parametrize(
+        "name",
+        [
+            # long genuine nasab chain (15 tokens, 6× بن)
+            "محمد بن مسلم بن عبيد الله بن عبد الله بن شهاب بن عبد الله بن الحارث بن زهره",
+            # nisba tails (incl. the "…الليثي ثم الجندعي" tribal-transition ثم)
+            "عبد الله بن عبد الرحمن المداءني",
+            "عطاء بن يزيد الليثي ثم الجندعي",
+            # kunya / laqab compounds
+            "ابو عبد الله الشامي",
+            "ابو بكر بن ابي شيبه",
+            # 8+-token real nasab lineage
+            "ابو القاسم عبد الرحمن بن عبد الله بن احمد بن محمد بن عبيد بن عبد الملك",
+        ],
+    )
+    def test_real_name_kept_unchanged(self, name: str) -> None:
+        normalized = normalize_arabic(name)
+        assert clean_narrator_name(normalized) == normalized
+
+    # --- PRECISION: a VOCALIZED nasab chain — the diacritized بْنُ must count as a
+    # connector so the span is spared. Passed pre-normalization to exercise the
+    # gate's own diacritics-insensitive folding. ---
+    def test_vocalized_nasab_spared(self) -> None:
+        # Fully diacritized بْنُ / أَبُو must count as nasab connectors so the span is
+        # spared. clean_narrator_name preserves its input's diacritics (it folds them
+        # only for internal matching), so a spared span comes back unchanged.
+        vocalized = "وَأَبُو بَكْرٍ أَحْمَدُ بْنُ الْحَسَنِ الْقَاضِي"
+        assert clean_narrator_name(vocalized) == vocalized
+
+    # --- RECOVERY: "<real name> رضى الله عنه <matn tail>" recovers the leading name
+    # rather than being dropped (precision-first: ابي هريره = Abū Hurayra is a real,
+    # heavily-cited narrator — the mc-1215 evidence bullet). The alif-maqsura
+    # honorific variant is scrubbed, then the ان matn tail is truncated. ---
+    def test_real_lead_before_matn_recovered(self) -> None:
+        assert clean_narrator_name(normalize_arabic("ابي هريره رضى الله عنه ان")) == "ابي هريره"
+
+    # --- precision / recall over a hand-labelled sample (issue acceptance) ---
+    # 24 matn/commentary + 34 real names. Precision MUST be 1.0 (never drop a real
+    # name); recall is high. This is the guardrail against a future tweak that
+    # over-drops. Kept in-test so it runs in CI, not just the PR body.
+    _PR_SAMPLE: tuple[tuple[str, bool], ...] = (
+        ("قلت لابي عبد الله عليه السلام ذهبت ارمي فاذا في يدي ست حصيات", True),
+        ("صلى النبي صلى الله عليه وسلم الظهر خمسا فقيل له ازيد في الصلاه", True),
+        ("نعم هو بالاراك بعرفه يرعى ابل القوم فركب عمر", True),
+        ("ابو عيسى هذا حديث حسن صحيح", True),
+        ("نهى رسول الله صلى الله عليه وسلم ان نستقبل القبلتين ببول او غاءط", True),
+        ("كنا مع النبي في سفر فنزلنا منزلا", True),
+        ("قال رسول الله من كذب علي متعمدا فليتبوا مقعده من النار", True),
+        ("قلت يا رسول الله اي الاعمال افضل", True),
+        ("هذا حديث غريب لا نعرفه الا من هذا الوجه", True),
+        ("امر النبي بقتل الاسودين في الصلاه", True),
+        ("رايت النبي يمسح على الخفين", True),
+        ("بينما نحن جلوس عند النبي اذ جاء رجل", True),
+        ("سمعت النبي يقول انما الاعمال بالنيات", True),
+        ("كان اذا دخل العشر شد مءزره", True),
+        ("حديث حسن صحيح لا باس به", True),
+        ("فقال له عمر ما هذا يا رسول الله", True),
+        ("لما نزلت هذه الايه دعا النبي", True),
+        ("قلنا يا رسول الله كيف نصلي عليك", True),
+        ("نعم", True),
+        ("هذا حديث صحيح على شرط الشيخين", True),
+        ("صلى بنا رسول الله الظهر ثم انصرف", True),
+        ("والله لقد رايت رسول الله يفعل ذلك", True),
+        ("بلى قد سمعنا ما قلت يا رسول الله", True),
+        ("قالت عاءشه رضى الله عنها كان النبي", True),
+        ("محمد بن مسلم بن عبيد الله بن عبد الله بن شهاب بن عبد الله بن الحارث بن زهره", False),
+        ("عبد الله بن عبد الرحمن المداءني", False),
+        ("عطاء بن يزيد الليثي ثم الجندعي", False),
+        ("ابو عبد الله الشامي", False),
+        ("ابو بكر بن ابي شيبه", False),
+        ("محمد بن اسماعيل البخاري", False),
+        ("ابو هريره", False),
+        ("عبد الله بن عباس", False),
+        ("سليمان بن مهران الاعمش", False),
+        ("ابو اسحاق السبيعي", False),
+        ("عثمان بن عفان", False),
+        ("عبد الله بن عمر", False),
+        ("يحيى بن معين", False),
+        ("احمد بن حنبل", False),
+        ("مالك بن انس", False),
+        ("سفيان بن عيينه", False),
+        ("ابو الحسن علي بن احمد بن عبد العزيز الجرجاني", False),
+        ("شعبه بن الحجاج", False),
+        ("عبد الرحمن بن مهدي", False),
+        ("وكيع بن الجراح", False),
+        ("حماد بن سلمه", False),
+        ("عبد الله بن المبارك", False),
+        ("ابو داود الطيالسي", False),
+        ("قتيبه بن سعيد", False),
+        ("اسماعيل بن ابراهيم بن مقسم الاسدي", False),
+        ("عبد الرزاق بن همام الصنعاني", False),
+        ("ابو بكر الصديق", False),
+        ("جابر بن عبد الله", False),
+        ("انس بن مالك", False),
+        ("ابو صالح ذكوان السمان", False),
+        ("معمر بن راشد", False),
+        ("عبد الله بن عبد الرحمن الدارمي", False),
+        ("محمد بن يحيى الذهلي", False),
+        ("ابو القاسم عبد الرحمن بن عبد الله بن احمد بن محمد بن عبيد بن عبد الملك", False),
+        # connector-less real names (nasab == 0) — mononyms + nisba/laqab-only
+        ("قتاده", False),
+        ("نافع", False),
+        ("عكرمه", False),
+        ("مجاهد", False),
+        ("طاوس", False),
+        ("الاعمش", False),
+        ("الاوزاعي", False),
+        ("الزهري", False),
+        ("سفيان الثوري", False),
+        ("حماد الكوفي", False),
+        ("سعيد المقبري", False),
+        # real name + truncated-off matn tail carrying ؟ / «» (Nikolaos #310) —
+        # recovered as the real name, must not drop
+        ("عبد الرحمن الاوزاعي قال سمعت النبي يقول كذا؟", False),
+        ("عبد الله الاعمش قال كان النبي يصلي؟", False),
+        ("سليمان الاعمش الكوفي قال كان هو يصلي؟", False),
+        ("عبد الرحمن الاوزاعي الدمشقي؟", False),
+        ("يحيى القطان قال «حدثنا»", False),
+        ("مالك الاشتر قال «الحق»", False),
+    )
+
+    # --- GATING regression (Nikolaos, #310): a real name followed by a truncated-off
+    # matn tail carrying ؟ / «» must NOT be dropped. The da#258 truncation recovers
+    # the leading name; the matn-punctuation signal must be evaluated over the KEPT
+    # span, not the pre-truncation text. Each must survive as its real name. ---
+    @pytest.mark.parametrize(
+        "polluted,expected",
+        [
+            ("عبد الرحمن الاوزاعي قال سمعت النبي يقول كذا؟", "عبد الرحمن الاوزاعي"),
+            ("عبد الله الاعمش قال كان النبي يصلي؟", "عبد الله الاعمش"),
+            ("سليمان الاعمش الكوفي قال كان هو يصلي؟", "سليمان الاعمش الكوفي"),
+            ("عبد الله الاعمش قال هو؟", "عبد الله الاعمش"),
+            # no isnad boundary at all — a stray trailing ؟ on a clean 4-token name
+            ("عبد الرحمن الاوزاعي الدمشقي؟", "عبد الرحمن الاوزاعي الدمشقي"),
+            # quoted-speech matn in the truncated-off tail
+            ("يحيى القطان قال «حدثنا»", "يحيى القطان"),
+            ("مالك الاشتر قال «الحق»", "مالك الاشتر"),
+        ],
+    )
+    def test_truncated_matn_tail_punct_does_not_drop_name(
+        self, polluted: str, expected: str
+    ) -> None:
+        assert clean_narrator_name(normalize_arabic(polluted)) == expected
+
+    # --- PRECISION (Kavitha #2): connector-less real names (nasab == 0) — mononyms
+    # and nisba/laqab-only forms — are NOT spared by the nasab guard, so they must
+    # survive on their own (no weak matn signal fires). ---
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "قتاده",
+            "نافع",
+            "عكرمه",
+            "مجاهد",
+            "طاوس",
+            "الاعمش",
+            "الاوزاعي",
+            "الزهري",
+            "سفيان الثوري",
+            "حماد الكوفي",
+            "سعيد المقبري",
+        ],
+    )
+    def test_connectorless_real_name_kept(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) == normalize_arabic(name)
+
+    # --- PRECISION (Kavitha #4): grading formulae are token-anchored, so "حسن صحيح"
+    # inside a real name token ("الحسن" + "صحيح") does NOT fire the grading signal. ---
+    def test_grading_formula_token_anchored(self) -> None:
+        # "الحسن صحيح النسب" — الحسن (al-Ḥasan) is a real name token, not the grading
+        # word حسن; the substring حسن صحيح must not drop it.
+        assert clean_narrator_name(normalize_arabic("علي بن الحسن الهمداني")) == normalize_arabic(
+            "علي بن الحسن الهمداني"
+        )
+
+    def test_precision_recall_over_labelled_sample(self) -> None:
+        tp = fp = fn = 0
+        for span, is_matn in self._PR_SAMPLE:
+            dropped = clean_narrator_name(normalize_arabic(span)) is None
+            if is_matn and dropped:
+                tp += 1
+            elif is_matn and not dropped:
+                fn += 1
+            elif not is_matn and dropped:
+                fp += 1
+        precision = tp / (tp + fp) if (tp + fp) else 1.0
+        recall = tp / (tp + fn) if (tp + fn) else 1.0
+        # PRECISION is the hard bar: a real name must never be dropped.
+        assert fp == 0, f"dropped {fp} real name(s) — precision {precision:.3f}"
+        assert recall >= 0.9, f"recall too low: {recall:.3f} ({fn} matn kept)"
+
+
 class TestSplitCompoundNarrators:
     """da#258 class 6 — compound co-narrator join detection + split primitive."""
 
