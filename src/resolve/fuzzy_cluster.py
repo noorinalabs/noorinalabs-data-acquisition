@@ -174,6 +174,17 @@ _CLUSTER_INFLIGHT_FACTOR = 4
 # :func:`cluster_records`).
 _CLUSTER_PROGRESS_INTERVAL = 500_000
 
+# Safe-partition progress telemetry (da#306). A union-find group larger than this
+# threshold gets a periodic progress line from :func:`_safe_partition` — run 4's
+# union-find produced a single 168,773-member mega-group whose partition phase ran
+# SILENTLY for 17h+ (the phase had no logging at all). Sized so only genuinely
+# large groups emit; a normal cluster (≤ tens of members) never logs.
+_SAFE_PARTITION_PROGRESS_THRESHOLD = 5_000
+_SAFE_PARTITION_PROGRESS_INTERVAL = 10_000
+
+# Top-k group sizes logged in the post-union `cluster_group_sizes` line (da#306).
+_GROUP_SIZE_TOP_K = 10
+
 # Per-record match-key cap (da#270). Block scoring is a ``process.cdist`` over the
 # block's flattened match keys (name + aliases of every member); its cost is
 # O(K²) in that flattened key count, and profiling the real ~210k-canonical set
@@ -389,6 +400,41 @@ def _can_merge(a: dict[str, Any], b: dict[str, Any], *, threshold: float) -> boo
     return _name_match(_match_keys(a), _match_keys(b), threshold=threshold)
 
 
+def _can_merge_cached(
+    i: int,
+    j: int,
+    records: list[dict[str, Any]],
+    keys_cache: dict[int, list[str]],
+    tok_cache: dict[int, set[str]],
+    *,
+    threshold: float,
+) -> bool:
+    """Cached-key equivalent of :func:`_can_merge` for two record indices (da#306).
+
+    Returns the **byte-identical** decision to
+    ``_can_merge(records[i], records[j], threshold=threshold)``. The ONLY
+    difference is that the two per-record derived values — the match-key list
+    (:func:`_match_keys`) and the significant-token set (:func:`_significant_tokens`)
+    — are read from ``keys_cache``/``tok_cache`` instead of being recomputed on
+    every call. It reuses the exact same guard predicates (:func:`_death_years_conflict`,
+    :func:`_genders_conflict`, :func:`_name_match`) so the merge *rule* has a single
+    source of truth; only the key/token derivation is memoized. The equivalence is:
+
+    * ``_shared_significant_token_count(a, b)`` is
+      ``len(_significant_tokens(_match_keys(a)) & _significant_tokens(_match_keys(b)))``,
+      and ``tok_cache[k] == _significant_tokens(_match_keys(records[k]))`` — so
+      ``len(tok_cache[i] & tok_cache[j])`` is the same integer.
+    * ``keys_cache[k] == _match_keys(records[k])`` — so the ``_name_match`` call
+      sees the identical key lists.
+    """
+    a, b = records[i], records[j]
+    if _death_years_conflict(a, b) or _genders_conflict(a, b):
+        return False
+    if len(tok_cache[i] & tok_cache[j]) < _MIN_SHARED_TOKENS:
+        return False
+    return _name_match(keys_cache[i], keys_cache[j], threshold=threshold)
+
+
 # ---------------------------------------------------------------------------
 # Union-find clustering
 # ---------------------------------------------------------------------------
@@ -434,20 +480,109 @@ def _safe_partition(
     with *every* member of, opening a new sub-cluster otherwise. By induction
     each sub-cluster is a clique under ``_can_merge``, so no conflicting pair can
     co-occur. Deterministic: members are processed in ``canonical_id`` order.
+
+    Token-indexed candidate lookup (da#306) — output-identical, not just faster
+    -----------------------------------------------------------------------------
+    The naive version scans **every** existing sub-cluster for each member, so
+    run 4's single 168,773-member mega-group (a transitive chain, not a clique)
+    was worst-case ~n²/2 ≈ 14.2B :func:`_can_merge` calls and ran the phase
+    silently for 17h+. The optimization rests on one exact fact about the merge
+    rule: :func:`_can_merge` requires ``≥ _MIN_SHARED_TOKENS`` (≥1) shared
+    significant tokens with **every** member of a sub-cluster, so a sub-cluster in
+    which *no* member shares even a single significant token with the incoming
+    member can NEVER accept it — the naive scan tests it and rejects on its first
+    member anyway. We therefore maintain a ``token -> sub-cluster indices`` index
+    and, for each member, consider only the sub-clusters that share ≥1 token with
+    it (a **superset** of the true acceptors, so nothing is dropped), tested in
+    **ascending sub-cluster index = original creation order**, first-accepting
+    wins. Each considered sub-cluster is still verified with the full
+    ``all(_can_merge(...))`` predicate. Formally: the first accepting sub-cluster
+    in the naive full scan is necessarily a candidate here (it accepted, so the
+    member shares ≥1 token with each of its members), every sub-cluster before it
+    that the naive scan rejected is either also tested-and-rejected here or a
+    non-candidate the naive scan would reject on its first member — so the chosen
+    sub-cluster (or the decision to open a new one) is identical, and the emitted
+    partition is byte-identical.
+
+    Per-record caching (da#306): each member's match keys (:func:`_match_keys`)
+    and significant-token set (:func:`_significant_tokens`) are computed once up
+    front and read from the caches by :func:`_can_merge_cached` — the naive path
+    re-derived both inside every ``_can_merge`` call, which at billions of calls
+    dominated. The decision is unchanged (see :func:`_can_merge_cached`).
     """
     if len(group) <= 1:
         return [list(group)]
 
     ordered = sorted(group, key=lambda i: safe_str(records[i].get("canonical_id")) or "")
+
+    # Per-record derived values, computed ONCE per member (da#306). Keyed by record
+    # index; every index tested below (both the incoming member and every existing
+    # sub-cluster member) is in ``ordered``, so both operands of every
+    # ``_can_merge_cached`` call are present.
+    keys_cache: dict[int, list[str]] = {i: _match_keys(records[i]) for i in ordered}
+    tok_cache: dict[int, set[str]] = {i: _significant_tokens(keys_cache[i]) for i in ordered}
+
     subclusters: list[list[int]] = []
-    for i in ordered:
-        for sub in subclusters:
-            if all(_can_merge(records[i], records[j], threshold=threshold) for j in sub):
+    # significant token -> indices of sub-clusters containing ≥1 member with it.
+    token_index: dict[str, set[int]] = defaultdict(set)
+
+    log_progress = len(group) > _SAFE_PARTITION_PROGRESS_THRESHOLD
+    t0 = time.monotonic()
+
+    for placed, i in enumerate(ordered):
+        # Candidate sub-clusters: those sharing ≥1 significant token with i. A
+        # sub-cluster sharing zero tokens can never accept i (a zero-overlap pair
+        # fails _can_merge's ≥_MIN_SHARED_TOKENS guard), so the naive scan would
+        # reject it on its first member — skipping it is free of output effect.
+        candidates: set[int] = set()
+        for tok in tok_cache[i]:
+            candidates.update(token_index[tok])
+
+        for s in sorted(candidates):  # ascending index == original creation order
+            sub = subclusters[s]
+            if all(
+                _can_merge_cached(i, j, records, keys_cache, tok_cache, threshold=threshold)
+                for j in sub
+            ):
                 sub.append(i)
+                for tok in tok_cache[i]:
+                    token_index[tok].add(s)
                 break
         else:
+            s = len(subclusters)
             subclusters.append([i])
+            for tok in tok_cache[i]:
+                token_index[tok].add(s)
+
+        if log_progress and (placed + 1) % _SAFE_PARTITION_PROGRESS_INTERVAL == 0:
+            logger.info(
+                "safe_partition_progress",
+                members_placed=placed + 1,
+                group_size=len(group),
+                subclusters=len(subclusters),
+                elapsed_seconds=round(time.monotonic() - t0, 1),
+            )
+
     return subclusters
+
+
+def _log_group_size_distribution(groups: list[list[int]]) -> None:
+    """Log the union-find group-size distribution before partitioning (da#306).
+
+    Surfaces the mega-group pathology that made the safe-partition phase silent:
+    group count, how many are multi-member, the largest, the top-k sizes, and how
+    many records sit inside multi-member groups (the partition workload).
+    """
+    sizes = sorted((len(g) for g in groups), reverse=True)
+    multi = sum(1 for s in sizes if s > 1)
+    logger.info(
+        "cluster_group_sizes",
+        groups=len(groups),
+        multi_member_groups=multi,
+        largest=sizes[0] if sizes else 0,
+        top_k_sizes=sizes[:_GROUP_SIZE_TOP_K],
+        members_in_multi_member_groups=sum(s for s in sizes if s > 1),
+    )
 
 
 def _stateless_merge_ok(
@@ -830,8 +965,10 @@ def cluster_records(
 
     # Re-partition each transitive group into guard-safe cliques (closes the
     # bridge-bypass: A–B ✓, B–C ✓, A–C conflict must NOT yield one {A,B,C}).
+    groups = uf.groups()
+    _log_group_size_distribution(groups)
     clusters: list[list[int]] = []
-    for group in uf.groups():
+    for group in groups:
         clusters.extend(_safe_partition(group, records, threshold=threshold))
     return clusters
 
