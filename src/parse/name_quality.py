@@ -416,7 +416,10 @@ _MATN_DENSITY = frozenset(
 _COMPOUND_TRAILING_MARKERS = frozenset({"جميعا", "قالوا"})
 
 # Trailing / edge punctuation seen on extracted spans ("شيخ من اهل المدينه ,").
-_EDGE_PUNCT = " \t\r\n,،.;؛:-_\"'«»()[]"
+# ؟ is included (da#308) so a stray trailing question mark ("الاوزاعي الدمشقي؟")
+# is stripped off the token like any other edge mark and does not ride into the
+# clustering key; matn ؟ mid-span is still detected via the raw kept-text scan.
+_EDGE_PUNCT = " \t\r\n,،.;؛:؟-_\"'«»()[]"
 
 # --- Sentence / matn-body drop-gate (da#308) -----------------------------------
 # Nasab (lineage) connectors — the PRECISION GUARD. A string dense in these is a
@@ -459,20 +462,31 @@ _MATN_OPENERS = frozenset(
     }
 )
 
-# Grading / commentary formulae (substring match on the joined normalized span).
+# Grading / commentary formulae as TOKEN sequences (da#308). Matched as a
+# contiguous token subsequence, not a raw substring, so "حسن صحيح" does not fire
+# inside the single token "الحسن" + "صحيح" of a real name (Kavitha #4).
 # al-Tirmidhī-style verdicts ("this is a ḥasan-ṣaḥīḥ ḥadith") dumped into the name
 # field — never any part of a person's name.
-_GRADING_FORMULAE: tuple[str, ...] = (
-    "هذا حديث",
-    "حديث حسن",
-    "حديث صحيح",
-    "حديث غريب",
-    "حديث ضعيف",
-    "حسن صحيح",
-    "حسن غريب",
-    "صحيح غريب",
-    "متفق عليه",
+_GRADING_FORMULAE: tuple[tuple[str, ...], ...] = (
+    ("هذا", "حديث"),
+    ("حديث", "حسن"),
+    ("حديث", "صحيح"),
+    ("حديث", "غريب"),
+    ("حديث", "ضعيف"),
+    ("حسن", "صحيح"),
+    ("حسن", "غريب"),
+    ("صحيح", "غريب"),
+    ("متفق", "عليه"),
 )
+
+
+def _contains_token_sequence(tokens: list[str], sequence: tuple[str, ...]) -> bool:
+    """True when *sequence* appears as a contiguous run of whole tokens in *tokens*."""
+    span = len(sequence)
+    if span == 0 or span > len(tokens):
+        return False
+    return any(tuple(tokens[i : i + span]) == sequence for i in range(len(tokens) - span + 1))
+
 
 # Matn punctuation — quoted speech guillemets and the question mark signal a hadith
 # body / dialogue, not a name. (« » are stripped from token EDGES by _EDGE_PUNCT,
@@ -580,7 +594,7 @@ def _is_prophet_reference(tokens: list[str]) -> bool:
     return tokens[0] in _PROPHET_TITLE_LEADERS and len(tokens) >= 2 and tokens[1] == "الله"
 
 
-def _is_matn_sentence(tokens: list[str], text: str) -> bool:
+def _is_matn_sentence(tokens: list[str], kept_text: str) -> bool:
     """True when the span is a hadith-matn body / grading commentary, not a name (da#308).
 
     Precision-first drop-gate for the residual matn that survives the da#258
@@ -589,9 +603,15 @@ def _is_matn_sentence(tokens: list[str], text: str) -> bool:
     (``"نعم"``), or a grading verdict (``"ابو عيسى هذا حديث حسن صحيح"``).
 
     Signals are combined precision-first; a bare token count is never a signal on
-    its own (issue #308). *tokens* are the post-truncation name tokens; *text* is
-    the pre-tokenization span (carries ``«…»`` guillemets that _EDGE_PUNCT strips
-    off the tokens). The **precision guard** measures nasab-connector density
+    its own (issue #308). *tokens* are the RETAINED (post-truncation) name tokens;
+    *kept_text* is the raw text of that retained span ONLY (the truncated-off isnad
+    / matn tail is excluded) so ``«…»`` / ``؟`` in a tail the da#258 truncation
+    already removed do NOT count — a real name recovered from ``<name> قال …؟`` is
+    not dropped for punctuation that was never part of the name (Nikolaos, #310).
+
+    Matn punctuation is a **co-factor**, not a standalone drop reason: a lone ``؟``
+    on an otherwise clean name never drops it; it drops only alongside a matn /
+    particle word. The **precision guard** measures nasab-connector density
     diacritics-insensitively and spares a genuine lineage / kunya-nasab regardless
     of length, so real nasab chains, nisba tails, and kunya compounds pass through.
     """
@@ -602,10 +622,9 @@ def _is_matn_sentence(tokens: list[str], text: str) -> bool:
     # Diacritics-insensitive, hamza/alif-normalized token forms (so a vocalized
     # ``بْنُ`` counts toward nasab density, and the matn sets match reliably).
     bare = [normalize_arabic(t) for t in tokens]
-    joined = " ".join(bare)
 
-    # (1) Grading / commentary formula — never a name component, nasab-independent.
-    if any(formula in joined for formula in _GRADING_FORMULAE):
+    # (1) Grading / commentary formula (token-anchored) — never a name component.
+    if any(_contains_token_sequence(bare, formula) for formula in _GRADING_FORMULAE):
         return True
 
     # (2) Matn / discourse verb leading the span: a bare opener ("نعم") or a
@@ -614,22 +633,23 @@ def _is_matn_sentence(tokens: list[str], text: str) -> bool:
         return True
 
     # PRECISION GUARD — spare a genuine lineage from the remaining (weaker)
-    # length / punctuation / density signals, regardless of how long it is.
+    # punctuation / density signals, regardless of how long it is.
     nasab = sum(1 for t in bare if t in _NASAB_CONNECTORS)
     if nasab >= 2 or nasab / n >= _NASAB_SPARE_DENSITY:
         return False
 
-    # (3) Matn punctuation (quoted speech « », question ؟) in a multi-token span.
-    if n >= _MATN_SENTENCE_MIN_TOKENS and any(p in text for p in _MATN_PUNCT):
-        return True
+    if n < _MATN_SENTENCE_MIN_TOKENS:
+        return False
 
-    # (4) Verb / particle density backstop: a comma-run sentence whose opener is a
-    #     real-looking token but whose body carries >= 2 matn/particle words
-    #     (_MATN_DENSITY: كان/قال/اذ/لما/ثم/هو/…). A real name carries zero.
-    if n >= _MATN_SENTENCE_MIN_TOKENS and sum(1 for t in bare if t in _MATN_DENSITY) >= 2:
-        return True
-
-    return False
+    # (3) Verb / particle density in the RETAINED span (comma-run sentence whose
+    #     opener is a real-looking token but whose body carries matn/particle words
+    #     — _MATN_DENSITY: كان/قال/اذ/لما/ثم/هو/…). A real name carries zero. A
+    #     matn ``«…»`` / ``؟`` within the kept span (NOT a truncated-off tail) is a
+    #     co-factor: it lowers the density needed from 2 to 1, but never drops on
+    #     its own.
+    density = sum(1 for t in bare if t in _MATN_DENSITY)
+    has_matn_punct = any(p in kept_text for p in _MATN_PUNCT)
+    return density >= 2 or (has_matn_punct and density >= 1)
 
 
 def split_compound_narrators(name_normalized: str | None) -> list[str]:
@@ -722,11 +742,17 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
     #    stray trailing mark ("ابيه،", "ابي ،", "ابيه :") shields a mubham token
     #    from the relational / collective guards below (da#247 residual: 7 such
     #    refs survived the first scrub purely on a trailing Arabic comma).
-    tokens = [
-        stripped
-        for t in text.split()
-        if (stripped := t.strip(_EDGE_PUNCT)) and stripped not in _CONNECTIVE_TOKENS
-    ]
+    #    `raw_tokens` keeps each surviving token in its ORIGINAL form (with any
+    #    «…» / ؟ that _EDGE_PUNCT strips off `tokens`), index-aligned to `tokens`,
+    #    so the da#308 gate can scan matn punctuation over the RETAINED span only.
+    raw_tokens: list[str] = []
+    tokens: list[str] = []
+    for t in text.split():
+        stripped = t.strip(_EDGE_PUNCT)
+        if not stripped or stripped in _CONNECTIVE_TOKENS:
+            continue
+        raw_tokens.append(t)
+        tokens.append(stripped)
     if not tokens:
         return None
 
@@ -797,9 +823,11 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
     #     hadith body ("قلت …"/"نهى رسول الله …"), an answer particle ("نعم"), a
     #     grading verdict ("… هذا حديث حسن صحيح"), or a quoted-speech / question span.
     #     Precision-guarded by nasab-connector density so genuine lineages, nisba
-    #     tails, and kunya compounds are never dropped. Passed `text` (pre-tokenize)
-    #     so «…» guillemets stripped from the token edges are still seen.
-    if _is_matn_sentence(tokens, text):
+    #     tails, and kunya compounds are never dropped. `kept_text` is the raw text
+    #     of the RETAINED tokens only, so «…» / ؟ in an isnad/matn tail that step 3c
+    #     already truncated off does NOT drop the recovered leading name (#310).
+    kept_text = " ".join(raw_tokens[: len(tokens)])
+    if _is_matn_sentence(tokens, kept_text):
         return None
 
     return " ".join(tokens)

@@ -494,7 +494,81 @@ class TestMatnSentenceGate:
         ("عبد الله بن عبد الرحمن الدارمي", False),
         ("محمد بن يحيى الذهلي", False),
         ("ابو القاسم عبد الرحمن بن عبد الله بن احمد بن محمد بن عبيد بن عبد الملك", False),
+        # connector-less real names (nasab == 0) — mononyms + nisba/laqab-only
+        ("قتاده", False),
+        ("نافع", False),
+        ("عكرمه", False),
+        ("مجاهد", False),
+        ("طاوس", False),
+        ("الاعمش", False),
+        ("الاوزاعي", False),
+        ("الزهري", False),
+        ("سفيان الثوري", False),
+        ("حماد الكوفي", False),
+        ("سعيد المقبري", False),
+        # real name + truncated-off matn tail carrying ؟ / «» (Nikolaos #310) —
+        # recovered as the real name, must not drop
+        ("عبد الرحمن الاوزاعي قال سمعت النبي يقول كذا؟", False),
+        ("عبد الله الاعمش قال كان النبي يصلي؟", False),
+        ("سليمان الاعمش الكوفي قال كان هو يصلي؟", False),
+        ("عبد الرحمن الاوزاعي الدمشقي؟", False),
+        ("يحيى القطان قال «حدثنا»", False),
+        ("مالك الاشتر قال «الحق»", False),
     )
+
+    # --- GATING regression (Nikolaos, #310): a real name followed by a truncated-off
+    # matn tail carrying ؟ / «» must NOT be dropped. The da#258 truncation recovers
+    # the leading name; the matn-punctuation signal must be evaluated over the KEPT
+    # span, not the pre-truncation text. Each must survive as its real name. ---
+    @pytest.mark.parametrize(
+        "polluted,expected",
+        [
+            ("عبد الرحمن الاوزاعي قال سمعت النبي يقول كذا؟", "عبد الرحمن الاوزاعي"),
+            ("عبد الله الاعمش قال كان النبي يصلي؟", "عبد الله الاعمش"),
+            ("سليمان الاعمش الكوفي قال كان هو يصلي؟", "سليمان الاعمش الكوفي"),
+            ("عبد الله الاعمش قال هو؟", "عبد الله الاعمش"),
+            # no isnad boundary at all — a stray trailing ؟ on a clean 4-token name
+            ("عبد الرحمن الاوزاعي الدمشقي؟", "عبد الرحمن الاوزاعي الدمشقي"),
+            # quoted-speech matn in the truncated-off tail
+            ("يحيى القطان قال «حدثنا»", "يحيى القطان"),
+            ("مالك الاشتر قال «الحق»", "مالك الاشتر"),
+        ],
+    )
+    def test_truncated_matn_tail_punct_does_not_drop_name(
+        self, polluted: str, expected: str
+    ) -> None:
+        assert clean_narrator_name(normalize_arabic(polluted)) == expected
+
+    # --- PRECISION (Kavitha #2): connector-less real names (nasab == 0) — mononyms
+    # and nisba/laqab-only forms — are NOT spared by the nasab guard, so they must
+    # survive on their own (no weak matn signal fires). ---
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "قتاده",
+            "نافع",
+            "عكرمه",
+            "مجاهد",
+            "طاوس",
+            "الاعمش",
+            "الاوزاعي",
+            "الزهري",
+            "سفيان الثوري",
+            "حماد الكوفي",
+            "سعيد المقبري",
+        ],
+    )
+    def test_connectorless_real_name_kept(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) == normalize_arabic(name)
+
+    # --- PRECISION (Kavitha #4): grading formulae are token-anchored, so "حسن صحيح"
+    # inside a real name token ("الحسن" + "صحيح") does NOT fire the grading signal. ---
+    def test_grading_formula_token_anchored(self) -> None:
+        # "الحسن صحيح النسب" — الحسن (al-Ḥasan) is a real name token, not the grading
+        # word حسن; the substring حسن صحيح must not drop it.
+        assert clean_narrator_name(normalize_arabic("علي بن الحسن الهمداني")) == normalize_arabic(
+            "علي بن الحسن الهمداني"
+        )
 
     def test_precision_recall_over_labelled_sample(self) -> None:
         tp = fp = fn = 0
