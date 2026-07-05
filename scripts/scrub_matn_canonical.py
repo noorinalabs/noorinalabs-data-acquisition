@@ -32,14 +32,18 @@ never having survived NER, not a merge that could ever affect a surviving
 narrator's own identity. Mentions are DROPPED, never reassigned to a
 different canonical id (the source text was never a real name to begin with).
 
-Beyond dropping, the scrub also **rewrites** a surviving row's
-``name_ar_normalized`` to ``clean_narrator_name``'s recovered value when the gate
-recovered a real leading narrator from a polluted span (``"عاءشه زوج النبي"`` →
-``"عاءشه"``) — the "prefer clean over drop" half, so a recoverable real narrator
-(and its mention edges) is kept, not lost.
+Beyond dropping, the scrub also **rewrites** a surviving row's **``name_ar``** (the
+load-bearing display field the graph loader keys the node name on) to the gate's
+recovered value when a real leading narrator is recovered from a polluted span
+(``"عاءشه، زوج النبي … قالت"`` → ``"عاءشه"``), and re-derives ``name_ar_normalized``
+= ``normalize_arabic(cleaned)`` so the two stay in sync — the "prefer clean over
+drop" half, so a recoverable real narrator (and its mention edges) is kept, not
+lost. (A first pass cleaned only ``name_ar_normalized`` and left the matn in
+``name_ar``, which the loader reads first — this pass fixes the field that
+matters.)
 
-Idempotent: ``clean_narrator_name`` is a pure, idempotent function of
-``name_ar_normalized`` (``clean(clean(x)) == clean(x)``), so re-running against an
+Idempotent: :func:`clean_narrator_name_display` is a pure, idempotent function of
+``name_ar`` (its output re-cleans to itself), so re-running against an
 already-scrubbed output drops nothing further and rewrites nothing further.
 Read-only over the input directories — never mutates ``data/curated`` /
 ``data/staging`` in place; always writes to a separate ``--output-dir``.
@@ -53,7 +57,8 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from src.parse.name_quality import clean_narrator_name
+from src.parse.name_quality import clean_narrator_name_display
+from src.utils.arabic import normalize_arabic
 
 NARRATORS = "narrators_canonical.parquet"
 MENTIONS = "narrator_mentions_resolved.parquet"
@@ -78,39 +83,62 @@ _CANONICAL_REF_COLUMNS = ("canonical_narrator_id", "canonical_id")
 def _prune_canonical(curated_dir: Path, output_dir: Path) -> tuple[int, int, int, set[str]]:
     """Prune AND clean narrators_canonical.parquet through the corrected gate.
 
-    Two operations, mirroring ``clean_narrator_name``'s own return contract:
+    Cleans the **load-bearing ``name_ar`` field** (:func:`clean_narrator_name_display`)
+    — the graph loader keys the Narrator node name on ``name_ar`` first, falling
+    back to ``name_ar_normalized`` only when ``name_ar`` is empty, and ``name_ar``
+    frequently carries the FULL matn body while ``name_ar_normalized`` was already
+    truncated at NER time. A first version that cleaned only ``name_ar_normalized``
+    therefore left the matn in the field the graph actually reads.
 
-    * **DROP** a row whose ``clean_narrator_name`` returns ``None`` (unrecoverable
-      matn — the "name" is a whole hadith body / bare Prophet action).
-    * **CLEAN (rewrite)** a surviving row's ``name_ar_normalized`` to the cleaned
-      value when the gate recovered a real leading narrator from a polluted span
-      (``"عاءشه زوج النبي"`` → ``"عاءشه"``, ``"ابو تمي حدث"`` → ``"ابو تمي"``).
-      Rewriting the display/clustering key is safe: ``canonical_id`` is unchanged,
-      so no mention / merge_log / parallel_links reference is orphaned. This is the
-      "prefer clean over drop" half — dropping a recoverable real narrator (and its
-      mention edges) would be a regression. Re-clustering the rewritten names is a
-      full-resolve concern, deliberately out of scope for a post-hoc scrub.
+    Two operations, mirroring the gate's own return contract:
+
+    * **DROP** a row whose cleaner returns ``None`` (unrecoverable matn — a whole
+      hadith body, a bare Prophet action, an "asked" dialogue opener, or a
+      degenerate one-letter residue).
+    * **CLEAN (rewrite)** a surviving row's ``name_ar`` to the recovered value
+      (``"عاءشه، زوج النبي … قالت"`` → ``"عاءشه"``, diacritics preserved where the
+      recovery is a voweled sub-span), and re-derive ``name_ar_normalized`` =
+      ``normalize_arabic(cleaned)`` so the two stay in sync. ``canonical_id`` is
+      unchanged, so no mention / merge_log / parallel_links reference is orphaned.
+      This is the "prefer clean over drop" half — dropping a recoverable real
+      narrator (and its mention edges) would be a regression. Re-clustering the
+      rewritten names is a full-resolve concern, out of scope for a post-hoc scrub.
+
+    ``name_en`` is left as stored (sourced-or-empty provenance): the loader
+    re-derives the display English from the cleaned ``name_ar`` via
+    ``transliterate`` at load time whenever the sourced value is empty, so cleaning
+    ``name_ar`` is sufficient for the derived-English case.
 
     Returns ``(rows_before, rows_after, rows_cleaned, dropped_canonical_ids)`` where
-    ``rows_cleaned`` counts surviving rows whose stored name was rewritten.
+    ``rows_cleaned`` counts surviving rows whose stored ``name_ar`` was rewritten.
     """
     table = pq.read_table(curated_dir / NARRATORS)
-    names = table.column("name_ar_normalized").to_pylist()
+    name_ar = table.column("name_ar").to_pylist()
+    name_ar_norm = table.column("name_ar_normalized").to_pylist()
     canonical_ids = table.column("canonical_id").to_pylist()
-    cleaned = [clean_narrator_name(n) for n in names]
 
-    keep_mask = [c is not None for c in cleaned]
+    # Effective display source = name_ar (load-bearing); fall back to the
+    # normalized field only when name_ar is empty (mirrors the loader).
+    cleaned_display: list[str | None] = []
+    for ar, norm in zip(name_ar, name_ar_norm, strict=True):
+        source = ar if (ar and ar.strip()) else norm
+        cleaned_display.append(clean_narrator_name_display(source))
+
+    keep_mask = [c is not None for c in cleaned_display]
     dropped_ids = {cid for cid, keep in zip(canonical_ids, keep_mask, strict=True) if not keep}
     rows_cleaned = sum(
-        1 for original, c in zip(names, cleaned, strict=True) if c is not None and c != original
+        1
+        for ar, c in zip(name_ar, cleaned_display, strict=True)
+        if c is not None and c != (ar or "")
     )
 
     kept = table.filter(pa.array(keep_mask))
-    # Rewrite name_ar_normalized on the surviving rows to the cleaned value.
-    kept_cleaned_names = [c for c in cleaned if c is not None]
-    col_idx = kept.schema.get_field_index("name_ar_normalized")
+    survivors = [c for c in cleaned_display if c is not None]
+    new_ar = pa.array(survivors, type=pa.string())
+    new_norm = pa.array([normalize_arabic(c) for c in survivors], type=pa.string())
+    kept = kept.set_column(kept.schema.get_field_index("name_ar"), "name_ar", new_ar)
     kept = kept.set_column(
-        col_idx, "name_ar_normalized", pa.array(kept_cleaned_names, type=pa.string())
+        kept.schema.get_field_index("name_ar_normalized"), "name_ar_normalized", new_norm
     )
     pq.write_table(kept, output_dir / NARRATORS)
     return table.num_rows, kept.num_rows, rows_cleaned, dropped_ids

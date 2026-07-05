@@ -151,7 +151,12 @@ import re
 
 from src.utils.arabic import normalize_arabic
 
-__all__ = ["clean_narrator_name", "split_compound_narrators", "strip_markup"]
+__all__ = [
+    "clean_narrator_name",
+    "clean_narrator_name_display",
+    "split_compound_narrators",
+    "strip_markup",
+]
 
 # Angle-bracket markup that leaks from source isnad fields (sanadset <NAR>/<IDF>
 # tags, frequently unclosed or nested). Stripped, not rejected — the tag usually
@@ -188,6 +193,15 @@ _HONORIFIC_PHRASES: tuple[str, ...] = (
     "رضى الله عنه",
     "رضى الله عنها",
     "رضى الله عنهم",
+    # bare / truncated benediction fragments (da#311) — the source often stores a
+    # benediction cut off before its pronoun tail ("… رضي الله", "… صلى الله عليه"
+    # with no عنه/وسلم). Stripped LONGEST-FIRST (see the strip loop) so the full
+    # "رضي الله عنه" / "صلى الله عليه وسلم" forms above are removed first where
+    # present; the bare forms then catch the truncated residue. Neither "رضي الله"
+    # ("God is pleased") nor "صلى الله عليه" is ever part of a real narrator name.
+    "صلى الله عليه",
+    "رضي الله",
+    "رضى الله",
     "رحمه الله",
     "عز وجل",
     "تبارك وتعالى",
@@ -283,8 +297,12 @@ _MUBHAM_RELATIONAL = frozenset(
 # Keyed on the leader (definite-article "the Prophet/Messenger", or رسول/نبي only
 # when immediately followed by الله) so a real name is never touched by mere
 # coincidence of its first token. See :func:`_is_prophet_reference`.
-_PROPHET_TITLE_SOLE = frozenset({"النبي", "الرسول"})
-_PROPHET_TITLE_LEADERS = frozenset({"رسول", "نبي"})
+_PROPHET_TITLE_SOLE = frozenset({"النبي", "الرسول", "للنبي", "للرسول"})
+# رسول/نبي (and the proclitic-lam "لرسول"/"لنبي" = "to the Messenger/Prophet")
+# count only when immediately followed by الله. The ل-forms are unambiguous — no
+# real name is "لرسول"/"لنبي" — so "لرسول الله" ("to the Messenger of Allah", a
+# matn residue) is caught while لبيد / لطيف and other ل-initial names are not.
+_PROPHET_TITLE_LEADERS = frozenset({"رسول", "نبي", "لرسول", "لنبي"})
 
 # Prophet-APPOSITION connectors (da#311). A real narrator described BY her
 # relation to the Prophet — "<name> زوج النبي" ("… wife of the Prophet"), "<name>
@@ -495,6 +513,7 @@ _ISNAD_BOUNDARY = frozenset(
         "التي",
         "الذين",
         "اذ",
+        "اذا",  # da#311: "when / if" conditional matn opener ("اذا كان الماء …")
         "حين",
         "حينما",
         "لما",
@@ -674,6 +693,75 @@ def _is_number_token(token: str) -> bool:
     return all(c.isdigit() or c in _ARABIC_INDIC_DIGITS for c in stripped)
 
 
+# "Asked" verb conjugations (da#311) — the classic Shia dialogue-hadith opener
+# "سألته / سألتها / وسألته / سُئلت …" ("I asked him / her", "was asked"), by far the
+# single highest-mc matn opener (سالته mc-1035). PRECISION: the stem سال collides
+# with the extremely common name سالم (Salim, mc-4072) — so we match the stem ONLY
+# when the remainder is a pronoun/tense SUFFIX from a closed set (never "م" →
+# Salim, "مه", "ار", …). A leading proclitic و ("and he asked") is stripped first.
+_ASK_STEMS = ("سال", "سءل")
+_ASK_SUFFIXES = frozenset(
+    {
+        "",  # bare "he asked" (سال / سءل)
+        "ت",  # I / she asked
+        "ته",
+        "تها",
+        "تهم",
+        "تهما",
+        "تك",
+        "تكم",
+        "تموه",
+        "تموها",
+        "ه",  # he asked him
+        "ها",
+        "هم",
+        "هما",
+        "ني",  # he asked me
+        "نا",
+        "تني",
+        "تنا",
+        "وا",  # they asked
+        "وه",  # they asked him
+        "وها",
+        "ونه",
+        "وني",
+    }
+)
+
+
+def _is_ask_verb(token: str) -> bool:
+    """True when *token* is an "asked" verb conjugation (da#311), NOT the name سالم.
+
+    Matched diacritics-insensitively (the token is normalized first). The stem
+    ``سال``/``سءل`` counts only when what follows is a closed pronoun/tense suffix,
+    so ``سالم`` (Salim, remainder ``م``), ``سالمه``, ``سالار`` are never matched.
+    """
+    t = normalize_arabic(token).strip(_EDGE_PUNCT)
+    for candidate in (t, t[1:] if t.startswith("و") and len(t) > 1 else t):
+        for stem in _ASK_STEMS:
+            if candidate.startswith(stem) and candidate[len(stem) :] in _ASK_SUFFIXES:
+                return True
+    return False
+
+
+def _is_degenerate_name(name: str) -> bool:
+    """True when *name* is too short / empty / punctuation / latin-noise (da#311).
+
+    A recovered value with fewer than 2 significant Arabic letters AND fewer than 2
+    Latin letters is garbage (``"ه"``, ``"ف"``, a stray ``"p"``, a zero-width mark,
+    pure punctuation) — drop the row rather than write it. Real romanized names
+    (``"Malik"``, ``"Abu"``) clear the Latin-letter floor and are kept; a genuine
+    2+-letter Arabic name (``"من"`` notwithstanding — 2 letters) clears the Arabic
+    floor.
+    """
+    stripped = name.strip().strip(_EDGE_PUNCT).strip()
+    if not stripped:
+        return True
+    arabic = sum(1 for c in stripped if "ء" <= c <= "ي")
+    latin = sum(1 for c in stripped if c.isascii() and c.isalpha())
+    return arabic < 2 and latin < 2
+
+
 def strip_markup(name: str | None) -> str:
     """Clean the voweled DISPLAY name: markup + colon-joined prose + edge punct.
 
@@ -727,7 +815,7 @@ def _truncate_at_isnad_boundary(tokens: list[str]) -> list[str] | None:
     here. When no boundary token is present the tokens are returned unchanged.
     """
     for i, tok in enumerate(tokens):
-        if tok in _ISNAD_BOUNDARY:
+        if tok in _ISNAD_BOUNDARY or _is_ask_verb(tok):
             # Nisba-transition ثم (da#308): "…الليثي ثم الجندعي" ("al-Laythī then
             # al-Jundaʿī") is a real tribal-affiliation nisba tail, not a temporal
             # matn connective. Recognise it by ثم flanked on BOTH sides by an
@@ -993,8 +1081,13 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
     # 1. Strip markup tags + any stray angle brackets (no markup char survives).
     text = _MARKUP_RE.sub(" ", name_normalized).replace("<", " ").replace(">", " ")
 
-    # 2. Strip honorific / eulogy phrases anywhere in the span.
-    for phrase in _HONORIFIC_PHRASES:
+    # 2. Strip honorific / eulogy phrases anywhere in the span. LONGEST-FIRST
+    #    (da#311): a shorter phrase can be a PREFIX of a longer one — "رضى الله عنه"
+    #    (masc.) is a prefix of "رضى الله عنها" (fem.); stripping the short form
+    #    first left the fem. suffix "ا" as a stray one-letter token ("عاءشه، رضى
+    #    الله عنها تقول" → "عاءشه ا"). Sorting by length descending strips the
+    #    longest matching phrase first, so the whole benediction is removed cleanly.
+    for phrase in sorted(_HONORIFIC_PHRASES, key=len, reverse=True):
         if phrase in text:
             text = text.replace(phrase, " ")
 
@@ -1078,6 +1171,18 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
         was_truncated = True
         tokens = appos
 
+    # 3e. Strip any TRAILING isnad-boundary connective the truncation left dangling
+    #     (da#311, idempotency). The nisba-transition ثم skip (see
+    #     _truncate_at_isnad_boundary) can leave a ثم at the end when the following
+    #     ال-token was itself truncated ("اتموا الصف الاول ثم") — a lone trailing
+    #     ثم/عن/ان/… is never a name component, so pop it. This makes the recovery a
+    #     fixed point (clean(clean(x)) == clean(x)) in a single pass.
+    while tokens and tokens[-1] in _ISNAD_BOUNDARY:
+        tokens.pop()
+        was_truncated = True
+    if not tokens:
+        return None
+
     # 4. Over-long span → phrase / sentence / mis-parsed hadith body.
     if len(tokens) > _MAX_NAME_TOKENS:
         return None
@@ -1138,4 +1243,75 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
     if _is_matn_sentence(tokens, kept_text, was_truncated):
         return None
 
-    return " ".join(tokens)
+    # 11. Degenerate-result floor (da#311). A recovery that boils down to a single
+    #     stray letter / zero-width mark / punctuation / lone latin char ("ه", "و",
+    #     "p") is garbage, not a name — drop rather than emit it. Real 2+-letter
+    #     Arabic names and romanized names (Malik) clear the floor.
+    result = " ".join(tokens)
+    if _is_degenerate_name(result):
+        return None
+
+    return result
+
+
+def clean_narrator_name_display(name_ar: str | None) -> str | None:
+    """Clean the VOWELED, load-bearing ``name_ar`` display field; drop or recover (da#311).
+
+    The graph loader keys a Narrator node's ``name`` on ``name_ar`` first, only
+    falling back to ``name_ar_normalized`` when ``name_ar`` is empty
+    (``src/graph/load_nodes.py``: ``name_ar = _val(row,"name_ar","") or
+    _val(row,"name_ar_normalized","")``; ``SET n.name_ar = row.name_ar``). So the
+    matn scrub MUST clean ``name_ar`` — cleaning only the normalized field leaves
+    the load-bearing matn in place. ``name_ar`` also frequently carries the FULL
+    matn body while ``name_ar_normalized`` was already truncated at NER time, so
+    this cleans ``name_ar`` on its own terms.
+
+    Reuses the full :func:`clean_narrator_name` gate (normalizing internally for
+    matching) and maps its recovered value BACK onto the voweled tokens so the
+    display keeps its diacritics where possible:
+
+    * ``clean_narrator_name`` returns ``None`` → return ``None`` (drop the row).
+    * otherwise align the cleaned normalized tokens to a contiguous run of the
+      voweled tokens and return that run (``"أبو عائشة"`` unchanged; the mc-196
+      ``"عاءشه، زوج النبي صلى الله عليه وسلم قالت"`` → ``"عاءشه"``). When alignment
+      fails (a mid-name honorific broke contiguity) fall back to the cleaned
+      normalized value — denatured, but clean (never matn).
+    """
+    if not name_ar or not name_ar.strip():
+        return None
+    display = strip_markup(name_ar)
+    if not display:
+        return None
+
+    cleaned = clean_narrator_name(normalize_arabic(display))
+    if cleaned is None:
+        return None
+
+    # Build voweled display tokens + their normalized forms, dropping the same
+    # empty-after-edge-strip / editorial-connective tokens ``clean_narrator_name``
+    # drops during tokenization — so a standalone internal ``:`` / ``،`` / ``يعني``
+    # (which becomes an empty normalized token) does NOT break the contiguous-run
+    # alignment and force a denaturing fallback (``"سالم بن أبي الجعد : رافع"`` must
+    # keep its diacritics, not collapse to the normalized form).
+    raw_tokens: list[str] = []
+    norm_tokens: list[str] = []
+    for t in display.split():
+        norm = normalize_arabic(t).strip(_EDGE_PUNCT)
+        if not norm or norm in _CONNECTIVE_TOKENS:
+            continue
+        raw_tokens.append(t.strip(_EDGE_PUNCT))
+        norm_tokens.append(norm)
+
+    target = [t.strip(_EDGE_PUNCT) for t in cleaned.split()]
+    span = len(target)
+    if span == 0:
+        return None
+
+    for start in range(len(norm_tokens) - span + 1):
+        if norm_tokens[start : start + span] == target:
+            recovered = " ".join(raw_tokens[start : start + span]).strip()
+            return recovered or cleaned
+    # No contiguous voweled run (e.g. a mid-name honorific was removed): the cleaned
+    # normalized value is still clean (never matn), so use it rather than risk
+    # re-emitting the voweled matn.
+    return cleaned

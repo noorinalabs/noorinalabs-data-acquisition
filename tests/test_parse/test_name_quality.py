@@ -6,6 +6,7 @@ import pytest
 
 from src.parse.name_quality import (
     clean_narrator_name,
+    clean_narrator_name_display,
     split_compound_narrators,
     strip_markup,
 )
@@ -740,6 +741,101 @@ class TestShiaDialogueMatnResidual:
         self, polluted: str, expected: str
     ) -> None:
         assert clean_narrator_name(normalize_arabic(polluted)) == expected
+
+
+class TestAskVerbAndDegenerate:
+    """da#311 (third pass) — "asked" verb openers + degenerate-result floor."""
+
+    # --- DROP: every "asked" conjugation (the mc-1035 سالته family) ---
+    @pytest.mark.parametrize(
+        "matn",
+        [
+            "سالته",  # I asked him (mc-1035)
+            "وسالته",  # and I asked him (mc-96)
+            "سالتها",
+            "سالت ابا جعفر",  # I asked Abu Jaʿfar (mc-389)
+            "سءلت",
+            "سءل ابو عبد الله",
+            "ساله عن كذا",  # he asked him about …
+        ],
+    )
+    def test_ask_verb_forms_dropped(self, matn: str) -> None:
+        assert clean_narrator_name(normalize_arabic(matn)) is None
+
+    # --- PRECISION: the name سالم (Salim) and its nasab/nisba forms MUST survive
+    # (سالم = mc-4072; the ask-verb stem سال collides with it) ---
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "سالم",
+            "سالم بن عبد الله",
+            "سالم بن عبد الله العمري",
+            "سالم بن ابي حفصه",
+            "سالم البراد",
+            "سالم ابو حماد",
+        ],
+    )
+    def test_salim_family_preserved(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) == normalize_arabic(name)
+
+    # --- DROP: a recovery that boils down to garbage (degenerate floor) ---
+    @pytest.mark.parametrize("junk", ["ه", "و", "ف", "p", "‏", ".", "، ،"])
+    def test_degenerate_result_dropped(self, junk: str) -> None:
+        assert clean_narrator_name(normalize_arabic(junk)) is None
+
+    # --- KEEP: a legit 2+-letter Arabic name and a romanized name clear the floor ---
+    def test_short_real_name_and_romanized_kept(self) -> None:
+        assert clean_narrator_name(normalize_arabic("علي")) == normalize_arabic("علي")
+        assert clean_narrator_name("Malik") == "Malik"
+
+
+class TestCleanNarratorNameDisplay:
+    """da#311 (third pass) — clean the VOWELED, load-bearing name_ar field.
+
+    The graph loader keys the node name on name_ar first (falling back to
+    name_ar_normalized only when name_ar is empty), so the scrub must clean
+    name_ar. name_ar also often carries the FULL matn body while
+    name_ar_normalized was already truncated at NER time.
+    """
+
+    # --- clean names pass through with their DIACRITICS PRESERVED ---
+    @pytest.mark.parametrize(
+        "name_ar",
+        [
+            "أبو عائشة",
+            "عائشة بنت سعد",
+            "محمد بن اسماعيل البخاري",
+            "سالم بن عبد الله",
+        ],
+    )
+    def test_clean_voweled_name_preserved(self, name_ar: str) -> None:
+        assert clean_narrator_name_display(name_ar) == name_ar
+
+    # --- matn in the voweled field is recovered / dropped ---
+    def test_apposition_recovered_from_voweled_matn(self) -> None:
+        # the flagship mc-196 row: full voweled matn in name_ar → recover Aisha
+        polluted = "عاءشه، زوج النبي صلى الله عليه وسلم قالت"
+        assert clean_narrator_name_display(polluted) == "عاءشه"
+
+    def test_full_matn_body_dropped(self) -> None:
+        # name_ar holds the WHOLE hadith body (name_ar_normalized was pre-truncated)
+        body = (
+            "اثنى رجل على رجل عند النبي صلى الله عليه وسلم فقال ويلك قطعت عنق صاحبك "
+            "قطعت عنق صاحبك مرارا ثم"
+        )
+        assert clean_narrator_name_display(body) is None
+
+    def test_ask_verb_dropped_in_display(self) -> None:
+        assert clean_narrator_name_display("سالته") is None
+        assert clean_narrator_name_display("سالت ابا جعفر") is None
+
+    def test_leading_title_stripped_preserving_voweling(self) -> None:
+        polluted = "الشيخ الجليل أبو جعفر محمد بن علي بن الحسين بن بابويه"
+        assert clean_narrator_name_display(polluted) == ("أبو جعفر محمد بن علي بن الحسين بن بابويه")
+
+    @pytest.mark.parametrize("empty", [None, "", "   ", "<NAR>"])
+    def test_empty_display_returns_none(self, empty: str | None) -> None:
+        assert clean_narrator_name_display(empty) is None
 
 
 class TestSplitCompoundNarrators:
