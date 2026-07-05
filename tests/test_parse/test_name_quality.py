@@ -6,6 +6,7 @@ import pytest
 
 from src.parse.name_quality import (
     clean_narrator_name,
+    clean_narrator_name_display,
     split_compound_narrators,
     strip_markup,
 )
@@ -582,9 +583,259 @@ class TestMatnSentenceGate:
                 fp += 1
         precision = tp / (tp + fp) if (tp + fp) else 1.0
         recall = tp / (tp + fn) if (tp + fn) else 1.0
-        # PRECISION is the hard bar: a real name must never be dropped.
         assert fp == 0, f"dropped {fp} real name(s) — precision {precision:.3f}"
         assert recall >= 0.9, f"recall too low: {recall:.3f} ({fn} matn kept)"
+
+
+class TestShiaDialogueMatnResidual:
+    """da#311 — _MATN_OPENERS missed dominant Shia dialogue-hadith matn shapes.
+
+    Run 5 left residual benediction/matn contamination in narrators_canonical,
+    concentrated in thaqalayn/fawaz; itqan/lk were clean. Root causes: missing
+    dialogue/isnad openers (``سألت``/``سُئل``/``روى``/``كتبت``, dual ``قالا``,
+    و/ف-prefixed said, bare ``سمع``), a Prophet-*apposition* the gate left whole
+    (``"عاءشه زوج النبي"`` — the mc-196 fawaz canonical, its trailing قالت +
+    benediction already stripped at NER time), a vocative ``يا`` leader, and a
+    short-residue interaction with the taṣliya ligature ``ﷺ``.
+
+    Where the real narrator is RECOVERABLE (a leading name before an apposition /
+    speech verb) the gate now CLEANS to that name rather than dropping the row —
+    losing a real, heavily-cited companion (Aisha, mc-196) to a hard drop is worse
+    than recovering her (coordinator directive: prefer clean over drop).
+    """
+
+    # --- DROP: issue examples where NO real narrator leads the matn (the speaker
+    # is an elided "I", or the span is a bare Prophet action) → nothing to recover.
+    @pytest.mark.parametrize(
+        "matn",
+        [
+            # mc 149, fawaz — سألت "I asked" opener; the narrator is the elided
+            # asker, Abu al-Hasan is the askee → no leading name to recover
+            "سألت أبا الحسن (عليه السلام",
+            # mc 49, fawaz — short residue: taṣliya ligature ﷺ inflated the
+            # token count and masked the 2-token "نهى النبي" residue
+            "نهى النبي ﷺ",
+            # mc 82, thaqalayn — سُئل "was asked" opener leads → drop
+            "سُئل أبو عبد الله (عليه السلام",
+        ],
+    )
+    def test_issue_evidence_examples_dropped(self, matn: str) -> None:
+        assert clean_narrator_name(normalize_arabic(matn)) is None
+
+    # --- RECOVER: the mc-196 subject-led / Prophet-apposition case cleans to the
+    # real leading narrator (Aisha), NOT a hard drop — her mentions attach to the
+    # real node instead of being lost.
+    @pytest.mark.parametrize(
+        "matn,expected",
+        [
+            # mc 196, fawaz — "Aisha, wife of the Prophet, said" → Aisha
+            ("عائشة، زوج النبي ﷺ قالت", "عاءشه"),
+            # the trimmed apposition as actually stored in the canonical (no verb)
+            ("عاءشه زوج النبي", "عاءشه"),
+            # daughter-of / wife-of the Prophet appositions + a trailing verb
+            ("زينب بنت النبي حدثت", "زينب"),
+            ("فاطمه بنت النبي روت", "فاطمه"),
+            # رسول + الله (not just النبي/الرسول) as the apposition's Prophet ref
+            ("هند زوجه رسول الله قالت", "هند"),
+            # apposition with no trailing verb — still recovers the bare name
+            ("ام سلمه زوج النبي", "ام سلمه"),
+        ],
+    )
+    def test_subject_led_apposition_recovers_name(self, matn: str, expected: str) -> None:
+        assert clean_narrator_name(normalize_arabic(matn)) == normalize_arabic(expected)
+
+    # --- DROP: a bare apposition with NO leading name ("wife of the Prophet") ---
+    @pytest.mark.parametrize("matn", ["زوج النبي", "بنت رسول الله"])
+    def test_bare_apposition_dropped(self, matn: str) -> None:
+        assert clean_narrator_name(normalize_arabic(matn)) is None
+
+    # --- Recall shapes added in da#311's second pass (real-data survivors) ---
+    @pytest.mark.parametrize(
+        "matn,expected",
+        [
+            # compound co-narrator join + dual "they said" → preserve BOTH
+            # co-narrators, strip only the trailing قالا (never drop the names)
+            ("عمرو الناقد وزهير بن حرب قالا", "عمرو الناقد وزهير بن حرب"),
+            ("ابو الطاهر وحرمله قالا", "ابو الطاهر وحرمله"),
+            # bare سمع / trailing روى → recover the leading narrator
+            ("ابو ضمره سمع عمر بن عبد العزيز روى", "ابو ضمره"),
+            # "that he/she …" subordinator (ه/ها-suffixed ان the bare ان misses)
+            ("عاءشه انها", "عاءشه"),
+            ("ابي جعفر عليه السلام انه سءل", "ابي جعفر"),
+            # trailing 3rd-person "narrated"
+            ("ابو تمي حدث", "ابو تمي"),
+        ],
+    )
+    def test_recall_shapes_recover_lead(self, matn: str, expected: str) -> None:
+        assert clean_narrator_name(normalize_arabic(matn)) == normalize_arabic(expected)
+
+    # --- DROP: leading vocative / و-prefixed said / كتبت correspondence opener ---
+    @pytest.mark.parametrize(
+        "matn",
+        [
+            "يا رسول الله",  # vocative address, never a name
+            "يا محمد",
+            "وقال ابن رافع",  # "and Ibn Rafi said" — leading و+said
+            "كتبت الى ابي الحسن اساله",  # "I wrote to Abu al-Hasan asking him"
+        ],
+    )
+    def test_leading_vocative_and_prefixed_verbs_dropped(self, matn: str) -> None:
+        assert clean_narrator_name(normalize_arabic(matn)) is None
+
+    # --- DROP: short residue — verb-opener + single noun, no ligature involved ---
+    @pytest.mark.parametrize(
+        "matn",
+        [
+            "نهى النبي",  # 2-token residue, no ﷺ ligature present at all
+            "امر النبي",  # another _MATN_OPENERS verb + single-noun residue
+        ],
+    )
+    def test_short_residue_dropped(self, matn: str) -> None:
+        assert clean_narrator_name(normalize_arabic(matn)) is None
+
+    # --- PRECISION: a genuine 2-token kunya must survive the short-residue fix ---
+    @pytest.mark.parametrize(
+        "real_name",
+        ["ابو هريره", "ابو بكر", "ابن عمر"],
+    )
+    def test_two_token_kunya_survives_short_residue_fix(self, real_name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(real_name)) == normalize_arabic(real_name)
+
+    # --- KEEP: the al-Zuhri full nasab chain, plain kunyas, and an Imam-honorific
+    # name whose leading TITLE strips but whose real name survives ---
+    def test_long_nasab_chain_preserved(self) -> None:
+        name = normalize_arabic(
+            "محمد بن مسلم بن عبيد الله بن عبد الله بن شهاب بن عبد الله بن الحارث بن زهره"
+        )
+        assert clean_narrator_name(name) == name
+
+    def test_abu_hurayra_preserved(self) -> None:
+        assert clean_narrator_name(normalize_arabic("أبو هريرة")) == normalize_arabic("أبو هريرة")
+
+    def test_anas_bin_malik_preserved(self) -> None:
+        assert clean_narrator_name(normalize_arabic("أنس بن مالك")) == normalize_arabic(
+            "أنس بن مالك"
+        )
+
+    def test_imam_honorific_title_stripped_name_kept(self) -> None:
+        # "الشيخ الجليل" ("the venerable Sheikh") is the common Imami honorific
+        # title for Ibn Babawayh (Shaykh al-Saduq) — only the TITLE strips, the
+        # real name underneath must survive, not be dropped.
+        polluted = normalize_arabic("الشيخ الجليل أبو جعفر محمد بن علي بن الحسين بن بابويه")
+        expected = normalize_arabic("أبو جعفر محمد بن علي بن الحسين بن بابويه")
+        assert clean_narrator_name(polluted) == expected
+
+    # --- NON-REGRESSION (Nikolaos #310): a real name + قال + a matn tail
+    # containing a Prophet reference (النبي) must still recover the leading
+    # name — the subject-led signal only fires when the Prophet reference
+    # survives INTO the retained span (i.e. appears BEFORE the truncation
+    # boundary), never on content already truncated away. ---
+    @pytest.mark.parametrize(
+        "polluted,expected",
+        [
+            ("عبد الرحمن الاوزاعي قال سمعت النبي يقول كذا؟", "عبد الرحمن الاوزاعي"),
+            ("عبد الله الاعمش قال كان النبي يصلي؟", "عبد الله الاعمش"),
+        ],
+    )
+    def test_prophet_reference_in_truncated_tail_does_not_drop_name(
+        self, polluted: str, expected: str
+    ) -> None:
+        assert clean_narrator_name(normalize_arabic(polluted)) == expected
+
+
+class TestAskVerbAndDegenerate:
+    """da#311 (third pass) — "asked" verb openers + degenerate-result floor."""
+
+    # --- DROP: every "asked" conjugation (the mc-1035 سالته family) ---
+    @pytest.mark.parametrize(
+        "matn",
+        [
+            "سالته",  # I asked him (mc-1035)
+            "وسالته",  # and I asked him (mc-96)
+            "سالتها",
+            "سالت ابا جعفر",  # I asked Abu Jaʿfar (mc-389)
+            "سءلت",
+            "سءل ابو عبد الله",
+            "ساله عن كذا",  # he asked him about …
+        ],
+    )
+    def test_ask_verb_forms_dropped(self, matn: str) -> None:
+        assert clean_narrator_name(normalize_arabic(matn)) is None
+
+    # --- PRECISION: the name سالم (Salim) and its nasab/nisba forms MUST survive
+    # (سالم = mc-4072; the ask-verb stem سال collides with it) ---
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "سالم",
+            "سالم بن عبد الله",
+            "سالم بن عبد الله العمري",
+            "سالم بن ابي حفصه",
+            "سالم البراد",
+            "سالم ابو حماد",
+        ],
+    )
+    def test_salim_family_preserved(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) == normalize_arabic(name)
+
+    # --- DROP: a recovery that boils down to garbage (degenerate floor) ---
+    @pytest.mark.parametrize("junk", ["ه", "و", "ف", "p", "‏", ".", "، ،"])
+    def test_degenerate_result_dropped(self, junk: str) -> None:
+        assert clean_narrator_name(normalize_arabic(junk)) is None
+
+    # --- KEEP: a legit 2+-letter Arabic name and a romanized name clear the floor ---
+    def test_short_real_name_and_romanized_kept(self) -> None:
+        assert clean_narrator_name(normalize_arabic("علي")) == normalize_arabic("علي")
+        assert clean_narrator_name("Malik") == "Malik"
+
+
+class TestCleanNarratorNameDisplay:
+    """da#311 (third pass) — clean the VOWELED, load-bearing name_ar field.
+
+    The graph loader keys the node name on name_ar first (falling back to
+    name_ar_normalized only when name_ar is empty), so the scrub must clean
+    name_ar. name_ar also often carries the FULL matn body while
+    name_ar_normalized was already truncated at NER time.
+    """
+
+    # --- clean names pass through with their DIACRITICS PRESERVED ---
+    @pytest.mark.parametrize(
+        "name_ar",
+        [
+            "أبو عائشة",
+            "عائشة بنت سعد",
+            "محمد بن اسماعيل البخاري",
+            "سالم بن عبد الله",
+        ],
+    )
+    def test_clean_voweled_name_preserved(self, name_ar: str) -> None:
+        assert clean_narrator_name_display(name_ar) == name_ar
+
+    # --- matn in the voweled field is recovered / dropped ---
+    def test_apposition_recovered_from_voweled_matn(self) -> None:
+        # the flagship mc-196 row: full voweled matn in name_ar → recover Aisha
+        polluted = "عاءشه، زوج النبي صلى الله عليه وسلم قالت"
+        assert clean_narrator_name_display(polluted) == "عاءشه"
+
+    def test_full_matn_body_dropped(self) -> None:
+        # name_ar holds the WHOLE hadith body (name_ar_normalized was pre-truncated)
+        body = (
+            "اثنى رجل على رجل عند النبي صلى الله عليه وسلم فقال ويلك قطعت عنق صاحبك "
+            "قطعت عنق صاحبك مرارا ثم"
+        )
+        assert clean_narrator_name_display(body) is None
+
+    def test_ask_verb_dropped_in_display(self) -> None:
+        assert clean_narrator_name_display("سالته") is None
+        assert clean_narrator_name_display("سالت ابا جعفر") is None
+
+    def test_leading_title_stripped_preserving_voweling(self) -> None:
+        polluted = "الشيخ الجليل أبو جعفر محمد بن علي بن الحسين بن بابويه"
+        assert clean_narrator_name_display(polluted) == ("أبو جعفر محمد بن علي بن الحسين بن بابويه")
+
+    @pytest.mark.parametrize("empty", [None, "", "   ", "<NAR>"])
+    def test_empty_display_returns_none(self, empty: str | None) -> None:
+        assert clean_narrator_name_display(empty) is None
 
 
 class TestSplitCompoundNarrators:
@@ -624,3 +875,90 @@ class TestSplitCompoundNarrators:
     def test_split_members_survive_cleaning(self) -> None:
         members = split_compound_narrators("سعد بن عبد الله و عبد الله بن جعفر الحميري جميعا")
         assert [clean_narrator_name(m) for m in members] == members
+
+
+class TestNumericPrefixRecovery:
+    """da#311 (fourth pass) — recover real narrators hidden behind a leaked ordinal.
+
+    A thaqalayn enumeration digit leaks in front of the name field ("1 علي بن
+    ابراهيم", "10 علي بن ابراهيم", …). An earlier pass DROPPED any digit-leading
+    span, which erased transmitters whose ONLY stored forms are numbered — Ali ibn
+    Ibrahim al-Qummi (al-Kafi's most prolific isnad head) vanished from the graph
+    entirely (0 rows). The gate now STRIPS the leading ordinal (+ a leaked waw) and
+    re-gates the remainder: a real name is recovered, a mubham / isnad-formula /
+    matn remainder still drops.
+    """
+
+    # --- RECOVER: a real narrator behind one or more leading ordinals ---
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("1 علي بن ابراهيم", "علي بن ابراهيم"),  # Ali ibn Ibrahim al-Qummi (was 0 rows)
+            ("10 علي بن ابراهيم", "علي بن ابراهيم"),
+            ("2 محمد بن يحيى", "محمد بن يحيى"),
+            ("1 - علي بن ابراهيم", "علي بن ابراهيم"),  # dash-separated ordinal variant
+        ],
+    )
+    def test_leading_ordinal_recovered(self, raw: str, expected: str) -> None:
+        assert clean_narrator_name(normalize_arabic(raw)) == normalize_arabic(expected)
+
+    # --- DROP: an ordinal in front of a non-name remainder stays dropped ---
+    @pytest.mark.parametrize(
+        "junk",
+        [
+            "1 عده من اصحابنا",  # mubham collective ("a number of our companions")
+            "5659 و روى محمد بن ابي عمير",  # leaked-waw isnad continuation
+            "2 و عنه",  # "and from him"
+            "3 و باسناده",  # "and by his chain"
+            "3 باسناده",
+            "16 و باسناده",
+            "5659",  # bare ordinal, nothing behind it
+        ],
+    )
+    def test_leading_ordinal_nonname_dropped(self, junk: str) -> None:
+        assert clean_narrator_name(normalize_arabic(junk)) is None
+
+    # --- PRECISION: a MEDIAL waw compound and real names that merely CONTAIN an
+    # isnad-formula substring (معن ⊃ عنه, النعمان ⊃ نعم) are untouched ---
+    @pytest.mark.parametrize(
+        "name",
+        ["محمد و علي جميعا", "معن بن عيسى", "النعمان بن الزبير", "ابو النعمان"],
+    )
+    def test_no_false_drop_from_substring_or_medial_waw(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) == normalize_arabic(name)
+
+
+class TestIsnadResidueFloor:
+    """da#311 round-4b (Kavitha's review) — all-residue spans are not narrators.
+
+    The round-4 numeric-strip newly admitted isnad/matn residue that the base gate
+    never caught: the attached-waw continuation forms ("وعنه"/"وباسناده"), the
+    passive narrate verb "روي" (distinct token from روى — normalize_arabic does not
+    fold ى→ي), the particle "قد"/"قد روي", and bare mubham collectives WITHOUT the
+    partitive "من" that guard 5 requires ("رجل" = "a man" was a mc-4920 pollution
+    node). Rule 5b drops a span whose every token is such residue.
+    """
+
+    # --- DROP: attached-waw isnad fragments (numeric-derived and bare) ---
+    @pytest.mark.parametrize("junk", ["2 وعنه", "1 وباسناده", "وعنه", "وباسناده"])
+    def test_attached_waw_isnad_fragment_dropped(self, junk: str) -> None:
+        assert clean_narrator_name(normalize_arabic(junk)) is None
+
+    # --- DROP: the passive verb روي as a lone residue (was 541-mention junk) ---
+    @pytest.mark.parametrize("junk", ["روي", "3 روي", "1 روي عن فلان", "قد روي", "1 قد روي"])
+    def test_passive_narrate_verb_dropped(self, junk: str) -> None:
+        assert clean_narrator_name(normalize_arabic(junk)) is None
+
+    # --- DROP: bare mubham collectives without the partitive من (guard-5 gap) ---
+    @pytest.mark.parametrize("junk", ["رجل", "بعض", "شيخ", "ناس", "نفر", "قوم", "جماعه", "1 جماعه"])
+    def test_bare_mubham_collective_dropped(self, junk: str) -> None:
+        assert clean_narrator_name(normalize_arabic(junk)) is None
+
+    # --- PRECISION: real waw-initial names and mixed spans with a real token survive
+    # (residue drop requires EVERY token to be residue) ---
+    @pytest.mark.parametrize(
+        "name",
+        ["وهب بن منبه", "وكيع بن الجراح", "وائل بن حجر"],
+    )
+    def test_waw_initial_real_name_survives(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) == normalize_arabic(name)

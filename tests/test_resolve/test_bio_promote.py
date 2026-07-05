@@ -143,12 +143,26 @@ def test_source_filter(tmp_path: Path) -> None:
     _write_bios(
         staging,
         "itqan",
-        [{"bio_id": "itqan:1", "source": "itqan", "name_ar": "أ", "name_ar_normalized": "ا"}],
+        [
+            {
+                "bio_id": "itqan:1",
+                "source": "itqan",
+                "name_ar": "مالك بن انس",
+                "name_ar_normalized": "مالك بن انس",
+            }
+        ],
     )
     _write_bios(
         staging,
         "muhaddithat",
-        [{"bio_id": "m:1", "source": "muhaddithat", "name_ar": "ب", "name_ar_normalized": "ب"}],
+        [
+            {
+                "bio_id": "m:1",
+                "source": "muhaddithat",
+                "name_ar": "حفصه بنت عمر",
+                "name_ar_normalized": "حفصه بنت عمر",
+            }
+        ],
     )
     path = promote_bios_to_canonical(staging, out_dir, sources={"itqan"})
     assert path is not None
@@ -178,7 +192,14 @@ def test_merges_into_existing_canonical(tmp_path: Path) -> None:
     _write_bios(
         staging,
         "itqan",
-        [{"bio_id": "itqan:1", "source": "itqan", "name_ar": "ج", "name_ar_normalized": "ج"}],
+        [
+            {
+                "bio_id": "itqan:1",
+                "source": "itqan",
+                "name_ar": "سعيد بن جبير",
+                "name_ar_normalized": "سعيد بن جبير",
+            }
+        ],
     )
     path = promote_bios_to_canonical(staging, out_dir)
     assert path is not None
@@ -254,7 +275,14 @@ def test_alias_without_matching_bio_is_dropped(tmp_path: Path) -> None:
     _write_bios(
         staging,
         "itqan",
-        [{"bio_id": "itqan:1", "source": "itqan", "name_ar": "ج", "name_ar_normalized": "ج"}],
+        [
+            {
+                "bio_id": "itqan:1",
+                "source": "itqan",
+                "name_ar": "سعيد بن جبير",
+                "name_ar_normalized": "سعيد بن جبير",
+            }
+        ],
     )
     _write_aliases(
         staging,
