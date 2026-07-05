@@ -875,3 +875,54 @@ class TestSplitCompoundNarrators:
     def test_split_members_survive_cleaning(self) -> None:
         members = split_compound_narrators("سعد بن عبد الله و عبد الله بن جعفر الحميري جميعا")
         assert [clean_narrator_name(m) for m in members] == members
+
+
+class TestNumericPrefixRecovery:
+    """da#311 (fourth pass) — recover real narrators hidden behind a leaked ordinal.
+
+    A thaqalayn enumeration digit leaks in front of the name field ("1 علي بن
+    ابراهيم", "10 علي بن ابراهيم", …). An earlier pass DROPPED any digit-leading
+    span, which erased transmitters whose ONLY stored forms are numbered — Ali ibn
+    Ibrahim al-Qummi (al-Kafi's most prolific isnad head) vanished from the graph
+    entirely (0 rows). The gate now STRIPS the leading ordinal (+ a leaked waw) and
+    re-gates the remainder: a real name is recovered, a mubham / isnad-formula /
+    matn remainder still drops.
+    """
+
+    # --- RECOVER: a real narrator behind one or more leading ordinals ---
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("1 علي بن ابراهيم", "علي بن ابراهيم"),  # Ali ibn Ibrahim al-Qummi (was 0 rows)
+            ("10 علي بن ابراهيم", "علي بن ابراهيم"),
+            ("2 محمد بن يحيى", "محمد بن يحيى"),
+            ("1 - علي بن ابراهيم", "علي بن ابراهيم"),  # dash-separated ordinal variant
+        ],
+    )
+    def test_leading_ordinal_recovered(self, raw: str, expected: str) -> None:
+        assert clean_narrator_name(normalize_arabic(raw)) == normalize_arabic(expected)
+
+    # --- DROP: an ordinal in front of a non-name remainder stays dropped ---
+    @pytest.mark.parametrize(
+        "junk",
+        [
+            "1 عده من اصحابنا",  # mubham collective ("a number of our companions")
+            "5659 و روى محمد بن ابي عمير",  # leaked-waw isnad continuation
+            "2 و عنه",  # "and from him"
+            "3 و باسناده",  # "and by his chain"
+            "3 باسناده",
+            "16 و باسناده",
+            "5659",  # bare ordinal, nothing behind it
+        ],
+    )
+    def test_leading_ordinal_nonname_dropped(self, junk: str) -> None:
+        assert clean_narrator_name(normalize_arabic(junk)) is None
+
+    # --- PRECISION: a MEDIAL waw compound and real names that merely CONTAIN an
+    # isnad-formula substring (معن ⊃ عنه, النعمان ⊃ نعم) are untouched ---
+    @pytest.mark.parametrize(
+        "name",
+        ["محمد و علي جميعا", "معن بن عيسى", "النعمان بن الزبير", "ابو النعمان"],
+    )
+    def test_no_false_drop_from_substring_or_medial_waw(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) == normalize_arabic(name)

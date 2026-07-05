@@ -167,6 +167,20 @@ _MARKUP_RE = re.compile(r"<[^>]*>")
 # Editorial connective ("that is / i.e.") — never part of a name.
 _CONNECTIVE_TOKENS = frozenset({"يعني"})
 
+# Bare waw conjunction ("و" = "and"). MEDIAL it joins compound co-narrators
+# ("X و Y"); LEADING (only reachable after a numeric mis-parse strip, da#311) it
+# is an isnad continuation fragment ("و عنه", "و روى …"), never a name start.
+_WAW_CONJUNCTION = normalize_arabic("و")
+
+# Isnad-formula continuation words (normalized) — "by his/the chain" fragments a
+# numeric mis-parse can leave as the WHOLE remainder ("3 و باسناده" → "باسناده").
+# Structural isnad vocabulary (same class as _ISNAD_BOUNDARY), never a narrator
+# name; only checked inside the numeric-mis-parse recovery so ordinary spans are
+# untouched (da#311 round-4 — the lone deep-tail residue of the digit-strip).
+_ISNAD_FORMULA_FRAGMENTS = frozenset(
+    normalize_arabic(w) for w in ("باسناده", "بإسناده", "بالاسناد", "وبالاسناد", "اسناده", "عنه")
+)
+
 # Honorific / eulogy phrases (normalized) that name no narrator. Stripped from
 # anywhere in the span (they appear appended to real names too).
 _HONORIFIC_PHRASES: tuple[str, ...] = (
@@ -1130,11 +1144,40 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
 
     # 3b. Numeric-leading mis-parse (da#311). A span whose FIRST token is a bare
     #     number (ASCII or Arabic-Indic digits) is a thaqalayn parser artifact — a
-    #     hadith ordinal leaked in front of an isnad fragment ("5659 و روى محمد بن
-    #     ابي عمير"). No real narrator name begins with a digit, and the trailing
-    #     narrator (if any) has a clean canonical elsewhere, so the mis-parsed row
-    #     is dropped rather than half-recovered.
-    if _is_number_token(tokens[0]):
+    #     hadith/enumeration ordinal leaked in front of the real name or an isnad
+    #     fragment ("1 علي بن ابراهيم", "5659 و روى محمد بن ابي عمير"). No real
+    #     narrator name begins with a digit. An earlier pass DROPPED such rows on
+    #     the assumption the trailing narrator had a clean canonical elsewhere — but
+    #     that vanished real transmitters whose ONLY stored forms are numbered:
+    #     Ali ibn Ibrahim al-Qummi (al-Kafi's most prolific isnad head) exists SOLELY
+    #     as "1 علي بن ابراهيم" / "10 علي بن ابراهيم" / … so the drop erased him from
+    #     the graph entirely (da#311 round-4). Instead STRIP the leading number
+    #     token(s) and re-gate the remainder through every guard below: a real name
+    #     ("علي بن ابراهيم") is recovered, while a mubham remainder ("عده من اصحابنا")
+    #     still drops at the collective guard (5) and an isnad fragment ("و روى …")
+    #     is still truncated/dropped by 3c. A span that is ONLY digits drops here.
+    stripped_number = False
+    while tokens and _is_number_token(tokens[0]):
+        tokens.pop(0)
+        raw_tokens.pop(0)
+        stripped_number = True
+    #     A number-mis-parse whose remainder now LEADS with a bare waw conjunction
+    #     ("2 و عنه", "3 و باسناده", "5659 و روى …") is an isnad connective fragment,
+    #     never a name — the leaked ordinal sat in front of a *continuation* clause,
+    #     not a narrator. Strip the leading lone waw so the remainder is re-gated on
+    #     its merits (dropping "و عنه"→"عنه", "و روى …"→boundary-drop) instead of the
+    #     junk surfacing. Scoped to the mis-parse case (stripped_number) so ordinary
+    #     compound "X و Y" spans — where the waw is MEDIAL — are never touched.
+    if stripped_number:
+        while tokens and normalize_arabic(tokens[0]) == _WAW_CONJUNCTION:
+            tokens.pop(0)
+            raw_tokens.pop(0)
+        #     After the ordinal (+ leaked waw) is gone, a remainder consisting only
+        #     of an isnad-formula word ("باسناده", "عنه", "وبالاسناد …") is a chain
+        #     continuation, not a narrator — drop it (the digit-strip's lone residue).
+        if all(normalize_arabic(t) in _ISNAD_FORMULA_FRAGMENTS for t in tokens):
+            return None
+    if not tokens:
         return None
 
     # 3c. Arabic isnad/matn boundary truncation (da#258 classes 4+5). Cut the span
@@ -1153,7 +1196,7 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
     # fragment (truncation DID fire) is a leading-name RECOVERY that must be
     # re-validated more strictly than a span that was never touched by the
     # boundary rule at all — see the subject-led signal in _is_matn_sentence.
-    was_truncated = len(truncated) < len(tokens)
+    was_truncated = stripped_number or len(truncated) < len(tokens)
     tokens = truncated
 
     # 3d. Prophet-apposition truncation (da#311). A real narrator stored as the
