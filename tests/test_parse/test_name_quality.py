@@ -582,9 +582,113 @@ class TestMatnSentenceGate:
                 fp += 1
         precision = tp / (tp + fp) if (tp + fp) else 1.0
         recall = tp / (tp + fn) if (tp + fn) else 1.0
-        # PRECISION is the hard bar: a real name must never be dropped.
         assert fp == 0, f"dropped {fp} real name(s) — precision {precision:.3f}"
         assert recall >= 0.9, f"recall too low: {recall:.3f} ({fn} matn kept)"
+
+
+class TestShiaDialogueMatnResidual:
+    """da#311 — _MATN_OPENERS missed dominant Shia dialogue-hadith matn shapes.
+
+    Run 5 left ~15% benediction/matn contamination in narrators_canonical,
+    concentrated in thaqalayn (28.3%) and fawaz (18.8%); itqan/lk were clean. Root
+    cause: three gaps in the da#308 gate — missing dialogue/isnad openers
+    (``سألت``/``سُئل``/``روى``), a subject-led matn shape the gate only checked
+    ``bare[0]`` for, and a short-residue interaction with the taṣliya ligature ``ﷺ``.
+    """
+
+    # --- DROP: the issue's 4 canonical mention-backed contamination examples ---
+    @pytest.mark.parametrize(
+        "matn",
+        [
+            # mc 196, fawaz — subject-led: name + appositive + trailing قالت,
+            # recovered name itself carries a bare Prophet reference (النبي)
+            "عائشة، زوج النبي ﷺ قالت",
+            # mc 149, fawaz — سألت "I asked" opener (missing from _MATN_OPENERS)
+            "سألت أبا الحسن (عليه السلام",
+            # mc 49, fawaz — short residue: taṣliya ligature ﷺ inflated the
+            # token count and masked the 2-token "نهى النبي" residue
+            "نهى النبي ﷺ",
+            # mc 82, thaqalayn — سُئل "was asked" opener (missing)
+            "سُئل أبو عبد الله (عليه السلام",
+        ],
+    )
+    def test_issue_evidence_examples_dropped(self, matn: str) -> None:
+        assert clean_narrator_name(normalize_arabic(matn)) is None
+
+    # --- DROP: additional subject-led matn (2nd-position speech verb) ---
+    @pytest.mark.parametrize(
+        "matn",
+        [
+            # بنت النبي ("daughter of the Prophet") appositive + حدثت, the
+            # حدث/حدثت sibling of the قال/قالت subject-led pattern above
+            "زينب بنت النبي حدثت",
+            "فاطمه بنت النبي روت",
+            # رسول + الله (not just النبي/الرسول) surviving into the retained span
+            "هند زوجه رسول الله قالت",
+        ],
+    )
+    def test_subject_led_matn_dropped(self, matn: str) -> None:
+        assert clean_narrator_name(normalize_arabic(matn)) is None
+
+    # --- DROP: short residue — verb-opener + single noun, no ligature involved ---
+    @pytest.mark.parametrize(
+        "matn",
+        [
+            "نهى النبي",  # 2-token residue, no ﷺ ligature present at all
+            "امر النبي",  # another _MATN_OPENERS verb + single-noun residue
+        ],
+    )
+    def test_short_residue_dropped(self, matn: str) -> None:
+        assert clean_narrator_name(normalize_arabic(matn)) is None
+
+    # --- PRECISION: a genuine 2-token kunya must survive the short-residue fix ---
+    @pytest.mark.parametrize(
+        "real_name",
+        ["ابو هريره", "ابو بكر", "ابن عمر"],
+    )
+    def test_two_token_kunya_survives_short_residue_fix(self, real_name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(real_name)) == normalize_arabic(real_name)
+
+    # --- KEEP: the al-Zuhri full nasab chain, plain kunyas, and an Imam-honorific
+    # name whose leading TITLE strips but whose real name survives ---
+    def test_long_nasab_chain_preserved(self) -> None:
+        name = normalize_arabic(
+            "محمد بن مسلم بن عبيد الله بن عبد الله بن شهاب بن عبد الله بن الحارث بن زهره"
+        )
+        assert clean_narrator_name(name) == name
+
+    def test_abu_hurayra_preserved(self) -> None:
+        assert clean_narrator_name(normalize_arabic("أبو هريرة")) == normalize_arabic("أبو هريرة")
+
+    def test_anas_bin_malik_preserved(self) -> None:
+        assert clean_narrator_name(normalize_arabic("أنس بن مالك")) == normalize_arabic(
+            "أنس بن مالك"
+        )
+
+    def test_imam_honorific_title_stripped_name_kept(self) -> None:
+        # "الشيخ الجليل" ("the venerable Sheikh") is the common Imami honorific
+        # title for Ibn Babawayh (Shaykh al-Saduq) — only the TITLE strips, the
+        # real name underneath must survive, not be dropped.
+        polluted = normalize_arabic("الشيخ الجليل أبو جعفر محمد بن علي بن الحسين بن بابويه")
+        expected = normalize_arabic("أبو جعفر محمد بن علي بن الحسين بن بابويه")
+        assert clean_narrator_name(polluted) == expected
+
+    # --- NON-REGRESSION (Nikolaos #310): a real name + قال + a matn tail
+    # containing a Prophet reference (النبي) must still recover the leading
+    # name — the subject-led signal only fires when the Prophet reference
+    # survives INTO the retained span (i.e. appears BEFORE the truncation
+    # boundary), never on content already truncated away. ---
+    @pytest.mark.parametrize(
+        "polluted,expected",
+        [
+            ("عبد الرحمن الاوزاعي قال سمعت النبي يقول كذا؟", "عبد الرحمن الاوزاعي"),
+            ("عبد الله الاعمش قال كان النبي يصلي؟", "عبد الله الاعمش"),
+        ],
+    )
+    def test_prophet_reference_in_truncated_tail_does_not_drop_name(
+        self, polluted: str, expected: str
+    ) -> None:
+        assert clean_narrator_name(normalize_arabic(polluted)) == expected
 
 
 class TestSplitCompoundNarrators:
