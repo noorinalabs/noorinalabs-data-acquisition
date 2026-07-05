@@ -286,6 +286,41 @@ _MUBHAM_RELATIONAL = frozenset(
 _PROPHET_TITLE_SOLE = frozenset({"النبي", "الرسول"})
 _PROPHET_TITLE_LEADERS = frozenset({"رسول", "نبي"})
 
+# Prophet-APPOSITION connectors (da#311). A real narrator described BY her
+# relation to the Prophet — "<name> زوج النبي" ("… wife of the Prophet"), "<name>
+# بنت النبي" ("… daughter of the Prophet") — surfaces in fawaz/thaqalayn as a
+# canonical whose stored name is the trimmed apposition (the trailing قالت + the
+# benediction were already stripped at NER time, leaving e.g. "عاءشه زوج النبي",
+# mc-196). The REAL narrator is the leading name (Aisha), so we truncate at the
+# connector and RECOVER it, rather than drop the row. The discriminator is that
+# the token AFTER the connector is a Prophet reference (:func:`_prophet_ref_len`):
+# "عاءشه بنت سعد" (بنت followed by a real name سعد) is untouched, "عاءشه بنت النبي"
+# (بنت followed by النبي) truncates to "عاءشه". None of these is ever removed from
+# a real nasab lineage because a lineage's connector is ALWAYS followed by a name,
+# never by a bare Prophet title.
+_APPOSITION_CONNECTORS = frozenset(
+    {
+        "زوج",  # husband/wife of
+        "زوجه",  # his wife
+        "بنت",  # daughter of
+        "ابنه",  # his son / daughter (context)
+        "ابنته",  # his daughter
+        "ام",  # mother of
+        "اخت",  # sister of
+        "اهل",  # family/people of
+        "مولى",  # client/freedman of
+        "مولاه",  # his client
+        "خادم",  # servant of
+        "خادمه",  # her/his servant
+        "صاحب",  # companion of
+        "صاحبه",  # his companion
+        "عم",  # paternal uncle of
+        "خال",  # maternal uncle of
+        "جد",  # grandfather of
+        "عمه",  # paternal aunt of
+    }
+)
+
 # English non-name *leader* words. Several English-only sources (halimbahae,
 # sunnah translations) put translated isnad prose in the name field, so a "name"
 # is really a sentence fragment: "It was narrated…", "The Prophet said…", "his
@@ -406,6 +441,8 @@ _ISNAD_BOUNDARY = frozenset(
         "فقالت",
         "يقول",
         "تقول",
+        "قلت",  # da#311: 1st-person "I said" — an opener too, but as a boundary it
+        "قلنا",  # recovers a leading narrator mid-span ("حميد قلت لزينب …" → "حميد").
         "حدثنا",
         "حدثني",
         "اخبرنا",
@@ -417,6 +454,9 @@ _ISNAD_BOUNDARY = frozenset(
         "قام",
         "سال",
         "فساله",
+        "سءل",  # da#311: "was asked" — an opener too, but as a boundary it recovers
+        "سالت",  # a leading narrator mid-span ("يحيى سءل مالك" → "يحيى").
+        "اساله",  # "I ask him" (the كتبت … اساله correspondence-matn tail verb)
         # 3rd-person transmission verb "narrated" (da#311) — the sibling of the
         # 1st-person حدثنا/حدثني already above; not previously present, so a name
         # followed by حدث/حدثت (e.g. "فلان حدث عن فلان") survived untruncated.
@@ -425,6 +465,29 @@ _ISNAD_BOUNDARY = frozenset(
         "روت",  # "she narrated" (fem.) — sibling of روى, the truncation-boundary
         # (not leading-opener) form: a real name followed by "روت …" truncates
         # and recovers the leading name, same as قالت/حدثت above.
+        # dual "they two said" + و/ف-prefixed said (da#311) — a real-co-narrator
+        # compound "X و Y قالا" or a "<name> وقال …" continuation. NONE is a name
+        # component; truncating recovers the leading narrator(s) and drops the
+        # trailing speech verb, so "عمرو الناقد وزهير بن حرب قالا" → the preserved
+        # co-narrator span "عمرو الناقد وزهير بن حرب" (compound kept, verb gone).
+        "قالا",
+        "قالتا",
+        "وقال",
+        "وقالت",
+        "وقالوا",
+        "فقالوا",
+        # bare 3rd-person "heard" (da#311) — sibling of سمعت already above; a real
+        # name followed by "سمع فلانا" truncates to the leading name.
+        "سمع",
+        # 1st/3rd-person "wrote (to)" (da#311) — a maktub/correspondence matn
+        # opener ("كتبت الى ابي الحسن …"); كتب/كتبت is never a name component.
+        "كتب",
+        # subordinating "that he/she/they …" (da#311) — the ه/ها/هم-suffixed ان
+        # forms the bare "ان" boundary misses ("عاءشه انها …", "ابي جعفر انه سءل").
+        "انه",
+        "انها",
+        "انهم",
+        "انهما",
         # isnad subordinators / relative pronouns / clause-opening particles
         "عن",
         "ان",
@@ -473,6 +536,8 @@ _MATN_DENSITY = frozenset(
         "حدث",  # da#311: 3rd-person "narrated", sibling of قال/كان in this backstop
         "حدثت",
         "روت",
+        "قالا",  # da#311: dual "they two said"
+        "قالتا",
     }
 )
 
@@ -536,6 +601,13 @@ _MATN_OPENERS = frozenset(
         "روى",  # "he narrated" (3rd person; a lone leading opener, distinct
         # from the truncation-boundary سمعت/حدثنا/حدثني/اخبرنا/اخبرني/حدث/حدثت
         # forms above, which recover a preceding real name instead)
+        "كتبت",  # "I wrote (to)" — maktub/correspondence matn opener ("كتبت الى
+        # ابي الحسن اساله …"); the 3rd-person كتب is an _ISNAD_BOUNDARY token.
+        "يا",  # vocative "O …" ("يا رسول الله", "يا محمد", "يا معاذ …") — a
+        # matn address, never a name; no Arabic name begins with the particle يا.
+        "تزوج",  # "he married" ("تزوج النبي ميمونه" — Prophet-marriage matn); never
+        # a name (the noun زوج is handled as an apposition connector separately).
+        "رءيا",  # "[I] saw" (رأيا; a رايت variant); a matn eyewitness opener.
     }
 )
 
@@ -554,6 +626,13 @@ _GRADING_FORMULAE: tuple[tuple[str, ...], ...] = (
     ("حسن", "غريب"),
     ("صحيح", "غريب"),
     ("متفق", "عليه"),
+    # al-Tirmidhī editorial commentary (da#311): "… روى هذا الحديث …" ("… narrated
+    # this hadith …"), "روى غير واحد" ("more than one narrated"). The whole span is
+    # the compiler's commentary keyed on his own kunya (ابو عيسى / ابو داود), not a
+    # narration BY a distinct narrator — the compiler has his own clean canonical.
+    # Neither "هذا الحديث" nor "غير واحد" is ever a component of a real name.
+    ("هذا", "الحديث"),
+    ("غير", "واحد"),
 )
 
 
@@ -581,6 +660,18 @@ _MATN_SENTENCE_MIN_TOKENS = 3
 # name (ابو X, X بن Y) already clears this; ``_NASAB_CONNECTORS`` count >= 2 spares
 # unconditionally.
 _NASAB_SPARE_DENSITY = 0.15
+
+# Arabic-Indic digits (U+0660–U+0669) alongside ASCII 0–9, for the numeric-leading
+# mis-parse guard (da#311).
+_ARABIC_INDIC_DIGITS = "٠١٢٣٤٥٦٧٨٩"
+
+
+def _is_number_token(token: str) -> bool:
+    """True when *token* is a bare number (ASCII or Arabic-Indic digits) (da#311)."""
+    stripped = token.strip(_EDGE_PUNCT)
+    if not stripped:
+        return False
+    return all(c.isdigit() or c in _ARABIC_INDIC_DIGITS for c in stripped)
 
 
 def strip_markup(name: str | None) -> str:
@@ -671,6 +762,50 @@ def _is_prophet_reference(tokens: list[str]) -> bool:
     return tokens[0] in _PROPHET_TITLE_LEADERS and len(tokens) >= 2 and tokens[1] == "الله"
 
 
+def _prophet_ref_len(tokens: list[str], i: int) -> int:
+    """Length of a Prophet reference STARTING at index *i*, else 0 (da#311).
+
+    Returns 1 for a sole title (``النبي`` / ``الرسول``) and 2 for ``رسول``/``نبي``
+    immediately followed by ``الله`` (``رسول الله`` "Messenger of Allah"). The
+    positional sibling of :func:`_is_prophet_reference`, which only inspects the
+    leader; this locates a reference anywhere in the span.
+    """
+    if i >= len(tokens):
+        return 0
+    if tokens[i] in _PROPHET_TITLE_SOLE:
+        return 1
+    if tokens[i] in _PROPHET_TITLE_LEADERS and i + 1 < len(tokens) and tokens[i + 1] == "الله":
+        return 2
+    return 0
+
+
+def _truncate_at_prophet_apposition(tokens: list[str]) -> list[str] | None:
+    """Cut a ``<name> <connector> <Prophet-ref>`` apposition, keeping the name (da#311).
+
+    A real narrator described BY her relation to the Prophet — ``"عاءشه زوج النبي"``
+    ("Aisha, wife of the Prophet", mc-196 fawaz), ``"X بنت النبي"`` — is stored as a
+    canonical whose name is the trimmed apposition (the trailing قالت + benediction
+    were already stripped at NER time). The real narrator is the LEADING name, so we
+    truncate at the :data:`_APPOSITION_CONNECTORS` token whose next token opens a
+    Prophet reference (:func:`_prophet_ref_len`) and recover it.
+
+    * ``["عاءشه","زوج","النبي"]`` → ``["عاءشه"]`` (recover Aisha)
+    * ``["عاءشه","بنت","سعد"]`` → unchanged (بنت followed by a real name, not a
+      Prophet ref — a genuine nasab, never cut)
+    * ``["زوج","النبي"]`` (connector LEADS, no name before it) → ``None`` (drop —
+      a bare "wife of the Prophet" names no recoverable narrator)
+
+    Returns the truncated leading tokens, ``None`` to drop, or the tokens unchanged
+    when no Prophet-apposition is present.
+    """
+    for i, tok in enumerate(tokens):
+        if tok in _APPOSITION_CONNECTORS and _prophet_ref_len(tokens, i + 1) > 0:
+            if i == 0:
+                return None
+            return tokens[:i]
+    return tokens
+
+
 def _is_matn_sentence(tokens: list[str], kept_text: str, was_truncated: bool) -> bool:
     """True when the span is a hadith-matn body / grading commentary, not a name (da#308).
 
@@ -714,6 +849,13 @@ def _is_matn_sentence(tokens: list[str], kept_text: str, was_truncated: bool) ->
     # Diacritics-insensitive, hamza/alif-normalized token forms (so a vocalized
     # ``بْنُ`` counts toward nasab density, and the matn sets match reliably).
     bare = [normalize_arabic(t) for t in tokens]
+
+    # (0) Vocative particle anywhere (da#311): the standalone token يا ("O …")
+    #     opens a matn address ("… قلت يا رسول الله", "… صدقت يا محمد") that the
+    #     leading-only opener check misses when a matn word precedes it. No Arabic
+    #     name carries the vocative particle يا as a whole token at any position.
+    if "يا" in bare:
+        return True
 
     # (1) Grading / commentary formula (token-anchored) — never a name component.
     if any(_contains_token_sequence(bare, formula) for formula in _GRADING_FORMULAE):
@@ -893,6 +1035,15 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
     if not tokens:
         return None
 
+    # 3b. Numeric-leading mis-parse (da#311). A span whose FIRST token is a bare
+    #     number (ASCII or Arabic-Indic digits) is a thaqalayn parser artifact — a
+    #     hadith ordinal leaked in front of an isnad fragment ("5659 و روى محمد بن
+    #     ابي عمير"). No real narrator name begins with a digit, and the trailing
+    #     narrator (if any) has a clean canonical elsewhere, so the mis-parsed row
+    #     is dropped rather than half-recovered.
+    if _is_number_token(tokens[0]):
+        return None
+
     # 3c. Arabic isnad/matn boundary truncation (da#258 classes 4+5). Cut the span
     #     at the first matn-verb / isnad-connective / relative-pronoun / gloss token
     #     ("عن", "ان", "الذي", "كان", "قالت", "هو", …), keeping the real leading
@@ -911,6 +1062,21 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
     # boundary rule at all — see the subject-led signal in _is_matn_sentence.
     was_truncated = len(truncated) < len(tokens)
     tokens = truncated
+
+    # 3d. Prophet-apposition truncation (da#311). A real narrator stored as the
+    #     trimmed apposition "<name> زوج/بنت النبي" ("Aisha, wife of the Prophet"
+    #     — mc-196 fawaz, the trailing قالت + benediction already stripped at NER
+    #     time) has no isnad-boundary verb, so 3c leaves it whole. Cut at the
+    #     relational connector whose next token is a Prophet reference, recovering
+    #     the leading name ("عاءشه زوج النبي" → "عاءشه"); a bare "زوج النبي" (no
+    #     name before the connector) drops. "عاءشه بنت سعد" (بنت + a real name, not
+    #     a Prophet ref) is never touched.
+    appos = _truncate_at_prophet_apposition(tokens)
+    if appos is None:
+        return None
+    if len(appos) < len(tokens):
+        was_truncated = True
+        tokens = appos
 
     # 4. Over-long span → phrase / sentence / mis-parsed hadith body.
     if len(tokens) > _MAX_NAME_TOKENS:

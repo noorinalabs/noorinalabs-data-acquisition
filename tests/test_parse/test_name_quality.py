@@ -589,45 +589,96 @@ class TestMatnSentenceGate:
 class TestShiaDialogueMatnResidual:
     """da#311 — _MATN_OPENERS missed dominant Shia dialogue-hadith matn shapes.
 
-    Run 5 left ~15% benediction/matn contamination in narrators_canonical,
-    concentrated in thaqalayn (28.3%) and fawaz (18.8%); itqan/lk were clean. Root
-    cause: three gaps in the da#308 gate — missing dialogue/isnad openers
-    (``سألت``/``سُئل``/``روى``), a subject-led matn shape the gate only checked
-    ``bare[0]`` for, and a short-residue interaction with the taṣliya ligature ``ﷺ``.
+    Run 5 left residual benediction/matn contamination in narrators_canonical,
+    concentrated in thaqalayn/fawaz; itqan/lk were clean. Root causes: missing
+    dialogue/isnad openers (``سألت``/``سُئل``/``روى``/``كتبت``, dual ``قالا``,
+    و/ف-prefixed said, bare ``سمع``), a Prophet-*apposition* the gate left whole
+    (``"عاءشه زوج النبي"`` — the mc-196 fawaz canonical, its trailing قالت +
+    benediction already stripped at NER time), a vocative ``يا`` leader, and a
+    short-residue interaction with the taṣliya ligature ``ﷺ``.
+
+    Where the real narrator is RECOVERABLE (a leading name before an apposition /
+    speech verb) the gate now CLEANS to that name rather than dropping the row —
+    losing a real, heavily-cited companion (Aisha, mc-196) to a hard drop is worse
+    than recovering her (coordinator directive: prefer clean over drop).
     """
 
-    # --- DROP: the issue's 4 canonical mention-backed contamination examples ---
+    # --- DROP: issue examples where NO real narrator leads the matn (the speaker
+    # is an elided "I", or the span is a bare Prophet action) → nothing to recover.
     @pytest.mark.parametrize(
         "matn",
         [
-            # mc 196, fawaz — subject-led: name + appositive + trailing قالت,
-            # recovered name itself carries a bare Prophet reference (النبي)
-            "عائشة، زوج النبي ﷺ قالت",
-            # mc 149, fawaz — سألت "I asked" opener (missing from _MATN_OPENERS)
+            # mc 149, fawaz — سألت "I asked" opener; the narrator is the elided
+            # asker, Abu al-Hasan is the askee → no leading name to recover
             "سألت أبا الحسن (عليه السلام",
             # mc 49, fawaz — short residue: taṣliya ligature ﷺ inflated the
             # token count and masked the 2-token "نهى النبي" residue
             "نهى النبي ﷺ",
-            # mc 82, thaqalayn — سُئل "was asked" opener (missing)
+            # mc 82, thaqalayn — سُئل "was asked" opener leads → drop
             "سُئل أبو عبد الله (عليه السلام",
         ],
     )
     def test_issue_evidence_examples_dropped(self, matn: str) -> None:
         assert clean_narrator_name(normalize_arabic(matn)) is None
 
-    # --- DROP: additional subject-led matn (2nd-position speech verb) ---
+    # --- RECOVER: the mc-196 subject-led / Prophet-apposition case cleans to the
+    # real leading narrator (Aisha), NOT a hard drop — her mentions attach to the
+    # real node instead of being lost.
+    @pytest.mark.parametrize(
+        "matn,expected",
+        [
+            # mc 196, fawaz — "Aisha, wife of the Prophet, said" → Aisha
+            ("عائشة، زوج النبي ﷺ قالت", "عاءشه"),
+            # the trimmed apposition as actually stored in the canonical (no verb)
+            ("عاءشه زوج النبي", "عاءشه"),
+            # daughter-of / wife-of the Prophet appositions + a trailing verb
+            ("زينب بنت النبي حدثت", "زينب"),
+            ("فاطمه بنت النبي روت", "فاطمه"),
+            # رسول + الله (not just النبي/الرسول) as the apposition's Prophet ref
+            ("هند زوجه رسول الله قالت", "هند"),
+            # apposition with no trailing verb — still recovers the bare name
+            ("ام سلمه زوج النبي", "ام سلمه"),
+        ],
+    )
+    def test_subject_led_apposition_recovers_name(self, matn: str, expected: str) -> None:
+        assert clean_narrator_name(normalize_arabic(matn)) == normalize_arabic(expected)
+
+    # --- DROP: a bare apposition with NO leading name ("wife of the Prophet") ---
+    @pytest.mark.parametrize("matn", ["زوج النبي", "بنت رسول الله"])
+    def test_bare_apposition_dropped(self, matn: str) -> None:
+        assert clean_narrator_name(normalize_arabic(matn)) is None
+
+    # --- Recall shapes added in da#311's second pass (real-data survivors) ---
+    @pytest.mark.parametrize(
+        "matn,expected",
+        [
+            # compound co-narrator join + dual "they said" → preserve BOTH
+            # co-narrators, strip only the trailing قالا (never drop the names)
+            ("عمرو الناقد وزهير بن حرب قالا", "عمرو الناقد وزهير بن حرب"),
+            ("ابو الطاهر وحرمله قالا", "ابو الطاهر وحرمله"),
+            # bare سمع / trailing روى → recover the leading narrator
+            ("ابو ضمره سمع عمر بن عبد العزيز روى", "ابو ضمره"),
+            # "that he/she …" subordinator (ه/ها-suffixed ان the bare ان misses)
+            ("عاءشه انها", "عاءشه"),
+            ("ابي جعفر عليه السلام انه سءل", "ابي جعفر"),
+            # trailing 3rd-person "narrated"
+            ("ابو تمي حدث", "ابو تمي"),
+        ],
+    )
+    def test_recall_shapes_recover_lead(self, matn: str, expected: str) -> None:
+        assert clean_narrator_name(normalize_arabic(matn)) == normalize_arabic(expected)
+
+    # --- DROP: leading vocative / و-prefixed said / كتبت correspondence opener ---
     @pytest.mark.parametrize(
         "matn",
         [
-            # بنت النبي ("daughter of the Prophet") appositive + حدثت, the
-            # حدث/حدثت sibling of the قال/قالت subject-led pattern above
-            "زينب بنت النبي حدثت",
-            "فاطمه بنت النبي روت",
-            # رسول + الله (not just النبي/الرسول) surviving into the retained span
-            "هند زوجه رسول الله قالت",
+            "يا رسول الله",  # vocative address, never a name
+            "يا محمد",
+            "وقال ابن رافع",  # "and Ibn Rafi said" — leading و+said
+            "كتبت الى ابي الحسن اساله",  # "I wrote to Abu al-Hasan asking him"
         ],
     )
-    def test_subject_led_matn_dropped(self, matn: str) -> None:
+    def test_leading_vocative_and_prefixed_verbs_dropped(self, matn: str) -> None:
         assert clean_narrator_name(normalize_arabic(matn)) is None
 
     # --- DROP: short residue — verb-opener + single noun, no ligature involved ---

@@ -32,11 +32,17 @@ never having survived NER, not a merge that could ever affect a surviving
 narrator's own identity. Mentions are DROPPED, never reassigned to a
 different canonical id (the source text was never a real name to begin with).
 
-Idempotent: re-running against an already-scrubbed output finds nothing further
-to drop (``clean_narrator_name`` is a pure function of ``name_ar_normalized``,
-which does not change once scrubbed). Read-only over the input directories —
-never mutates ``data/curated`` / ``data/staging`` in place; always writes to a
-separate ``--output-dir``.
+Beyond dropping, the scrub also **rewrites** a surviving row's
+``name_ar_normalized`` to ``clean_narrator_name``'s recovered value when the gate
+recovered a real leading narrator from a polluted span (``"عاءشه زوج النبي"`` →
+``"عاءشه"``) — the "prefer clean over drop" half, so a recoverable real narrator
+(and its mention edges) is kept, not lost.
+
+Idempotent: ``clean_narrator_name`` is a pure, idempotent function of
+``name_ar_normalized`` (``clean(clean(x)) == clean(x)``), so re-running against an
+already-scrubbed output drops nothing further and rewrites nothing further.
+Read-only over the input directories — never mutates ``data/curated`` /
+``data/staging`` in place; always writes to a separate ``--output-dir``.
 """
 
 from __future__ import annotations
@@ -69,19 +75,45 @@ MENTIONS_MUHADDITHAT = "narrator_mentions_resolved_muhaddithat.parquet"
 _CANONICAL_REF_COLUMNS = ("canonical_narrator_id", "canonical_id")
 
 
-def _prune_canonical(curated_dir: Path, output_dir: Path) -> tuple[int, int, set[str]]:
-    """Filter narrators_canonical.parquet through the corrected gate.
+def _prune_canonical(curated_dir: Path, output_dir: Path) -> tuple[int, int, int, set[str]]:
+    """Prune AND clean narrators_canonical.parquet through the corrected gate.
 
-    Returns ``(rows_before, rows_after, dropped_canonical_ids)``.
+    Two operations, mirroring ``clean_narrator_name``'s own return contract:
+
+    * **DROP** a row whose ``clean_narrator_name`` returns ``None`` (unrecoverable
+      matn — the "name" is a whole hadith body / bare Prophet action).
+    * **CLEAN (rewrite)** a surviving row's ``name_ar_normalized`` to the cleaned
+      value when the gate recovered a real leading narrator from a polluted span
+      (``"عاءشه زوج النبي"`` → ``"عاءشه"``, ``"ابو تمي حدث"`` → ``"ابو تمي"``).
+      Rewriting the display/clustering key is safe: ``canonical_id`` is unchanged,
+      so no mention / merge_log / parallel_links reference is orphaned. This is the
+      "prefer clean over drop" half — dropping a recoverable real narrator (and its
+      mention edges) would be a regression. Re-clustering the rewritten names is a
+      full-resolve concern, deliberately out of scope for a post-hoc scrub.
+
+    Returns ``(rows_before, rows_after, rows_cleaned, dropped_canonical_ids)`` where
+    ``rows_cleaned`` counts surviving rows whose stored name was rewritten.
     """
     table = pq.read_table(curated_dir / NARRATORS)
     names = table.column("name_ar_normalized").to_pylist()
     canonical_ids = table.column("canonical_id").to_pylist()
-    keep_mask = [clean_narrator_name(n) is not None for n in names]
+    cleaned = [clean_narrator_name(n) for n in names]
+
+    keep_mask = [c is not None for c in cleaned]
     dropped_ids = {cid for cid, keep in zip(canonical_ids, keep_mask, strict=True) if not keep}
+    rows_cleaned = sum(
+        1 for original, c in zip(names, cleaned, strict=True) if c is not None and c != original
+    )
+
     kept = table.filter(pa.array(keep_mask))
+    # Rewrite name_ar_normalized on the surviving rows to the cleaned value.
+    kept_cleaned_names = [c for c in cleaned if c is not None]
+    col_idx = kept.schema.get_field_index("name_ar_normalized")
+    kept = kept.set_column(
+        col_idx, "name_ar_normalized", pa.array(kept_cleaned_names, type=pa.string())
+    )
     pq.write_table(kept, output_dir / NARRATORS)
-    return table.num_rows, kept.num_rows, dropped_ids
+    return table.num_rows, kept.num_rows, rows_cleaned, dropped_ids
 
 
 def _prune_by_canonical_column(
@@ -135,10 +167,11 @@ def _prune_parallel_links(
 def run_scrub(curated_dir: Path, staging_dir: Path, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    nc_before, nc_after, dropped_ids = _prune_canonical(curated_dir, output_dir)
+    nc_before, nc_after, nc_cleaned, dropped_ids = _prune_canonical(curated_dir, output_dir)
     print(
         f"{NARRATORS}: {nc_before} -> {nc_after} "
-        f"(dropped {len(dropped_ids)} matn/pollution canonical rows)"
+        f"(dropped {len(dropped_ids)} matn/pollution canonical rows; "
+        f"cleaned/rewrote {nc_cleaned} recovered names)"
     )
 
     mentions_result = _prune_by_canonical_column(
