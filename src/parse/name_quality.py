@@ -172,14 +172,38 @@ _CONNECTIVE_TOKENS = frozenset({"يعني"})
 # is an isnad continuation fragment ("و عنه", "و روى …"), never a name start.
 _WAW_CONJUNCTION = normalize_arabic("و")
 
-# Isnad-formula continuation words (normalized) — "by his/the chain" fragments a
-# numeric mis-parse can leave as the WHOLE remainder ("3 و باسناده" → "باسناده").
-# Structural isnad vocabulary (same class as _ISNAD_BOUNDARY), never a narrator
-# name; only checked inside the numeric-mis-parse recovery so ordinary spans are
-# untouched (da#311 round-4 — the lone deep-tail residue of the digit-strip).
+# Isnad-formula continuation words (normalized) — "by his/the chain", "from him",
+# "was narrated" fragments a numeric mis-parse can leave as the WHOLE remainder
+# ("3 و باسناده" → "باسناده", "1 روي عن فلان" → "روي", "1 قد روي" → "قد روي").
+# Structural isnad/matn vocabulary (same class as _ISNAD_BOUNDARY / _MATN_OPENERS),
+# never a narrator name. Only consulted inside the numeric-mis-parse recovery (via
+# :func:`_is_isnad_residue_token`) so ordinary spans are untouched (da#311 round-4b
+# — Kavitha's review caught attached-waw "وعنه"/"وباسناده", the passive verb "روي",
+# the particle "قد", and bare mubham collectives slipping the round-4 digit-strip).
 _ISNAD_FORMULA_FRAGMENTS = frozenset(
-    normalize_arabic(w) for w in ("باسناده", "بإسناده", "بالاسناد", "وبالاسناد", "اسناده", "عنه")
+    normalize_arabic(w)
+    for w in ("باسناده", "بإسناده", "بالاسناد", "اسناده", "عنه", "روي", "روى", "قد")
 )
+
+
+def _is_isnad_residue_token(token: str) -> bool:
+    """True when *token* is a bare isnad/matn function word, not a name component.
+
+    Folds a LEADING attached-waw proclitic ("وعنه" → "عنه", "وباسناده" → "باسناده")
+    before matching, so the و-prefixed continuation forms a numeric mis-parse leaves
+    behind ("2 وعنه", "1 وباسناده") are recognised — while a real waw-initial name
+    ("وهب" → "هب", "وكيع" → "كيع") folds to a non-residue stem and is NOT matched.
+    Also treats a bare mubham collective ("جماعه", "قوم" — a group/people, minted
+    without the partitive "من" that guard 5 needs) as residue. da#311 round-4b.
+    """
+    norm = normalize_arabic(token)
+    dewawed = norm[1:] if norm.startswith("و") and len(norm) > 1 else norm
+    return (
+        norm in _ISNAD_FORMULA_FRAGMENTS
+        or dewawed in _ISNAD_FORMULA_FRAGMENTS
+        or norm in _MUBHAM_LEADERS
+    )
+
 
 # Honorific / eulogy phrases (normalized) that name no narrator. Stripped from
 # anywhere in the span (they appear appended to real names too).
@@ -634,6 +658,9 @@ _MATN_OPENERS = frozenset(
         "روى",  # "he narrated" (3rd person; a lone leading opener, distinct
         # from the truncation-boundary سمعت/حدثنا/حدثني/اخبرنا/اخبرني/حدث/حدثت
         # forms above, which recover a preceding real name instead)
+        "روي",  # "was narrated" (passive, ya-final — normalize_arabic does NOT
+        # fold ى→ي so this is a DISTINCT token from روى above; da#311 round-4b, a
+        # lone leading روي slips truncation and mints a 541-mention junk narrator)
         "كتبت",  # "I wrote (to)" — maktub/correspondence matn opener ("كتبت الى
         # ابي الحسن اساله …"); the 3rd-person كتب is an _ISNAD_BOUNDARY token.
         "يا",  # vocative "O …" ("يا رسول الله", "يا محمد", "يا معاذ …") — a
@@ -1168,15 +1195,14 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
     #     its merits (dropping "و عنه"→"عنه", "و روى …"→boundary-drop) instead of the
     #     junk surfacing. Scoped to the mis-parse case (stripped_number) so ordinary
     #     compound "X و Y" spans — where the waw is MEDIAL — are never touched.
+    #     Strip a leaked SEPARATE waw the ordinal sat in front of ("5659 و روى …",
+    #     "2 و عنه") so the residue underneath is exposed to the general all-residue
+    #     guard (5b) below; scoped to the mis-parse case so a MEDIAL waw in an
+    #     ordinary compound ("X و Y") is never touched.
     if stripped_number:
         while tokens and normalize_arabic(tokens[0]) == _WAW_CONJUNCTION:
             tokens.pop(0)
             raw_tokens.pop(0)
-        #     After the ordinal (+ leaked waw) is gone, a remainder consisting only
-        #     of an isnad-formula word ("باسناده", "عنه", "وبالاسناد …") is a chain
-        #     continuation, not a narrator — drop it (the digit-strip's lone residue).
-        if all(normalize_arabic(t) in _ISNAD_FORMULA_FRAGMENTS for t in tokens):
-            return None
     if not tokens:
         return None
 
@@ -1232,6 +1258,22 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
 
     # 5. Mubham (anonymous collective) descriptor → not a named narrator.
     if tokens[0] in _MUBHAM_LEADERS and "من" in tokens:
+        return None
+
+    # 5b. All-residue span (da#311 round-4b — Kavitha's review). A span whose EVERY
+    #     token is bare isnad/matn residue — a chain-formula word ("باسناده"), its
+    #     attached-waw form ("وعنه"/"وباسناده"), the passive narrate verb ("روي"),
+    #     the particle ("قد"/"قد روي"), or a bare mubham collective *without* the
+    #     partitive "من" that guard 5 requires ("رجل" = "a man" mc-4920, "بعض",
+    #     "شيخ", "جماعه", "ناس") — is an isnad continuation / anonymous descriptor,
+    #     never a named narrator. This closes the bare-collective gap guard 5 left
+    #     open (it minted high-mention pollution nodes — the same أبيه class this
+    #     series exists to eliminate) AND drops the residue a numeric mis-parse
+    #     leaves behind. _is_isnad_residue_token folds a leading attached-waw so a
+    #     real waw-initial name ("وهب", "وكيع") is NOT matched; a mixed span with any
+    #     real name token ("رجل من الانصار" already caught by 5; "شيخ الطاءفه")
+    #     survives here because not ALL its tokens are residue.
+    if all(_is_isnad_residue_token(t) for t in tokens):
         return None
 
     # 6. Bare relational-pronoun reference ("his father", "his grandfather", "my

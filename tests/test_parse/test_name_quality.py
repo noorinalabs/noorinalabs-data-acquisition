@@ -926,3 +926,39 @@ class TestNumericPrefixRecovery:
     )
     def test_no_false_drop_from_substring_or_medial_waw(self, name: str) -> None:
         assert clean_narrator_name(normalize_arabic(name)) == normalize_arabic(name)
+
+
+class TestIsnadResidueFloor:
+    """da#311 round-4b (Kavitha's review) — all-residue spans are not narrators.
+
+    The round-4 numeric-strip newly admitted isnad/matn residue that the base gate
+    never caught: the attached-waw continuation forms ("وعنه"/"وباسناده"), the
+    passive narrate verb "روي" (distinct token from روى — normalize_arabic does not
+    fold ى→ي), the particle "قد"/"قد روي", and bare mubham collectives WITHOUT the
+    partitive "من" that guard 5 requires ("رجل" = "a man" was a mc-4920 pollution
+    node). Rule 5b drops a span whose every token is such residue.
+    """
+
+    # --- DROP: attached-waw isnad fragments (numeric-derived and bare) ---
+    @pytest.mark.parametrize("junk", ["2 وعنه", "1 وباسناده", "وعنه", "وباسناده"])
+    def test_attached_waw_isnad_fragment_dropped(self, junk: str) -> None:
+        assert clean_narrator_name(normalize_arabic(junk)) is None
+
+    # --- DROP: the passive verb روي as a lone residue (was 541-mention junk) ---
+    @pytest.mark.parametrize("junk", ["روي", "3 روي", "1 روي عن فلان", "قد روي", "1 قد روي"])
+    def test_passive_narrate_verb_dropped(self, junk: str) -> None:
+        assert clean_narrator_name(normalize_arabic(junk)) is None
+
+    # --- DROP: bare mubham collectives without the partitive من (guard-5 gap) ---
+    @pytest.mark.parametrize("junk", ["رجل", "بعض", "شيخ", "ناس", "نفر", "قوم", "جماعه", "1 جماعه"])
+    def test_bare_mubham_collective_dropped(self, junk: str) -> None:
+        assert clean_narrator_name(normalize_arabic(junk)) is None
+
+    # --- PRECISION: real waw-initial names and mixed spans with a real token survive
+    # (residue drop requires EVERY token to be residue) ---
+    @pytest.mark.parametrize(
+        "name",
+        ["وهب بن منبه", "وكيع بن الجراح", "وائل بن حجر"],
+    )
+    def test_waw_initial_real_name_survives(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) == normalize_arabic(name)
