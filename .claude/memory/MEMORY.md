@@ -23,6 +23,7 @@ Recording convention: create/edit `.claude/memory/<kebab-slug>.md` with the stan
 - [Disambiguate checkpoint resume](project_disambiguate_checkpoint_resume.md) — da#268; mention_id is uuid4 (random per NER run) → resume must reuse file via `--from-step disambiguate`; fingerprint = content_hash+mention_id_hash; graph keys canonical_narrator_id not mention_id.
 - [Unified resolve checkpoint](project_resolve_checkpoint_unified.md) — da#272; shared src/resolve/_checkpoint.py (7 conventions); dedup FAISS-phase (reload index on resume) + parallels anchor-scan now resume; ner/bio_promote exempt; CLI --no-resume; fuzzy_cluster deferred.
 - [Fuzzy-cluster throughput](project_fuzzy_cluster_throughput.md) — da#270; cluster cdist is O(K²) over flattened match-keys ~99% of cost; mega-alias + pollution-name tail inflates K + block count. Fix = per-record key(64)+blocking-token(64) caps.
+- [Matn-sentence pollution + UI-surface validation](project_matn_sentence_pollution_ui.md) — da#317; ~26% of narrators are zero-degree matn-sentence orphans; da#311 degree-based + wrong-hamza (شعائر vs شعاءر) validation missed it. Validate on id-ordered UI, use normalized hamza. Prod promoted 07-06 anyway (weighted pollution ~0); tail=da#317 carry-forward. Siblings da#318, ig#1166.
 
 ## Engineering gotchas (feedback)
 
