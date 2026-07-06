@@ -33,3 +33,4 @@ Recording convention: create/edit `.claude/memory/<kebab-slug>.md` with the stan
 - [count>=0 masks empty graph](feedback_count_ge_zero_masks_empty_graph.md) — real-DB count(r)>=0 asserts nothing; read back the graph (concrete count + per-row keys).
 - [WSL2 local Docker](feedback_wsl2_no_local_docker.md) — RESOLVED 2026-06-12: local Docker works (neo4j:5 ran locally+CI); keep skip-guard, CI may flake. da#89.
 - [structural-ontology gate commit friction](feedback_structural_gate_commit_friction.md) — regen index w/ python3 NOT uv run (line-number drift); untracked .claude/worktrees breaks pre-commit stash. #723.
+- [Dual-detector cross_sect authority](feedback_dual_detector_cross_sect_authority.md) — two producers of one composed artifact must derive every field from the SAME authoritative source (sect column, not corpus allowlist); green-CI/red-local on embedder-dependent test = real divergence, not flake. da#321/PR#322.
