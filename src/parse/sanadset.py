@@ -96,6 +96,18 @@ _SANAD_RE: re.Pattern[str] = re.compile(r"<SANAD>(.*?)</SANAD>", re.DOTALL)
 _MATN_RE: re.Pattern[str] = re.compile(r"<MATN>(.*?)</MATN>", re.DOTALL)
 _NAR_RE: re.Pattern[str] = re.compile(r"<NAR>(.*?)</NAR>", re.DOTALL)
 
+# Residual structural markup (da#318). Malformed upstream rows carry a doubled
+# ``<SANAD>…<MATN>`` segment closed by a single ``</MATN>``, so ``_MATN_RE``'s
+# first-open→first-close capture swallows a second ``<MATN>`` open, an orphan
+# ``</SANAD>``, and ``<NAR>…</NAR>`` tags verbatim into the extracted matn
+# (measured: 13.5% of rows carried literal markup in ``matn_ar``). Strip any
+# residual structural tag from the matn *before store* — mirrors the
+# narrator-side ``name_quality._MARKUP_RE`` fix (da#247). The ``</?…\s*/?>``
+# shape also covers a self-closing ``<NAR/>``. This is applied to ``matn_ar``
+# ONLY — never to ``isnad_raw_ar``, which legitimately carries the ``<NAR>`` tags
+# that ``_extract_narrator_mentions`` consumes.
+_STRUCTURAL_TAG_RE: re.Pattern[str] = re.compile(r"</?(?:NAR|SANAD|MATN)\s*/?>")
+
 _CHUNK_SIZE = 50_000
 _SOURCE_CORPUS = "sanadset"
 _SECT = "sunni"
@@ -229,6 +241,29 @@ def _extract_tag(pattern: re.Pattern[str], text: str) -> str | None:
         content = m.group(1).strip()
         return content if content else None
     return None
+
+
+def _strip_structural_tags(text: str | None) -> str | None:
+    """Remove residual ``<NAR>``/``<SANAD>``/``<MATN>`` structural markup (da#318).
+
+    Applied to extracted matn text before store so a malformed doubled-SANAD row
+    does not leak literal structural tags into ``matn_ar`` (see ``_STRUCTURAL_TAG_RE``).
+
+    A **well-formed** matn carries no such tags and is returned unchanged — the
+    early ``search`` guard means whitespace/newlines inside a clean matn are never
+    touched. When markup IS present, each tag is replaced with a single space (not
+    removed outright) so Arabic tokens abutting a swallowed tag are not silently
+    concatenated, and runs of whitespace are then collapsed. **Idempotent**: the
+    cleaned output contains no tags, so a second application hits the guard and
+    returns an equal string. Returns ``None`` if the result is empty (mirrors
+    ``_extract_tag``).
+    """
+    if text is None:
+        return None
+    if not _STRUCTURAL_TAG_RE.search(text):
+        return text
+    stripped = " ".join(_STRUCTURAL_TAG_RE.sub(" ", text).split())
+    return stripped if stripped else None
 
 
 def _extract_narrator_mentions(
@@ -423,9 +458,12 @@ def _process_chunk(
             str(row_offset + idx),
         )
 
-        # Extract SANAD and MATN content
+        # Extract SANAD and MATN content. The matn is additionally scrubbed of any
+        # residual structural markup a malformed doubled-SANAD row leaks into the
+        # first-open→first-close capture (da#318). ``sanad_text`` is deliberately
+        # left tag-bearing — it feeds ``_extract_narrator_mentions`` via ``<NAR>``.
         sanad_text = _extract_tag(_SANAD_RE, full_text)
-        matn_text = _extract_tag(_MATN_RE, full_text)
+        matn_text = _strip_structural_tags(_extract_tag(_MATN_RE, full_text))
 
         # Handle "No SANAD" rows
         isnad_raw_ar: str | None = None
