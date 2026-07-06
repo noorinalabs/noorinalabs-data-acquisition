@@ -55,10 +55,6 @@ logger = get_logger(__name__)
 
 __all__ = ["run", "run_dedup"]
 
-# Source corpora classified by sect
-_SUNNI_SOURCES: frozenset[str] = frozenset({"lk", "sanadset", "sunnah", "fawaz", "open_hadith"})
-_SHIA_SOURCES: frozenset[str] = frozenset({"thaqalayn"})
-
 # Sentence-transformer used for hadith-matn embeddings. Pinned name so the resume
 # meta can refuse to reuse embeddings produced by a different model.
 _MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
@@ -81,7 +77,10 @@ _CHUNKS_PER_WORKER = 4
 # init cannot make the resumed search diverge from the crashed run's.
 _DEDUP_SEARCH_BLOCK = 10_000
 _DEDUP_CHECKPOINT_EVERY_N_BLOCKS = 4
-_DEDUP_CHECKPOINT_SCHEMA_VERSION = 1
+# v2 (da#321): stored `cross_sects` are now derived from the authoritative
+# `sect` column, not the corpus-name allowlist — bump so a checkpoint written by
+# the old formula is discarded rather than restored with stale cross_sect values.
+_DEDUP_CHECKPOINT_SCHEMA_VERSION = 2
 _FAISS_INDEX_FILENAME = "hadith_embeddings.faiss"
 
 
@@ -105,21 +104,34 @@ def _classify_pair(score: float) -> VariantType:
     return VariantType.THEMATIC
 
 
-def _is_cross_sect(corpus_a: str, corpus_b: str) -> bool:
-    """Return True when hadiths come from different sectarian traditions."""
-    a_sunni = corpus_a in _SUNNI_SOURCES
-    b_sunni = corpus_b in _SUNNI_SOURCES
-    a_shia = corpus_a in _SHIA_SOURCES
-    b_shia = corpus_b in _SHIA_SOURCES
-    return (a_sunni and b_shia) or (a_shia and b_sunni)
+def _is_cross_sect(sect_a: str | None, sect_b: str | None) -> bool:
+    """Return True when two hadiths carry different (non-empty) ``sect`` labels.
+
+    Reads the authoritative hadith ``sect`` column — the same signal the
+    deterministic lexical detector (``parallels.py``) uses. The two detectors
+    both materialize ``parallel_links.parquet`` and ``run_all`` composes them,
+    letting a *semantic* row overwrite the deterministic one on a shared
+    canonical pair; if the two derive ``cross_sect`` from different sources the
+    composed value flips non-deterministically with the embedder environment.
+
+    Pre-da#321 this inferred sect from the corpus *name* via hard-coded
+    sunni/shia source allowlists, which (a) mislabeled any corpus absent from
+    the lists as non-cross-sect and (b) disagreed with the authoritative
+    ``sect`` column ``parallels.py`` reads — so a semantic row could clobber a
+    correct cross-sect edge with ``False``. Deriving from ``sect`` here makes
+    both detectors agree. See da#321.
+    """
+    return bool(sect_a and sect_b and sect_a != sect_b)
 
 
 def _load_hadith_texts(
     staging_dir: Path,
 ) -> tuple[list[str], list[str], list[str]]:
-    """Load hadith IDs, English matn texts, and source corpora from staging Parquets.
+    """Load hadith IDs, English matn texts, and ``sect`` labels from staging Parquets.
 
-    Returns (hadith_ids, texts, corpora) with null/empty matn_en rows excluded.
+    Returns (hadith_ids, texts, sects) with null/empty matn_en rows excluded. The
+    third element is the authoritative ``sect`` column, used to classify a pair as
+    cross-sect (see :func:`_is_cross_sect` / da#321) — not the source corpus.
     """
     hadith_files = sorted(staging_dir.glob("**/hadiths_*.parquet"))
     if not hadith_files:
@@ -128,10 +140,10 @@ def _load_hadith_texts(
 
     ids: list[str] = []
     texts: list[str] = []
-    corpora: list[str] = []
+    sects: list[str] = []
     skipped = 0
     for fpath in hadith_files:
-        table = pq.read_table(fpath, columns=["source_id", "matn_en", "source_corpus"])
+        table = pq.read_table(fpath, columns=["source_id", "matn_en", "sect"])
         for i in range(table.num_rows):
             matn = table.column("matn_en")[i].as_py()
             if not matn or not matn.strip():
@@ -139,7 +151,7 @@ def _load_hadith_texts(
                 continue
             ids.append(table.column("source_id")[i].as_py())
             texts.append(matn)
-            corpora.append(table.column("source_corpus")[i].as_py())
+            sects.append(table.column("sect")[i].as_py())
 
     logger.info(
         "dedup_loaded_hadiths",
@@ -147,7 +159,7 @@ def _load_hadith_texts(
         skipped=skipped,
         files=len(hadith_files),
     )
-    return ids, texts, corpora
+    return ids, texts, sects
 
 
 def _build_default_model() -> object:
@@ -459,7 +471,7 @@ def _search_and_collect_resumable(
     *,
     embeddings: npt.NDArray[np.float32],
     hadith_ids: list[str],
-    id_to_corpus: dict[str, str],
+    id_to_sect: dict[str, str],
     actual_k: int,
     threshold: float,
     ckpt_dir: Path,
@@ -564,9 +576,7 @@ def _search_and_collect_resumable(
                 ids_b.append(pair_key[1])
                 sim_scores.append(score)
                 variant_types.append(str(_classify_pair(score)))
-                cross_sects.append(
-                    _is_cross_sect(id_to_corpus[pair_key[0]], id_to_corpus[pair_key[1]])
-                )
+                cross_sects.append(_is_cross_sect(id_to_sect[pair_key[0]], id_to_sect[pair_key[1]]))
 
         if controller.batch_complete():
             save_checkpoint(ckpt_dir, _snapshot(block_end))
@@ -636,7 +646,7 @@ def run_dedup(
     # ------------------------------------------------------------------
     # 1. Load hadith texts
     # ------------------------------------------------------------------
-    hadith_ids, texts, corpora = _load_hadith_texts(staging_dir)
+    hadith_ids, texts, sects = _load_hadith_texts(staging_dir)
     if not texts:
         logger.warning("dedup_no_texts")
         return _write_empty_output(staging_dir)
@@ -715,7 +725,7 @@ def run_dedup(
         "DEDUP_CHECKPOINT_EVERY_N_BLOCKS",
         _DEDUP_CHECKPOINT_EVERY_N_BLOCKS,
     )
-    id_to_corpus: dict[str, str] = dict(zip(hadith_ids, corpora))
+    id_to_sect: dict[str, str] = dict(zip(hadith_ids, sects))
 
     def _build_index() -> faiss_mod.Index:
         if index_type == "ivf":
@@ -739,7 +749,7 @@ def run_dedup(
     ids_a, ids_b, sim_scores, variant_types, cross_sects = _search_and_collect_resumable(
         embeddings=embeddings,
         hadith_ids=hadith_ids,
-        id_to_corpus=id_to_corpus,
+        id_to_sect=id_to_sect,
         actual_k=actual_k,
         threshold=threshold,
         ckpt_dir=ckpt_dir,

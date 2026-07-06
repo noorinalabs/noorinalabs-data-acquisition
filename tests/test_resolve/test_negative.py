@@ -239,7 +239,7 @@ class TestDedupEdgeCases:
         )
         pq.write_table(table, staging / "hadiths_sunnah.parquet")
 
-        ids, texts, corpora = _load_hadith_texts(staging)
+        ids, texts, sects = _load_hadith_texts(staging)
         assert len(ids) == 1
         assert len(texts) == 1
 
@@ -260,7 +260,7 @@ class TestDedupEdgeCases:
         )
         pq.write_table(table, staging / "hadiths_sunnah.parquet")
 
-        ids, texts, corpora = _load_hadith_texts(staging)
+        ids, texts, sects = _load_hadith_texts(staging)
         assert len(ids) == 3
         assert all(t == same_text for t in texts)
 
@@ -271,10 +271,10 @@ class TestDedupEdgeCases:
         staging = tmp_path / "staging"
         staging.mkdir()
 
-        ids, texts, corpora = _load_hadith_texts(staging)
+        ids, texts, sects = _load_hadith_texts(staging)
         assert ids == []
         assert texts == []
-        assert corpora == []
+        assert sects == []
 
     def test_hadiths_with_null_matn(self, tmp_path: Path) -> None:
         """Hadiths with null/empty matn_en are skipped during loading."""
@@ -291,5 +291,5 @@ class TestDedupEdgeCases:
         )
         pq.write_table(table, staging / "hadiths_sunnah.parquet")
 
-        ids, texts, corpora = _load_hadith_texts(staging)
+        ids, texts, sects = _load_hadith_texts(staging)
         assert len(ids) == 0  # both should be skipped

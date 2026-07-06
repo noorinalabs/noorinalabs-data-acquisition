@@ -96,7 +96,8 @@ def test_parallels_stop_then_resume_equals_uninterrupted(
 # ---------------------------------------------------------------------------
 _EMB = np.array([[1, 0], [1, 0], [0, 1], [0, 1], [1, 1], [1, 1]], dtype=np.float32)
 _IDS = [f"h{i}" for i in range(6)]
-_CORPUS = {f"h{i}": ("sunnah" if i % 2 == 0 else "thaqalayn") for i in range(6)}
+# da#321: cross-sect keyed on the authoritative `sect` label, not the corpus name.
+_SECT = {f"h{i}": ("sunni" if i % 2 == 0 else "shia") for i in range(6)}
 
 
 class _FakeIndex:
@@ -116,7 +117,7 @@ def _collect(ckpt_dir: Path, *, resume: bool, index_available: bool, stop_after:
     return _search_and_collect_resumable(
         embeddings=_EMB,
         hadith_ids=_IDS,
-        id_to_corpus=_CORPUS,
+        id_to_sect=_SECT,
         actual_k=6,
         threshold=0.5,
         ckpt_dir=ckpt_dir,

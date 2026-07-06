@@ -35,7 +35,8 @@ _EMB = np.array(
     dtype=np.float32,
 )
 _IDS = [f"h{i}" for i in range(8)]
-_ID_TO_CORPUS = {f"h{i}": ("sunnah" if i % 2 == 0 else "thaqalayn") for i in range(8)}
+# da#321: cross-sect is keyed on the authoritative `sect` label, not the corpus name.
+_ID_TO_SECT = {f"h{i}": ("sunni" if i % 2 == 0 else "shia") for i in range(8)}
 _ACTUAL_K = 8
 _THRESHOLD = 0.5
 
@@ -86,7 +87,7 @@ def _collect(
     return _search_and_collect_resumable(
         embeddings=_EMB,
         hadith_ids=_IDS,
-        id_to_corpus=_ID_TO_CORPUS,
+        id_to_sect=_ID_TO_SECT,
         actual_k=_ACTUAL_K,
         threshold=_THRESHOLD,
         ckpt_dir=ckpt_dir,
@@ -166,7 +167,7 @@ def test_stale_fingerprint_cold_starts(tmp_path: Path) -> None:
     _checkpoint.save_checkpoint(
         ckpt_dir,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "fingerprint": "STALE",
             "processed_rows": 4,
             "seen_pairs": [["SENTINEL_A", "SENTINEL_B"]],
@@ -194,7 +195,7 @@ def test_resume_false_ignores_checkpoint(tmp_path: Path) -> None:
     _checkpoint.save_checkpoint(
         ckpt_dir,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "fingerprint": "fp",  # would otherwise match
             "processed_rows": 8,
             "seen_pairs": [["SENTINEL_A", "SENTINEL_B"]],
