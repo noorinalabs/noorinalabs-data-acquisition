@@ -340,12 +340,12 @@ class TestOutputSchema:
         output = tmp_path / "output"
         output.mkdir()
 
-        # Create a minimal English source.
+        # Create a minimal English source (sunnah — fawaz now routes to Arabic, da#271).
         hadiths = [
             {
-                "source_id": "fw-schema",
-                "source_corpus": "fawaz",
-                "collection_name": "fawaz-collection",
+                "source_id": "sn-schema",
+                "source_corpus": "sunnah",
+                "collection_name": "sunnah-collection",
                 "isnad_raw_ar": None,
                 "isnad_raw_en": "Narrated Abu Bakr from Umar",
                 "full_text_ar": None,
@@ -361,7 +361,7 @@ class TestOutputSchema:
                 "chapter_name_en": None,
             },
         ]
-        write_hadiths(staging / "hadiths_fawaz.parquet", hadiths)
+        write_hadiths(staging / "hadiths_sunnah.parquet", hadiths)
 
         paths = run(staging, output)
         assert len(paths) >= 1
@@ -380,3 +380,121 @@ class TestOutputSchema:
 
         paths = run(staging, output)
         assert paths == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: fawaz Arabic extraction (da#271 cross-script fold)
+# ---------------------------------------------------------------------------
+class TestFawazArabicExtraction:
+    """da#271: fawaz is extracted from its Arabic full text, not its English
+    translation, so its narrator names share canonical identity with the Arabic
+    corpora instead of forking as romanized ("Anas bin Malik") nodes."""
+
+    def test_fawaz_routed_to_arabic(self) -> None:
+        from src.resolve.ner import _ARABIC_SOURCES, _ENGLISH_SOURCES
+
+        assert "fawaz" in _ARABIC_SOURCES
+        assert "fawaz" not in _ENGLISH_SOURCES
+
+    def test_fawaz_arabic_names_not_latin(self, tmp_path: Path) -> None:
+        from src.utils.arabic import is_arabic
+
+        # fawaz ships an empty isnad column but a voweled full_text_ar (isnad + matn).
+        isnad = "حَدَّثَنَا أَنَسُ بْنُ مَالِكٍ عَنْ جَابِرِ بْنِ عَبْدِ اللَّهِ قَالَ نَهَى النَّبِيُّ"
+        write_hadiths(
+            tmp_path / "hadiths_fawaz.parquet",
+            [
+                {
+                    "source_id": "fw-1",
+                    "source_corpus": "fawaz",
+                    "collection_name": "fawaz-collection",
+                    "isnad_raw_ar": None,
+                    "isnad_raw_en": None,
+                    "full_text_ar": isnad,
+                    "full_text_en": "Narrated Anas bin Malik: ...",
+                    "matn_ar": None,
+                    "matn_en": None,
+                    "grade": None,
+                    "sect": "sunni",
+                    "book_number": 1,
+                    "chapter_number": 1,
+                    "hadith_number": 1,
+                    "chapter_name_ar": None,
+                    "chapter_name_en": None,
+                },
+            ],
+        )
+        rows = _extract_from_hadiths(tmp_path, "fawaz", "ar")
+        names = [str(r["name_normalized"]) for r in rows]
+        assert names, "fawaz Arabic extraction yielded no mentions"
+        # every extracted name is Arabic script — none is a romanized "... bin ..."
+        assert all(is_arabic(n) for n in names)
+        assert not any("bin" in n.split() for n in names)
+
+    def test_fawaz_name_folds_onto_arabic_corpus_identity(self, tmp_path: Path) -> None:
+        """The flagship: a fawaz narrator now shares a canonical id with the SAME
+        narrator extracted from a native-Arabic corpus (no cross-script fork)."""
+        from src.parse.identity import make_canonical_id
+
+        isnad = "حَدَّثَنَا أَنَسُ بْنُ مَالِكٍ عَنْ جَابِرٍ"
+        write_hadiths(
+            tmp_path / "hadiths_fawaz.parquet",
+            [
+                {
+                    "source_id": "fw-2",
+                    "source_corpus": "fawaz",
+                    "collection_name": "fawaz-collection",
+                    "isnad_raw_ar": None,
+                    "isnad_raw_en": None,
+                    "full_text_ar": isnad,
+                    "full_text_en": "Narrated Anas bin Malik ...",
+                    "matn_ar": None,
+                    "matn_en": None,
+                    "grade": None,
+                    "sect": "sunni",
+                    "book_number": 1,
+                    "chapter_number": 1,
+                    "hadith_number": 1,
+                    "chapter_name_ar": None,
+                    "chapter_name_en": None,
+                },
+            ],
+        )
+        write_hadiths(
+            tmp_path / "hadiths_thaqalayn.parquet",
+            [
+                {
+                    "source_id": "th-1",
+                    "source_corpus": "thaqalayn",
+                    "collection_name": "al-kafi",
+                    "isnad_raw_ar": isnad,
+                    "isnad_raw_en": None,
+                    "full_text_ar": isnad,
+                    "full_text_en": None,
+                    "matn_ar": None,
+                    "matn_en": None,
+                    "grade": None,
+                    "sect": "shia",
+                    "book_number": 1,
+                    "chapter_number": 1,
+                    "hadith_number": 1,
+                    "chapter_name_ar": None,
+                    "chapter_name_en": None,
+                },
+            ],
+        )
+        fawaz_names = {
+            str(r["name_normalized"]) for r in _extract_from_hadiths(tmp_path, "fawaz", "ar")
+        }
+        thaq_names = {
+            str(r["name_normalized"]) for r in _extract_from_hadiths(tmp_path, "thaqalayn", "ar")
+        }
+        shared = fawaz_names & thaq_names
+        assert shared, "fawaz and thaqalayn extracted no common narrator name"
+        # a shared normalized name yields the SAME canonical id across the two
+        # corpora — fawaz merges onto Arabic identity instead of forking a Latin node.
+        fawaz_ids = {make_canonical_id(n) for n in fawaz_names}
+        thaq_ids = {make_canonical_id(n) for n in thaq_names}
+        assert fawaz_ids & thaq_ids, "no shared canonical id — fawaz still forks"
+        # the fawaz name really is the Arabic form (would have been "Anas bin Malik")
+        assert any("انس" in n or "مالك" in n for n in fawaz_names)

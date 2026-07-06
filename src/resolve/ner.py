@@ -37,10 +37,23 @@ _PHASE1_MENTION_SOURCES: dict[str, str] = {
 }
 
 # Sources with Arabic isnads needing rule-based extraction.
-_ARABIC_SOURCES: set[str] = {"thaqalayn", "open_hadith"}
+#
+# fawaz (da#271): extracted from its Arabic full text, NOT its English translation.
+# fawaz ships an empty ``isnad_raw_en``/``isnad_raw_ar`` but a fully-populated
+# voweled ``full_text_ar`` (the extractor falls back to full text when the isnad
+# column is empty). The old English path produced romanized names ("Anas bin
+# Malik") that never share canonical identity with the Arabic corpora — the da#271
+# cross-script under-merge — and, because the English "Narrated X:" pattern only
+# surfaces the lead companion, it recovered ~1 narrator/hadith versus the full
+# ~5-narrator Arabic chain. Extracting the Arabic text is strictly better than
+# transliterating Latin→Arabic (lossy: no short vowels, bin/ibn, apostrophes) or a
+# cross-script match-key hack: it yields genuinely Arabic names that merge natively
+# AND the complete isnad chain. (sunnah stays English below: its ``full_text_ar``
+# is a samāʿ/reading-certificate blob with biographical dates, not a clean isnad.)
+_ARABIC_SOURCES: set[str] = {"thaqalayn", "open_hadith", "fawaz"}
 
 # Sources with English text needing keyword-based extraction.
-_ENGLISH_SOURCES: set[str] = {"fawaz", "sunnah"}
+_ENGLISH_SOURCES: set[str] = {"sunnah"}
 
 # Sources to skip entirely (no raw isnads).
 _SKIP_SOURCES: set[str] = {"muhaddithat"}
@@ -228,6 +241,15 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
 
     Reads staging Parquet files and produces resolved narrator mention tables.
     Returns list of output file paths.
+
+    Crash-resume (da#272): NER is intentionally NOT intra-stage-checkpointed. Each
+    run re-mints ``mention_id`` via ``uuid.uuid4()``, so a partial resume would
+    stitch two id-spaces into one mentions file and corrupt the mention-keyed
+    disambiguate outputs. NER is also the cheap stage (~2 min). Its "resume" is
+    therefore *reusing the whole existing mentions file*, which the CLI expresses
+    as ``resolve --from-step disambiguate``: NER is skipped entirely and the
+    already-written ``narrator_mentions_resolved.parquet`` (and disambiguate's
+    checkpoint keyed off it) is reused verbatim. See ``run_all(from_step=...)``.
     """
     logger.info("ner_run_start", staging_dir=str(staging_dir), output_dir=str(output_dir))
 

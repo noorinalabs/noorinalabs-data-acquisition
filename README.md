@@ -8,6 +8,13 @@ connectors), normalizes it into a stable on-disk form, and writes typed columnar
 artifacts (PyArrow/Parquet) for the downstream ingest platform to consume. Source
 code lives under `src/`, tests under `tests/`.
 
+## Exploring the data
+
+For ad-hoc SQL over the staging + curated Parquet files, use the dev-only DuckDB
+helper: `make duck` (interactive) or `make duck QUERY="select ..."` (one-shot).
+It registers read-only views over the configured data dirs. See
+[docs/duckdb.md](docs/duckdb.md) for views and example queries.
+
 ## Git hooks (required)
 
 This repo mirrors its CI checks locally via [pre-commit](https://pre-commit.com/).

@@ -143,12 +143,26 @@ def test_source_filter(tmp_path: Path) -> None:
     _write_bios(
         staging,
         "itqan",
-        [{"bio_id": "itqan:1", "source": "itqan", "name_ar": "أ", "name_ar_normalized": "ا"}],
+        [
+            {
+                "bio_id": "itqan:1",
+                "source": "itqan",
+                "name_ar": "مالك بن انس",
+                "name_ar_normalized": "مالك بن انس",
+            }
+        ],
     )
     _write_bios(
         staging,
         "muhaddithat",
-        [{"bio_id": "m:1", "source": "muhaddithat", "name_ar": "ب", "name_ar_normalized": "ب"}],
+        [
+            {
+                "bio_id": "m:1",
+                "source": "muhaddithat",
+                "name_ar": "حفصه بنت عمر",
+                "name_ar_normalized": "حفصه بنت عمر",
+            }
+        ],
     )
     path = promote_bios_to_canonical(staging, out_dir, sources={"itqan"})
     assert path is not None
@@ -178,7 +192,14 @@ def test_merges_into_existing_canonical(tmp_path: Path) -> None:
     _write_bios(
         staging,
         "itqan",
-        [{"bio_id": "itqan:1", "source": "itqan", "name_ar": "ج", "name_ar_normalized": "ج"}],
+        [
+            {
+                "bio_id": "itqan:1",
+                "source": "itqan",
+                "name_ar": "سعيد بن جبير",
+                "name_ar_normalized": "سعيد بن جبير",
+            }
+        ],
     )
     path = promote_bios_to_canonical(staging, out_dir)
     assert path is not None
@@ -254,7 +275,14 @@ def test_alias_without_matching_bio_is_dropped(tmp_path: Path) -> None:
     _write_bios(
         staging,
         "itqan",
-        [{"bio_id": "itqan:1", "source": "itqan", "name_ar": "ج", "name_ar_normalized": "ج"}],
+        [
+            {
+                "bio_id": "itqan:1",
+                "source": "itqan",
+                "name_ar": "سعيد بن جبير",
+                "name_ar_normalized": "سعيد بن جبير",
+            }
+        ],
     )
     _write_aliases(
         staging,
@@ -339,3 +367,46 @@ def test_unset_precision_defaults_to_unknown(tmp_path: Path) -> None:
     assert rec["death_date_precision"] == DatePrecision.UNKNOWN.value
     assert rec["birth_date_precision"] is not None
     assert rec["death_date_precision"] is not None
+
+
+def test_bio_promote_applies_name_quality_filter(tmp_path: Path) -> None:
+    """da#271: bio_promote runs clean_narrator_name — pollution dropped, benediction
+    suffix cleaned so the bio merges onto the clean canonical id (not a fork)."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+
+    clean_name = "انس بن مالك"
+    _write_bios(
+        staging,
+        "kaggle",
+        [
+            # pure Prophet-reference "name" (kaggle rijāl pollution) → dropped
+            {
+                "bio_id": "kaggle:1",
+                "source": "kaggle_narrators",
+                "name_ar": "رسول الله صلى الله عليه واله",
+                "name_ar_normalized": normalize_arabic("رسول الله صلى الله عليه واله"),
+            },
+            # a real name with a benediction suffix → cleaned to the bare name
+            {
+                "bio_id": "kaggle:2",
+                "source": "kaggle_narrators",
+                "name_ar": "انس بن مالك رضي الله عنه",
+                "name_ar_normalized": normalize_arabic("انس بن مالك رضي الله عنه"),
+            },
+        ],
+    )
+
+    path = promote_bios_to_canonical(staging, out_dir)
+    assert path is not None
+    rows = pq.read_table(path).to_pylist()
+
+    ids = {r["canonical_id"] for r in rows}
+    # the Prophet-reference bio produced no canonical node
+    assert make_canonical_id(normalize_arabic("رسول الله صلى الله عليه واله")) not in ids
+    # the benediction-suffixed bio promoted under the CLEAN name's id (merge-ready)
+    assert make_canonical_id(clean_name) in ids
+    names = {r["name_ar_normalized"] for r in rows}
+    assert clean_name in names

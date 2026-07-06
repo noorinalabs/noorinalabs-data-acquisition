@@ -79,6 +79,17 @@ from rapidfuzz import fuzz, process
 from src.models.enums import DatePrecision
 from src.parse.base import safe_str, write_parquet
 from src.parse.identity import make_canonical_id
+from src.resolve._checkpoint import (
+    CheckpointController,
+    checkpoint_dir,
+    clear_checkpoint,
+    hash_parquet_column_groups,
+    hash_strings,
+    load_checkpoint,
+    log_resume,
+    resolve_cadence,
+    save_checkpoint,
+)
 from src.resolve.schemas import NARRATOR_MENTIONS_RESOLVED_SCHEMA, NARRATORS_CANONICAL_SCHEMA
 from src.resolve.sect_affiliation import derive_sect_affiliation, normalize_corpus, primary_corpus
 from src.utils.logging import get_logger
@@ -163,6 +174,77 @@ _CLUSTER_INFLIGHT_FACTOR = 4
 # :func:`cluster_records`).
 _CLUSTER_PROGRESS_INTERVAL = 500_000
 
+# Safe-partition progress telemetry (da#306). A union-find group larger than this
+# threshold gets a periodic progress line from :func:`_safe_partition` — run 4's
+# union-find produced a single 168,773-member mega-group whose partition phase ran
+# SILENTLY for 17h+ (the phase had no logging at all). Sized so only genuinely
+# large groups emit; a normal cluster (≤ tens of members) never logs.
+_SAFE_PARTITION_PROGRESS_THRESHOLD = 5_000
+_SAFE_PARTITION_PROGRESS_INTERVAL = 10_000
+
+# Top-k group sizes logged in the post-union `cluster_group_sizes` line (da#306).
+_GROUP_SIZE_TOP_K = 10
+
+# Per-record match-key cap (da#270). Block scoring is a ``process.cdist`` over the
+# block's flattened match keys (name + aliases of every member); its cost is
+# O(K²) in that flattened key count, and profiling the real ~210k-canonical set
+# showed it is ~99% of clustering wall-time. A pathological tail of records — a
+# handful of prolific narrators that accreted hundreds of alias spellings across
+# sources, plus pollution nodes whose "name" is a captured isnad fragment — carry
+# up to ~740 match keys (p99 is 19), so a single such record inside a block blows
+# that block's K (and thus its cdist cost) super-linearly, and because those
+# records also carry hundreds of significant tokens they land in a huge number of
+# blocks. Capping each record to its first ``_MAX_MATCH_KEYS_PER_RECORD`` keys
+# (name always first, then aliases in their existing deterministic order) bounds
+# every record's per-block contribution. At 64 this touches only ~0.1% of records
+# (>64 keys) yet cut cdist time ~3.5× on the worst real blocks; the only lost
+# merges are those justified *solely* by a record's 65th-plus alias spelling — the
+# least-reliable tail. ``None`` disables the cap (exact pre-da#270 behaviour, used
+# by the equivalence/precision-recall harness). Applied in :func:`_match_keys` so
+# every consumer — blocking, cdist, and the scalar path — sees one bounded key set.
+_MAX_MATCH_KEYS_PER_RECORD: int | None = 64
+
+# Per-record blocking-token cap (da#270). Composite blocking enumerates
+# ``C(t, 2)`` token pairs per record for its ``t`` significant tokens; a pollution
+# record with a 1,000-token "name" contributes ~500k posting entries and joins
+# that many blocks, which is what made the blocking build itself balloon to
+# multi-GB. Only the first ``_MAX_BLOCKING_TOKENS_PER_RECORD`` significant tokens
+# (deterministic sorted order) generate blocking pairs; the record is still fully
+# scored inside whatever blocks it does join, and the precision guards still read
+# its full token set. At 64 this affects <1% of records (the same pathological
+# tail) and never a normal name (p99 significant-token count is 34). ``None``
+# disables the cap.
+_MAX_BLOCKING_TOKENS_PER_RECORD: int | None = 64
+
+# Crash-resume for the multi-day block-scoring pass (da#272, PR2). The
+# checkpointed state is the union-find parent array + the set of applied block
+# indices + the scored/merged counters. Correctness leans on two properties of
+# this stage that make it MORE robust than the streaming stages: the final
+# clusters are connected components (invariant to union order) and ``uf.union`` is
+# idempotent — so a resume that applies only the not-yet-applied blocks yields the
+# same components as an uninterrupted run regardless of order or partial re-work.
+#
+# Cadence is keyed to SCORED-PAIR progress, not block count: block cost varies by
+# orders of magnitude (an 8-member scalar block vs a 250-member cdist block), so
+# "every N blocks" would checkpoint wildly unevenly. Checkpointing every
+# ``_CLUSTER_CHECKPOINT_SCORED_INTERVAL`` scored pairs bounds crash-loss to that
+# many pairs of re-work while keeping the O(n) parent-array serialization
+# infrequent (a full ~1.7B-pair run ⇒ a few dozen writes).
+_CLUSTER_CHECKPOINT_SCORED_INTERVAL = 50_000_000
+_CLUSTER_CHECKPOINT_SCHEMA_VERSION = 1
+# Canonical columns whose content determines the clustering output (name/alias
+# match keys + the death-year/gender guards + record identity & row order, which
+# fix the block indices). A change to any of them discards the checkpoint.
+_FINGERPRINT_CANONICAL_COLS = (
+    "canonical_id",
+    "name_ar",
+    "name_en",
+    "name_ar_normalized",
+    "aliases",
+    "death_year_ah",
+    "gender",
+)
+
 # Name tokens that carry no disambiguating signal (Arabic genealogical
 # connectors / honorific particles). Excluded as *blocking* keys so a block does
 # not balloon to "every name containing بن"; still scored as part of the name.
@@ -208,7 +290,13 @@ class ClusterMetrics:
 # Match keys & scoring
 # ---------------------------------------------------------------------------
 def _match_keys(record: dict[str, Any]) -> list[str]:
-    """Every normalized name string a record can match on: its name + aliases (da#94)."""
+    """Every normalized name string a record can match on: its name + aliases (da#94).
+
+    Truncated to :data:`_MAX_MATCH_KEYS_PER_RECORD` (da#270): the name is always
+    kept first, then aliases in their existing deterministic order, so a
+    pathological record with hundreds of alias spellings cannot blow up the O(K²)
+    per-block ``cdist``. ``None`` keeps every key (exact pre-da#270 behaviour).
+    """
     keys: list[str] = []
     name = safe_str(record.get("name_ar_normalized"))
     if name:
@@ -219,6 +307,8 @@ def _match_keys(record: dict[str, Any]) -> list[str]:
             av = safe_str(a)
             if av and av not in keys:
                 keys.append(av)
+    if _MAX_MATCH_KEYS_PER_RECORD is not None:
+        return keys[:_MAX_MATCH_KEYS_PER_RECORD]
     return keys
 
 
@@ -310,6 +400,41 @@ def _can_merge(a: dict[str, Any], b: dict[str, Any], *, threshold: float) -> boo
     return _name_match(_match_keys(a), _match_keys(b), threshold=threshold)
 
 
+def _can_merge_cached(
+    i: int,
+    j: int,
+    records: list[dict[str, Any]],
+    keys_cache: dict[int, list[str]],
+    tok_cache: dict[int, set[str]],
+    *,
+    threshold: float,
+) -> bool:
+    """Cached-key equivalent of :func:`_can_merge` for two record indices (da#306).
+
+    Returns the **byte-identical** decision to
+    ``_can_merge(records[i], records[j], threshold=threshold)``. The ONLY
+    difference is that the two per-record derived values — the match-key list
+    (:func:`_match_keys`) and the significant-token set (:func:`_significant_tokens`)
+    — are read from ``keys_cache``/``tok_cache`` instead of being recomputed on
+    every call. It reuses the exact same guard predicates (:func:`_death_years_conflict`,
+    :func:`_genders_conflict`, :func:`_name_match`) so the merge *rule* has a single
+    source of truth; only the key/token derivation is memoized. The equivalence is:
+
+    * ``_shared_significant_token_count(a, b)`` is
+      ``len(_significant_tokens(_match_keys(a)) & _significant_tokens(_match_keys(b)))``,
+      and ``tok_cache[k] == _significant_tokens(_match_keys(records[k]))`` — so
+      ``len(tok_cache[i] & tok_cache[j])`` is the same integer.
+    * ``keys_cache[k] == _match_keys(records[k])`` — so the ``_name_match`` call
+      sees the identical key lists.
+    """
+    a, b = records[i], records[j]
+    if _death_years_conflict(a, b) or _genders_conflict(a, b):
+        return False
+    if len(tok_cache[i] & tok_cache[j]) < _MIN_SHARED_TOKENS:
+        return False
+    return _name_match(keys_cache[i], keys_cache[j], threshold=threshold)
+
+
 # ---------------------------------------------------------------------------
 # Union-find clustering
 # ---------------------------------------------------------------------------
@@ -355,20 +480,109 @@ def _safe_partition(
     with *every* member of, opening a new sub-cluster otherwise. By induction
     each sub-cluster is a clique under ``_can_merge``, so no conflicting pair can
     co-occur. Deterministic: members are processed in ``canonical_id`` order.
+
+    Token-indexed candidate lookup (da#306) — output-identical, not just faster
+    -----------------------------------------------------------------------------
+    The naive version scans **every** existing sub-cluster for each member, so
+    run 4's single 168,773-member mega-group (a transitive chain, not a clique)
+    was worst-case ~n²/2 ≈ 14.2B :func:`_can_merge` calls and ran the phase
+    silently for 17h+. The optimization rests on one exact fact about the merge
+    rule: :func:`_can_merge` requires ``≥ _MIN_SHARED_TOKENS`` (≥1) shared
+    significant tokens with **every** member of a sub-cluster, so a sub-cluster in
+    which *no* member shares even a single significant token with the incoming
+    member can NEVER accept it — the naive scan tests it and rejects on its first
+    member anyway. We therefore maintain a ``token -> sub-cluster indices`` index
+    and, for each member, consider only the sub-clusters that share ≥1 token with
+    it (a **superset** of the true acceptors, so nothing is dropped), tested in
+    **ascending sub-cluster index = original creation order**, first-accepting
+    wins. Each considered sub-cluster is still verified with the full
+    ``all(_can_merge(...))`` predicate. Formally: the first accepting sub-cluster
+    in the naive full scan is necessarily a candidate here (it accepted, so the
+    member shares ≥1 token with each of its members), every sub-cluster before it
+    that the naive scan rejected is either also tested-and-rejected here or a
+    non-candidate the naive scan would reject on its first member — so the chosen
+    sub-cluster (or the decision to open a new one) is identical, and the emitted
+    partition is byte-identical.
+
+    Per-record caching (da#306): each member's match keys (:func:`_match_keys`)
+    and significant-token set (:func:`_significant_tokens`) are computed once up
+    front and read from the caches by :func:`_can_merge_cached` — the naive path
+    re-derived both inside every ``_can_merge`` call, which at billions of calls
+    dominated. The decision is unchanged (see :func:`_can_merge_cached`).
     """
     if len(group) <= 1:
         return [list(group)]
 
     ordered = sorted(group, key=lambda i: safe_str(records[i].get("canonical_id")) or "")
+
+    # Per-record derived values, computed ONCE per member (da#306). Keyed by record
+    # index; every index tested below (both the incoming member and every existing
+    # sub-cluster member) is in ``ordered``, so both operands of every
+    # ``_can_merge_cached`` call are present.
+    keys_cache: dict[int, list[str]] = {i: _match_keys(records[i]) for i in ordered}
+    tok_cache: dict[int, set[str]] = {i: _significant_tokens(keys_cache[i]) for i in ordered}
+
     subclusters: list[list[int]] = []
-    for i in ordered:
-        for sub in subclusters:
-            if all(_can_merge(records[i], records[j], threshold=threshold) for j in sub):
+    # significant token -> indices of sub-clusters containing ≥1 member with it.
+    token_index: dict[str, set[int]] = defaultdict(set)
+
+    log_progress = len(group) > _SAFE_PARTITION_PROGRESS_THRESHOLD
+    t0 = time.monotonic()
+
+    for placed, i in enumerate(ordered):
+        # Candidate sub-clusters: those sharing ≥1 significant token with i. A
+        # sub-cluster sharing zero tokens can never accept i (a zero-overlap pair
+        # fails _can_merge's ≥_MIN_SHARED_TOKENS guard), so the naive scan would
+        # reject it on its first member — skipping it is free of output effect.
+        candidates: set[int] = set()
+        for tok in tok_cache[i]:
+            candidates.update(token_index[tok])
+
+        for s in sorted(candidates):  # ascending index == original creation order
+            sub = subclusters[s]
+            if all(
+                _can_merge_cached(i, j, records, keys_cache, tok_cache, threshold=threshold)
+                for j in sub
+            ):
                 sub.append(i)
+                for tok in tok_cache[i]:
+                    token_index[tok].add(s)
                 break
         else:
+            s = len(subclusters)
             subclusters.append([i])
+            for tok in tok_cache[i]:
+                token_index[tok].add(s)
+
+        if log_progress and (placed + 1) % _SAFE_PARTITION_PROGRESS_INTERVAL == 0:
+            logger.info(
+                "safe_partition_progress",
+                members_placed=placed + 1,
+                group_size=len(group),
+                subclusters=len(subclusters),
+                elapsed_seconds=round(time.monotonic() - t0, 1),
+            )
+
     return subclusters
+
+
+def _log_group_size_distribution(groups: list[list[int]]) -> None:
+    """Log the union-find group-size distribution before partitioning (da#306).
+
+    Surfaces the mega-group pathology that made the safe-partition phase silent:
+    group count, how many are multi-member, the largest, the top-k sizes, and how
+    many records sit inside multi-member groups (the partition workload).
+    """
+    sizes = sorted((len(g) for g in groups), reverse=True)
+    multi = sum(1 for s in sizes if s > 1)
+    logger.info(
+        "cluster_group_sizes",
+        groups=len(groups),
+        multi_member_groups=multi,
+        largest=sizes[0] if sizes else 0,
+        top_k_sizes=sizes[:_GROUP_SIZE_TOP_K],
+        members_in_multi_member_groups=sum(s for s in sizes if s > 1),
+    )
 
 
 def _stateless_merge_ok(
@@ -451,6 +665,11 @@ def cluster_records(
     *,
     threshold: float = _CLUSTER_RATIO_THRESHOLD,
     max_block_size: int | None = _DEFAULT_MAX_BLOCK_SIZE,
+    ckpt_dir: Path | None = None,
+    fingerprint: str = "",
+    resume: bool = True,
+    stop_after: int | None = None,
+    checkpoint_every_n_intervals: int | None = None,
 ) -> list[list[int]]:
     """Cluster canonical narrator records into same-person groups (as index lists).
 
@@ -487,6 +706,20 @@ def cluster_records(
     score every ≥2-shared-token pair (exact pre-cap behaviour; the
     behaviour-identical-to-single-token-blocking mode used by the equivalence
     test and the precision/recall harness).
+
+    Crash-resume (da#272, PR2)
+    --------------------------
+    When ``ckpt_dir`` is given (by :func:`cluster_canonical_narrators`; the pure
+    callers pass ``None`` and are unaffected), the block-scoring pass checkpoints
+    the union-find parent array + the set of applied block indices + the
+    scored/merged counters every ``_CLUSTER_CHECKPOINT_SCORED_INTERVAL`` scored
+    pairs. On resume it restores that state and re-scores only the blocks not in
+    the applied set. This is output-identical to an uninterrupted run because the
+    final clusters are connected components (invariant to union order) and
+    ``uf.union`` is idempotent — order and any incidental re-work cannot change the
+    components. ``resume=False`` cold-starts; ``stop_after`` stops after N
+    checkpoint writes (``--stop-after``), leaving the checkpoint and writing no
+    output.
     """
     n = len(records)
     uf = _UnionFind(n)
@@ -501,9 +734,21 @@ def cluster_records(
     # name/alias tokens include both members of the pair (composite blocking).
     # Each record contributes C(t, 2) keys for its t significant tokens (t is
     # small — a name has a handful of tokens), so the index stays compact.
+    #
+    # ``_MAX_BLOCKING_TOKENS_PER_RECORD`` (da#270) caps t per record before the
+    # C(t, 2) fan-out: a pollution record whose "name" is a captured isnad fragment
+    # can carry >1,000 significant tokens, and its ~500k posting entries were what
+    # ballooned this build to multi-GB. Taking the first N sorted tokens is
+    # deterministic and bounds the fan-out; the record is still fully scored inside
+    # whatever blocks it joins, and the precision guards below read its full token
+    # set (``tok_cache``), so only the *reach* of the pathological tail is trimmed.
+    max_block_tokens = _MAX_BLOCKING_TOKENS_PER_RECORD
     pair_index: dict[tuple[str, str], list[int]] = defaultdict(list)
     for i in range(n):
-        for key in itertools.combinations(sorted(tok_cache[i]), 2):
+        block_tokens = sorted(tok_cache[i])
+        if max_block_tokens is not None:
+            block_tokens = block_tokens[:max_block_tokens]
+        for key in itertools.combinations(block_tokens, 2):
             pair_index[key].append(i)
 
     # Apply the common-name cap: drop over-dense blocks up front so neither the
@@ -550,7 +795,38 @@ def cluster_records(
     # thread (it is not thread-safe); workers return pure index-pair lists.
     scored = 0
     merged = 0
-    next_log = _CLUSTER_PROGRESS_INTERVAL
+    # Set of `blocks` indices already unioned into `uf` — the resume skip-set.
+    applied: set[int] = set()
+
+    # --- Crash-resume (da#272): restore union-find + applied-block set. See the
+    # module "Crash-resume" note: correctness holds regardless of union order.
+    controller: CheckpointController | None = None
+    if ckpt_dir is not None:
+        cadence = resolve_cadence(
+            checkpoint_every_n_intervals,
+            "CLUSTER_CHECKPOINT_EVERY_N_INTERVALS",
+            1,
+        )
+        if not resume:
+            clear_checkpoint(ckpt_dir)
+        else:
+            ckpt = load_checkpoint(ckpt_dir)
+            if ckpt is not None:
+                layout_ok = ckpt.get("schema_version") == _CLUSTER_CHECKPOINT_SCHEMA_VERSION
+                fp_ok = ckpt.get("fingerprint") == fingerprint
+                parent_ok = len(ckpt.get("parent", [])) == n
+                if layout_ok and fp_ok and parent_ok:
+                    uf._parent = [int(x) for x in ckpt["parent"]]
+                    applied = {int(b) for b in ckpt["applied_blocks"]}
+                    scored = int(ckpt["scored"])
+                    merged = int(ckpt["merged"])
+                    log_resume("cluster", skipped=len(applied), total=len(blocks), merged=merged)
+                else:
+                    clear_checkpoint(ckpt_dir)
+        controller = CheckpointController(cadence, stop_after=stop_after)
+
+    next_log = scored + _CLUSTER_PROGRESS_INTERVAL
+    next_checkpoint_at = scored + _CLUSTER_CHECKPOINT_SCORED_INTERVAL
     t0 = time.monotonic()
 
     def _flatten(members: list[int]) -> tuple[list[str], list[int]]:
@@ -563,29 +839,39 @@ def cluster_records(
                 ow.append(pos)
         return fk, ow
 
-    # future -> m (member count) for in-flight cdist blocks. Each future RESOLVES to
-    # the block's already-guard-filtered, deduped (i, j) merge pairs, so the main
-    # thread needs nothing but the count for the progress estimate. Drained in
-    # COMPLETION order (not submission order) so one slow block never stalls the
-    # pool: a submission-order drain (waiting on the oldest future) idles every
-    # other worker behind a slow block and collapses throughput to ~1 core.
-    pending: dict[Future[list[tuple[int, int]]], int] = {}
+    def _snapshot() -> dict[str, object]:
+        """Serialize the resumable state: union-find + applied blocks + counters."""
+        return {
+            "schema_version": _CLUSTER_CHECKPOINT_SCHEMA_VERSION,
+            "fingerprint": fingerprint,
+            "parent": uf._parent,
+            "applied_blocks": sorted(applied),
+            "scored": scored,
+            "merged": merged,
+        }
+
+    # future -> (block_idx, m) for in-flight cdist blocks. Each future RESOLVES to
+    # the block's already-guard-filtered, deduped (i, j) merge pairs; the block_idx
+    # lets ``_apply`` record it in the resume skip-set. Drained in COMPLETION order
+    # (not submission order) so one slow block never stalls the pool.
+    pending: dict[Future[list[tuple[int, int]]], tuple[int, int]] = {}
     inflight_cap = _CLUSTER_MAX_WORKERS * _CLUSTER_INFLIGHT_FACTOR
 
-    def _apply(m: int, pairs: list[tuple[int, int]]) -> None:
+    def _apply(block_idx: int, m: int, pairs: list[tuple[int, int]]) -> None:
         """Union a block's pre-guarded merge pairs (the ONLY stateful, serial step).
 
         ``pairs`` are ``(i, j)`` record indices that already cleared every stateless
         guard in the worker; all that remains is the union-find ``already-merged``
-        check + union, both O(α(n)) ≈ O(1), so the main thread is no longer the
-        bottleneck even across hundreds of millions of candidate pairs.
+        check + union, both O(α(n)) ≈ O(1). Runs only on the main thread, so the
+        checkpoint it may write (reading ``uf._parent``) sees a consistent state.
         """
-        nonlocal scored, merged, next_log
+        nonlocal scored, merged, next_log, next_checkpoint_at
         for i, j in pairs:
             if uf.find(i) != uf.find(j):
                 uf.union(i, j)
                 merged += 1
         scored += m * (m - 1) // 2
+        applied.add(block_idx)
         if scored >= next_log:
             next_log = scored + _CLUSTER_PROGRESS_INTERVAL
             logger.info(
@@ -598,6 +884,23 @@ def cluster_records(
                 merged=merged,
                 elapsed_seconds=round(time.monotonic() - t0, 1),
             )
+        # Checkpoint on scored-pair progress (block cost varies by orders of
+        # magnitude, so block-count is a poor cadence). da#272 / da#276.
+        if controller is not None and ckpt_dir is not None and scored >= next_checkpoint_at:
+            next_checkpoint_at = scored + _CLUSTER_CHECKPOINT_SCORED_INTERVAL
+            if controller.batch_complete():
+                save_checkpoint(ckpt_dir, _snapshot())
+                logger.info(
+                    "cluster_checkpoint_saved",
+                    applied=len(applied),
+                    total=len(blocks),
+                    scored=scored,
+                    merged=merged,
+                )
+                if controller.checkpoint_written():
+                    controller.stop(
+                        "cluster", processed=len(applied), total=len(blocks), merged=merged
+                    )
 
     def _drain_completed(block_until_one: bool) -> None:
         """Apply every finished block's pairs; optionally block until ≥1 finishes.
@@ -614,10 +917,13 @@ def cluster_records(
             else {f for f in pending if f.done()}
         )
         for f in done:
-            _apply(pending.pop(f), f.result())
+            block_idx, m = pending.pop(f)
+            _apply(block_idx, m, f.result())
 
     with ThreadPoolExecutor(max_workers=_CLUSTER_MAX_WORKERS) as pool:
-        for members in blocks:
+        for block_idx, members in enumerate(blocks):
+            if block_idx in applied:
+                continue  # already unioned before the resume point — skip
             m = len(members)
             if m < 2:
                 continue
@@ -633,13 +939,13 @@ def cluster_records(
                             pair = _stateless_merge_ok(records, members, owner, flat_keys, p, q)
                             if pair is not None:
                                 seen.add(pair)
-                _apply(m, list(seen))
+                _apply(block_idx, m, list(seen))
                 continue
 
             # Larger block: dispatch cdist + guard-filtering to the shared pool.
             pending[
                 pool.submit(_block_merge_pairs, records, members, owner, flat_keys, threshold)
-            ] = m
+            ] = (block_idx, m)
             # Opportunistically reap anything already done (free slots, no blocking);
             # only block once the in-flight set hits the cap.
             _drain_completed(block_until_one=False)
@@ -659,8 +965,10 @@ def cluster_records(
 
     # Re-partition each transitive group into guard-safe cliques (closes the
     # bridge-bypass: A–B ✓, B–C ✓, A–C conflict must NOT yield one {A,B,C}).
+    groups = uf.groups()
+    _log_group_size_distribution(groups)
     clusters: list[list[int]] = []
-    for group in uf.groups():
+    for group in groups:
         clusters.extend(_safe_partition(group, records, threshold=threshold))
     return clusters
 
@@ -867,6 +1175,9 @@ def cluster_canonical_narrators(
     mentions_path: Path | None = None,
     threshold: float = _CLUSTER_RATIO_THRESHOLD,
     max_block_size: int | None = _DEFAULT_MAX_BLOCK_SIZE,
+    staging_dir: Path | None = None,
+    resume: bool = True,
+    stop_after: int | None = None,
 ) -> ClusterMetrics:
     """Fuzzy-cluster ``narrators_canonical.parquet`` in place; return metrics.
 
@@ -875,6 +1186,12 @@ def cluster_canonical_narrators(
     ``mentions_path`` is given, the absorbed-id → survivor-id remap is applied to
     the mentions so the graph edges follow the merge. A no-op (file untouched)
     when the table is missing/empty or nothing clusters.
+
+    Crash-resume (da#272, PR2): when ``staging_dir`` is given the block-scoring
+    pass is checkpointed under ``<staging_dir>/.cluster_checkpoint`` and resumes
+    after a crash; ``resume=False`` cold-starts and ``stop_after`` bounds the run
+    to N checkpoint writes (``--stop-after``, raising ``StopAfterReached`` before
+    the canonical table is rewritten). The checkpoint is cleared on success.
     """
     if not canonical_path.exists():
         logger.warning("cluster_canonical_missing", path=str(canonical_path))
@@ -884,7 +1201,41 @@ def cluster_canonical_narrators(
     if not records:
         return ClusterMetrics(0, 0, 0, 0, 0)
 
-    clusters = cluster_records(records, threshold=threshold, max_block_size=max_block_size)
+    # Fingerprint the clustering-driver columns of the input so a checkpoint taken
+    # against a different canonical set / threshold / cap is discarded (da#272).
+    ckpt_dir: Path | None = None
+    fingerprint = ""
+    if staging_dir is not None:
+        ckpt_dir = checkpoint_dir(staging_dir, "cluster")
+        digests, _rows = hash_parquet_column_groups(
+            canonical_path, {"content": _FINGERPRINT_CANONICAL_COLS}
+        )
+        # The da#270 caps (_MAX_MATCH_KEYS_PER_RECORD / _MAX_BLOCKING_TOKENS_PER_RECORD)
+        # are module constants, not threaded params, but they shape the block
+        # UNIVERSE — the match-key cap feeds keys_cache/tok_cache and the
+        # blocking-token cap feeds pair_index → the `blocks` list membership,
+        # order, and count. Because the resume skip-set is POSITIONAL block indices,
+        # a resume across a cap change would otherwise match the fingerprint yet
+        # restore indices pointing at different blocks. Hashing the caps discards
+        # the checkpoint on any cap change (da#303).
+        fingerprint = hash_strings(
+            digests["content"],
+            round(threshold, 6),
+            max_block_size,
+            len(records),
+            _MAX_MATCH_KEYS_PER_RECORD,
+            _MAX_BLOCKING_TOKENS_PER_RECORD,
+        )
+
+    clusters = cluster_records(
+        records,
+        threshold=threshold,
+        max_block_size=max_block_size,
+        ckpt_dir=ckpt_dir,
+        fingerprint=fingerprint,
+        resume=resume,
+        stop_after=stop_after,
+    )
 
     merged_rows: list[dict[str, Any]] = []
     remap: dict[str, str] = {}
@@ -905,6 +1256,11 @@ def cluster_canonical_narrators(
                 cross_source += 1
 
     write_parquet(_build_table(merged_rows), canonical_path, schema=NARRATORS_CANONICAL_SCHEMA)
+
+    # Clustering completed and the canonical table is rewritten — drop the
+    # checkpoint so the next cold run doesn't spuriously resume (da#272).
+    if ckpt_dir is not None:
+        clear_checkpoint(ckpt_dir)
 
     remapped = (
         _remap_mention_canonical_ids(mentions_path, remap) if mentions_path is not None else 0

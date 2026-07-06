@@ -17,11 +17,14 @@ from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 from rapidfuzz import fuzz
 
 from src.models.enums import DatePrecision
 from src.parse.identity import make_canonical_id
+from src.resolve import fuzzy_cluster as fc
 from src.resolve.fuzzy_cluster import (
+    _match_keys,
     cluster_assignment,
     cluster_canonical_narrators,
     cluster_records,
@@ -282,6 +285,72 @@ def test_empty_and_missing_inputs_are_noops(tmp_path: Path) -> None:
     _write_canonical(empty, [])
     m2 = cluster_canonical_narrators(empty)
     assert m2.input_records == 0 and m2.merged_records == 0
+
+
+# ---------------------------------------------------------------------------
+# da#270: per-record match-key + blocking-token caps (throughput guard)
+# ---------------------------------------------------------------------------
+def test_match_keys_caps_alias_explosion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A record with hundreds of aliases contributes only the capped key count.
+
+    The O(K²) block cdist is the clustering bottleneck (da#270); capping keys per
+    record bounds a pathological record's contribution. The name is always kept
+    first so exact-name/single-token matching is never lost.
+    """
+    monkeypatch.setattr(fc, "_MAX_MATCH_KEYS_PER_RECORD", 8)
+    rec = _rec("محمد بن اسماعيل البخاري", aliases=[f"اسم رقم {i}" for i in range(200)])
+    keys = _match_keys(rec)
+    assert len(keys) == 8
+    assert keys[0] == rec["name_ar_normalized"], "name must survive the cap, first"
+
+
+def test_match_keys_cap_none_keeps_all(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cap is disable-able (exact pre-da#270 behaviour for the harness)."""
+    monkeypatch.setattr(fc, "_MAX_MATCH_KEYS_PER_RECORD", None)
+    rec = _rec("محمد البخاري", aliases=[f"variant {i}" for i in range(50)])
+    assert len(_match_keys(rec)) == 51  # name + 50 aliases
+
+
+def test_alias_rich_record_still_clusters_on_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Capping keys must not lose a merge justified by the name itself.
+
+    Even truncated to a tiny key budget, an alias-bloated record still carries its
+    name first, so a genuine nasab-expansion variant still clusters with it.
+    """
+    monkeypatch.setattr(fc, "_MAX_MATCH_KEYS_PER_RECORD", 4)
+    bloated = _rec(
+        "محمد بن اسماعيل البخاري",
+        source_corpora=["itqan"],
+        death_year_ah=256,
+        aliases=[f"لقب {i}" for i in range(300)],
+    )
+    variant = _rec("محمد بن اسماعيل", source_corpora=["sanadset"], death_year_ah=256)
+    clusters = cluster_records([bloated, variant])
+    assert sorted(len(g) for g in clusters) == [2]  # merged despite the cap
+
+
+def test_blocking_token_cap_bounds_reach(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The blocking-token cap trims a pathological record's block reach.
+
+    With the cap at 2, a record is blocked only on its two lowest-sorted
+    significant tokens; a genuine variant that shares *only* higher-sorted tokens
+    is no longer co-blocked, so it does not merge. Uncapped it does. This is the
+    lever that stops a 1,000-token pollution "name" from joining ~500k blocks.
+    """
+    # Shared tokens ثيثا/ثيثب sort AFTER the padding tokens اا/اب, so a cap of 2
+    # (which keeps only اا/اب on ``poll``) drops the pair that would block these two
+    # together. ``variant`` is a pure token-subset so its token_set_ratio is 100.
+    poll = _rec("اا اب ثيثا ثيثب", source_corpora=["x"])
+    variant = _rec("ثيثا ثيثب", source_corpora=["y"])
+
+    monkeypatch.setattr(fc, "_MAX_BLOCKING_TOKENS_PER_RECORD", None)
+    uncapped = cluster_records([poll, variant])
+
+    monkeypatch.setattr(fc, "_MAX_BLOCKING_TOKENS_PER_RECORD", 2)
+    capped = cluster_records([poll, variant])
+
+    assert sorted(len(g) for g in uncapped) == [2], "shared tokens merge when uncapped"
+    assert sorted(len(g) for g in capped) == [1, 1], "cap drops the late-token block"
 
 
 def test_unset_precision_defaults_to_unknown(tmp_path: Path) -> None:

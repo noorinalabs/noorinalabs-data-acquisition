@@ -55,6 +55,16 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.models.enums import VariantType
+from src.resolve._checkpoint import (
+    CheckpointController,
+    checkpoint_dir,
+    clear_checkpoint,
+    hash_parquet_column_groups,
+    load_checkpoint,
+    log_resume,
+    resolve_cadence,
+    save_checkpoint,
+)
 from src.resolve.schemas import PARALLEL_LINKS_SCHEMA
 from src.utils.arabic import is_arabic, normalize_arabic
 from src.utils.logging import get_logger
@@ -87,6 +97,18 @@ _DEFAULT_THRESHOLD = 0.50
 #     hadiths share rarer content tokens (names, unusual phrasing) well under the
 #     cap, so they are still paired.
 _DEFAULT_MAX_BLOCK_DF = 500
+
+# Crash-resume for the anchor-scan (da#272). The anchor loop is the long part on
+# the full corpus; checkpoint the accumulated links + next anchor every
+# `_PARALLELS_CHECKPOINT_EVERY_N_BLOCKS` blocks of `_PARALLELS_ANCHORS_PER_BLOCK`
+# anchors. The `indexed`/`postings` structures are rebuilt deterministically from
+# the same hadith files on resume, and the fingerprint discards a checkpoint taken
+# against changed input, so the continuation is byte-identical to a cold scan.
+_PARALLELS_ANCHORS_PER_BLOCK = 2_000
+_PARALLELS_CHECKPOINT_EVERY_N_BLOCKS = 4
+_PARALLELS_CHECKPOINT_SCHEMA_VERSION = 1
+# Columns whose content determines the tokenized anchors and therefore the links.
+_FINGERPRINT_HADITH_COLS = ("source_id", "matn_ar", "matn_en", "sect")
 
 
 def _classify_pair(score: float) -> VariantType:
@@ -196,6 +218,9 @@ def detect_parallels(
     *,
     threshold: float = _DEFAULT_THRESHOLD,
     max_block_df: int = _DEFAULT_MAX_BLOCK_DF,
+    resume: bool = True,
+    checkpoint_every_n_blocks: int | None = None,
+    stop_after: int | None = None,
 ) -> Path:
     """Detect parallel hadiths by lexical matn similarity.
 
@@ -209,6 +234,17 @@ def detect_parallels(
     full corpus; corpora no larger than ``max_block_df`` keep every token as a
     blocking key, making the result identical to an exhaustive scan. See the
     module "Scale note".
+
+    The anchor scan is crash-resumable (da#272): with ``resume=True`` a valid
+    checkpoint restores the accumulated links and continues from the next unscanned
+    anchor. ``indexed``/``postings`` are rebuilt deterministically from the same
+    hadith files, and the input fingerprint discards a checkpoint taken against
+    changed hadiths, so a resumed scan's output is byte-identical to a cold one.
+    ``resume=False`` forces a cold scan.
+
+    ``stop_after`` (da#276): stop after this many checkpoint writes, leaving the
+    checkpoint on disk and WITHOUT writing ``parallel_links.parquet`` — raises
+    :class:`~src.resolve._checkpoint.StopAfterReached`. ``None`` runs to completion.
     """
     rows = _load_hadith_rows(staging_dir)
 
@@ -231,9 +267,50 @@ def detect_parallels(
 
     postings = _build_postings(indexed)
 
+    # --- Crash-resume (da#272): fingerprint the hadith input + the params that
+    # change which links are emitted, then try to restore the scan state.
+    ckpt_dir = checkpoint_dir(staging_dir, "parallels")
+    hadith_files = sorted(staging_dir.glob("**/hadiths_*.parquet"))
+    digests, _rows = hash_parquet_column_groups(hadith_files, {"content": _FINGERPRINT_HADITH_COLS})
+    fingerprint = f"{digests['content']}:{round(threshold, 6)}:{max_block_df}:{len(indexed)}"
+    cadence = resolve_cadence(
+        checkpoint_every_n_blocks,
+        "PARALLELS_CHECKPOINT_EVERY_N_BLOCKS",
+        _PARALLELS_CHECKPOINT_EVERY_N_BLOCKS,
+    )
+
     records: list[dict[str, object]] = []
     cross_sect_count = 0
-    for i in range(len(indexed)):
+    start_i = 0
+
+    if not resume:
+        clear_checkpoint(ckpt_dir)
+    else:
+        ckpt = load_checkpoint(ckpt_dir)
+        if ckpt is not None:
+            layout_ok = ckpt.get("schema_version") == _PARALLELS_CHECKPOINT_SCHEMA_VERSION
+            fp_ok = ckpt.get("fingerprint") == fingerprint
+            if layout_ok and fp_ok:
+                records = list(ckpt["records"])
+                cross_sect_count = int(ckpt["cross_sect_count"])
+                start_i = int(ckpt["processed_anchors"])
+                log_resume("parallels", skipped=start_i, total=len(indexed), pairs=len(records))
+            else:
+                clear_checkpoint(ckpt_dir)
+
+    def _snapshot(processed_anchors: int) -> dict[str, object]:
+        return {
+            "schema_version": _PARALLELS_CHECKPOINT_SCHEMA_VERSION,
+            "fingerprint": fingerprint,
+            "processed_anchors": processed_anchors,
+            "cross_sect_count": cross_sect_count,
+            "records": records,
+        }
+
+    # One "batch" = `_PARALLELS_ANCHORS_PER_BLOCK` anchors; the controller writes a
+    # checkpoint every `cadence` such blocks and enforces the --stop-after budget.
+    controller = CheckpointController(cadence, stop_after=stop_after)
+    for i in range(start_i, len(indexed)):
         id_i, sect_i, tok_i = indexed[i]
         for j in _candidate_partners(i, tok_i, postings, max_block_df):
             id_j, sect_j, tok_j = indexed[j]
@@ -254,8 +331,25 @@ def detect_parallels(
                     "cross_sect": cross_sect,
                 }
             )
+        # Checkpoint on anchor-block boundaries — `i + 1` anchors are complete.
+        if (i + 1) % _PARALLELS_ANCHORS_PER_BLOCK == 0 and controller.batch_complete():
+            save_checkpoint(ckpt_dir, _snapshot(i + 1))
+            logger.info(
+                "parallels_checkpoint_saved",
+                processed=i + 1,
+                total=len(indexed),
+                pairs=len(records),
+            )
+            if controller.checkpoint_written():
+                # --stop-after budget hit (da#276): checkpoint on disk, links not
+                # written — perf summary + halt.
+                controller.stop(
+                    "parallels", processed=i + 1, total=len(indexed), pairs=len(records)
+                )
 
     output_path = _write_links(staging_dir, records)
+    # Scan completed and the output is on disk — drop the checkpoint (da#272).
+    clear_checkpoint(ckpt_dir)
     log = logger.warning if indexed and not records else logger.info
     log(
         "parallels_detected",
@@ -269,8 +363,16 @@ def detect_parallels(
     return output_path
 
 
-def run(staging_dir: Path, output_dir: Path) -> list[Path]:  # noqa: ARG001
+def run(
+    staging_dir: Path,
+    output_dir: Path,  # noqa: ARG001
+    *,
+    resume: bool = True,
+    stop_after: int | None = None,
+) -> list[Path]:
     """Resolve-pipeline entry point. ``output_dir`` is accepted for interface
     symmetry with the other resolve stages; links are written into *staging_dir*
-    next to the hadith parquet the graph loader reads."""
-    return [detect_parallels(staging_dir)]
+    next to the hadith parquet the graph loader reads. ``resume`` (da#272) threads
+    to the anchor-scan checkpoint; ``stop_after`` (da#276) bounds it to N
+    checkpoint writes then raises ``StopAfterReached`` (no links written)."""
+    return [detect_parallels(staging_dir, resume=resume, stop_after=stop_after)]

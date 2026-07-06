@@ -16,6 +16,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -25,7 +26,17 @@ from rapidfuzz.distance import Levenshtein
 from src.models.enums import DatePrecision
 from src.parse.base import safe_str, write_parquet
 from src.parse.identity import make_canonical_id
+from src.resolve._checkpoint import (
+    CheckpointController,
+    checkpoint_dir,
+    clear_checkpoint,
+    hash_parquet_column_groups,
+    load_checkpoint,
+    resolve_cadence,
+    save_checkpoint,
+)
 from src.resolve.geography import regions_plausible, resolve_region
+from src.resolve.mononym_split import refine_mononym_name
 from src.resolve.schemas import (
     AMBIGUOUS_NARRATORS_SCHEMA,
     NARRATOR_MENTIONS_RESOLVED_SCHEMA,
@@ -60,6 +71,24 @@ _MENTION_BATCH_SIZE = 50_000
 
 # Progress log interval.
 _PROGRESS_LOG_INTERVAL = 10_000
+
+# ---------------------------------------------------------------------------
+# Crash-resume checkpointing (da#268)
+# ---------------------------------------------------------------------------
+# Directory (under the gitignored staging tree) that holds the mid-stream
+# checkpoint of run()'s accumulated state. Cleaned up after a successful run.
+_CHECKPOINT_DIRNAME = ".disambiguate_checkpoint"
+
+# Persist the accumulated state every N completed mention batches. At the prod
+# streaming rate (~3.1M mentions over ~5-6 h ⇒ one 50k batch every ~5 min) this
+# bounds crash-loss to ~4 batches ≈ ~20 min of recompute while keeping the
+# JSON-write overhead well under 1% of wall-clock. Override for ops via
+# DISAMBIGUATE_CHECKPOINT_EVERY_N_BATCHES or the run() kwarg (tests use 1-2).
+_CHECKPOINT_EVERY_N_BATCHES = 4
+
+# Bump when the persisted payload layout changes so a stale-layout checkpoint is
+# rejected (cold start) rather than mis-read.
+_CHECKPOINT_SCHEMA_VERSION = 1
 
 
 # ---------------------------------------------------------------------------
@@ -398,11 +427,16 @@ def _load_candidates(staging_dir: Path) -> list[Candidate]:
 
 def _iter_mention_batches(
     mentions_dir: Path,
+    batch_size: int = _MENTION_BATCH_SIZE,
 ) -> Iterator[list[dict[str, str | int | float | None]]]:
     """Stream narrator mentions from Parquet in fixed-size batches.
 
     Reads the file using row-group-based iteration to avoid loading
-    all 3.3M rows into memory at once.
+    all 3.3M rows into memory at once. ``batch_size`` is the number of mentions
+    per yielded batch; it is a parameter (rather than the bare module constant)
+    so the checkpoint cadence and small-fixture tests can drive it deterministically
+    — the batch sequence is a pure function of (file content, batch_size), which is
+    what makes a resumed run's skip-then-continue byte-identical to a cold run.
     """
     path = mentions_dir / "narrator_mentions_resolved.parquet"
     if not path.exists():
@@ -411,7 +445,7 @@ def _iter_mention_batches(
 
     pf = pq.ParquetFile(path)
     total_rows = pf.metadata.num_rows
-    logger.info("mentions_streaming_start", total_rows=total_rows, batch_size=_MENTION_BATCH_SIZE)
+    logger.info("mentions_streaming_start", total_rows=total_rows, batch_size=batch_size)
 
     batch: list[dict[str, str | int | float | None]] = []
     for rg_idx in range(pf.metadata.num_row_groups):
@@ -428,7 +462,7 @@ def _iter_mention_batches(
                     "transmission_method": safe_str(table.column("transmission_method")[i].as_py()),
                 }
             )
-            if len(batch) >= _MENTION_BATCH_SIZE:
+            if len(batch) >= batch_size:
                 yield batch
                 batch = []
     if batch:
@@ -541,6 +575,27 @@ def _backfill_mention_canonical_ids(
         total=total_rows,
     )
     return backfilled
+
+
+# ---------------------------------------------------------------------------
+# Mononym-split evidence (da#248)
+# ---------------------------------------------------------------------------
+def _adjacent_death_years(
+    death_year_index: dict[str, int | None], hadith_id: str, position: int
+) -> list[int]:
+    """Death years of the mention's immediate chain neighbours (positions ±1).
+
+    Reads the incrementally-populated ``death_year_index`` (the same soft signal
+    the temporal filter uses), returning only the neighbours already resolved to a
+    dated candidate. This is the chain-context evidence the da#248 mononym split
+    uses to re-resolve a bare over-merged mononym to a specific person.
+    """
+    years: list[int] = []
+    for offset in (-1, 1):
+        year = death_year_index.get(f"{hadith_id}:{position + offset}")
+        if year is not None:
+            years.append(year)
+    return years
 
 
 # ---------------------------------------------------------------------------
@@ -882,9 +937,63 @@ def _upsert_canonical(
 
 
 # ---------------------------------------------------------------------------
+# Crash-resume checkpoint plumbing (da#268, unified under src/resolve/_checkpoint
+# by da#272 — dir/save/load/clear/cadence + the column hasher are shared; only
+# this stage's fingerprint SPLIT and state SHAPE stay local).
+# ---------------------------------------------------------------------------
+# Columns hashed for the input fingerprint. Split into the STABLE disambiguation
+# drivers and the mention_id join key so a resume can tell a changed corpus apart
+# from an identical-content NER *rewrite* that only regenerated the random uuid4
+# mention_ids (ner.py mints mention_id via uuid.uuid4()).
+_FINGERPRINT_CONTENT_COLS = (
+    "hadith_id",
+    "source_corpus",
+    "position_in_chain",
+    "name_raw",
+    "name_normalized",
+    "transmission_method",
+)
+
+
+def _compute_input_fingerprint(mentions_path: Path) -> tuple[str, str, int]:
+    """Content fingerprint of the disambiguation input, independent of file mtime.
+
+    Returns ``(content_hash, mention_id_hash, total_rows)``. ``content_hash`` covers
+    the STABLE disambiguation-driving columns in row order; ``mention_id_hash`` covers
+    the NER-minted ``mention_id`` column. They are split so a resume can distinguish a
+    genuinely changed corpus (``content_hash`` differs ⇒ cold start) from an
+    identical-content NER rewrite that merely re-randomised ``mention_id`` (content
+    matches, id differs ⇒ cold start *with a precise "reuse the file via --from-step
+    disambiguate" hint*, since ``mention_id`` is the backfill/audit join key baked into
+    the outputs). Excludes ``canonical_narrator_id``/``confidence`` (rewritten by the
+    end-of-run backfill) and mtime.
+
+    Delegates the streaming SHA-256 to the shared
+    :func:`~src.resolve._checkpoint.hash_parquet_column_groups`, which hashes both
+    groups in a single row-group pass (peak memory one row-group, not the whole
+    3.3M-row file). The per-group digests are byte-identical to hashing each
+    column set on its own, so a checkpoint written by the pre-da#272 code resumes
+    unchanged.
+    """
+    digests, total = hash_parquet_column_groups(
+        mentions_path,
+        {"content": _FINGERPRINT_CONTENT_COLS, "mention_id": ("mention_id",)},
+    )
+    return digests["content"], digests["mention_id"], total
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
-def run(staging_dir: Path, output_dir: Path) -> list[Path]:
+def run(
+    staging_dir: Path,
+    output_dir: Path,
+    *,
+    batch_size: int = _MENTION_BATCH_SIZE,
+    checkpoint_every_n_batches: int | None = None,
+    resume: bool = True,
+    stop_after: int | None = None,
+) -> list[Path]:
     """Disambiguate narrator mentions to canonical narrator records.
 
     Multi-stage pipeline: exact match, fuzzy match, temporal filter,
@@ -892,6 +1001,38 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
 
     Uses blocking indexes and batch streaming to handle 3M+ mentions
     within <30min and <4GB peak memory.
+
+    Crash-resumable (da#268): the streaming loop persists its accumulated state
+    (canonical registry, chain-context indexes, resolved/merge/ambiguous rows,
+    processed offset) to ``staging_dir/.disambiguate_checkpoint/`` every
+    ``checkpoint_every_n_batches`` batches, fingerprinting the input so a re-run
+    resumes from the last checkpoint instead of restarting the multi-hour stage.
+    On start, a checkpoint whose fingerprint matches the current input resumes
+    (``disambiguate_resume`` event); a mismatch or absence cold-starts. The
+    checkpoint dir is removed after a successful complete run.
+
+    Because ``mention_id`` is NER-minted per run (``uuid.uuid4()``) and is baked
+    into the outputs, an output-identical resume requires reading the SAME
+    mentions file — so the sanctioned recovery command is
+    ``resolve --from-step disambiguate`` (skips NER, reuses the existing file). A
+    bare re-run that regenerates NER ids cold-starts safely (never corrupt).
+
+    Parameters
+    ----------
+    batch_size:
+        Mentions per streaming batch (checkpoints land on batch boundaries).
+    checkpoint_every_n_batches:
+        Checkpoint cadence override; ``None`` resolves from the
+        ``DISAMBIGUATE_CHECKPOINT_EVERY_N_BATCHES`` env var then the default.
+    resume:
+        When ``False``, ignore and clear any existing checkpoint and cold-start
+        (still checkpoints forward). Default ``True``.
+    stop_after:
+        Bounded partial-run probe (da#276): stop cleanly after this many
+        checkpoint writes, leaving the checkpoint on disk (a later bare run
+        resumes from it) and WITHOUT writing final output — raises
+        :class:`~src.resolve._checkpoint.StopAfterReached`. ``None`` runs to
+        completion.
     """
     logger.info(
         "disambiguate_run_start",
@@ -948,7 +1089,100 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
 
     processed = 0
 
-    for batch in _iter_mention_batches(output_dir):
+    # --- Crash-resume (da#268): fingerprint the input and try to restore state.
+    cadence = resolve_cadence(
+        checkpoint_every_n_batches,
+        "DISAMBIGUATE_CHECKPOINT_EVERY_N_BATCHES",
+        _CHECKPOINT_EVERY_N_BATCHES,
+    )
+    ckpt_dir = checkpoint_dir(staging_dir, "disambiguate")
+    mentions_path = output_dir / "narrator_mentions_resolved.parquet"
+    content_hash, mention_id_hash, _fp_rows = _compute_input_fingerprint(mentions_path)
+    mentions_to_skip = 0
+
+    if not resume:
+        clear_checkpoint(ckpt_dir)
+    else:
+        ckpt = load_checkpoint(ckpt_dir)
+        if ckpt is not None:
+            valid_layout = ckpt.get("schema_version") == _CHECKPOINT_SCHEMA_VERSION
+            content_ok = ckpt.get("content_hash") == content_hash
+            ids_ok = ckpt.get("mention_id_hash") == mention_id_hash
+            if valid_layout and content_ok and ids_ok:
+                # Restore every accumulator exactly as it stood at the checkpoint,
+                # then skip the already-consumed prefix so the continuation is
+                # byte-identical to a cold run.
+                death_year_index = dict(ckpt["death_year_index"])
+                location_index = dict(ckpt["location_index"])
+                canonical_map = dict(ckpt["canonical_map"])
+                merge_log_rows = list(ckpt["merge_log_rows"])
+                ambiguous_rows = list(ckpt["ambiguous_rows"])
+                resolved_map = {
+                    str(k): (str(v[0]), v[1]) for k, v in dict(ckpt["resolved_map"]).items()
+                }
+                naive_identity_pairs = {
+                    (str(pair[0]), str(pair[1])) for pair in ckpt["naive_identity_pairs"]
+                }
+                source_resolved = dict(ckpt["source_resolved"])
+                source_total = dict(ckpt["source_total"])
+                processed = int(ckpt["processed"])
+                mentions_to_skip = processed
+                logger.info(
+                    "disambiguate_resume",
+                    resumed_from=processed,
+                    total=total_mentions,
+                    pct=round(processed / max(total_mentions, 1) * 100, 1),
+                    canonical=len(canonical_map),
+                )
+            elif valid_layout and content_ok and not ids_ok:
+                # Same corpus content, but mention_ids were regenerated (an NER
+                # rewrite — mention_id is a per-run uuid4). Resuming would splice
+                # stale ids into the mention-keyed outputs, so cold-start and tell
+                # the operator how to make the resume compose (reuse the file).
+                logger.warning(
+                    "disambiguate_checkpoint_stale_mention_ids",
+                    hint="input content matches but mention_ids were rewritten; "
+                    "rerun with `resolve --from-step disambiguate` to reuse the "
+                    "existing mentions file and resume the checkpoint",
+                )
+                clear_checkpoint(ckpt_dir)
+            else:
+                logger.info("disambiguate_checkpoint_mismatch", reason="cold start")
+                clear_checkpoint(ckpt_dir)
+
+    def _snapshot() -> dict[str, Any]:
+        """Serialize the current accumulated state for the checkpoint."""
+        return {
+            "schema_version": _CHECKPOINT_SCHEMA_VERSION,
+            "content_hash": content_hash,
+            "mention_id_hash": mention_id_hash,
+            "total_rows": total_mentions,
+            "batch_size": batch_size,
+            "processed": processed,
+            "death_year_index": death_year_index,
+            "location_index": location_index,
+            "canonical_map": canonical_map,
+            "merge_log_rows": merge_log_rows,
+            "ambiguous_rows": ambiguous_rows,
+            "resolved_map": {k: [v[0], v[1]] for k, v in resolved_map.items()},
+            "naive_identity_pairs": [[a, b] for (a, b) in naive_identity_pairs],
+            "source_resolved": source_resolved,
+            "source_total": source_total,
+        }
+
+    controller = CheckpointController(cadence, stop_after=stop_after)
+
+    for batch in _iter_mention_batches(output_dir, batch_size=batch_size):
+        # Skip the prefix already processed before the resume point. Checkpoints
+        # land on batch boundaries so this normally drops whole batches; the
+        # partial-slice branch is a safety net for any non-aligned offset.
+        if mentions_to_skip > 0:
+            if mentions_to_skip >= len(batch):
+                mentions_to_skip -= len(batch)
+                continue
+            batch = batch[mentions_to_skip:]
+            mentions_to_skip = 0
+
         for mention in batch:
             corpus = str(mention.get("source_corpus", "unknown"))
             source_total[corpus] = source_total.get(corpus, 0) + 1
@@ -959,30 +1193,62 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
 
             mention_id = str(mention.get("mention_id", ""))
             mention_text = str(mention.get("name_normalized") or mention.get("name_raw") or "")
+            hadith_id = str(mention.get("hadith_id", ""))
+            position = int(mention.get("position_in_chain") or 0)
 
             if best and best.score >= _CONFIDENCE_THRESHOLD:
                 # Resolved to a biographical candidate.
                 source_resolved[corpus] = source_resolved.get(corpus, 0) + 1
                 c = best.candidate
                 norm_name = c.name_ar_normalized or normalize_arabic(c.name_ar or "")
+                name_ar = c.name_ar
+                name_en = c.name_en
+                candidate: Candidate | None = c
+
+                # da#248: split an over-merged bare mononym (e.g. سفيان) into the
+                # specific person the chain neighbours' generations select. Abstains
+                # (leaves norm_name unchanged) for every non-registered name and for
+                # ambiguous/absent evidence, so no single-person node is fragmented.
+                # On a split we drop the ambiguous mononym bio (candidate/name_en) so
+                # its dates/external_id are not stamped onto the specific person.
+                person = refine_mononym_name(
+                    norm_name, _adjacent_death_years(death_year_index, hadith_id, position)
+                )
+                if person is not None:
+                    norm_name = person.norm_name
+                    name_ar = person.name_ar
+                    name_en = None
+                    candidate = None
+
                 canonical_id = _make_canonical_id(norm_name)
 
-                # Update death-year + location indexes for chain context.
-                hadith_id = str(mention.get("hadith_id", ""))
-                position = int(mention.get("position_in_chain") or 0)
-                death_year_index[f"{hadith_id}:{position}"] = c.death_year_ah
-                cand_location = c.death_location or c.birth_location
-                if cand_location:
-                    location_index[f"{hadith_id}:{position}"] = cand_location
+                # Update death-year + location indexes for chain context (da#266).
+                # On a mononym split the chain-context slot must carry the REFINED
+                # person's real death year, not the ambiguous pre-split mononym bio's
+                # (`c`) — else an immediately chain-adjacent registered mononym reads a
+                # stale year and can mis-select among genuinely-distinct persons. The
+                # split already drops `c` (candidate/name_en set None above); the soft
+                # signals must follow. The registry carries no per-person location, and
+                # `c`'s location belongs to whichever person the merged bio represented
+                # (possibly the wrong one post-split), so it is suppressed on a split —
+                # the neighbour simply contributes no geographic signal, same as an
+                # absent-location neighbour.
+                if person is not None:
+                    death_year_index[f"{hadith_id}:{position}"] = person.death_year_ah
+                else:
+                    death_year_index[f"{hadith_id}:{position}"] = c.death_year_ah
+                    cand_location = c.death_location or c.birth_location
+                    if cand_location:
+                        location_index[f"{hadith_id}:{position}"] = cand_location
 
                 _upsert_canonical(
                     canonical_map,
                     canonical_id,
                     norm_name=norm_name,
-                    name_ar=c.name_ar,
-                    name_en=c.name_en,
+                    name_ar=name_ar,
+                    name_en=name_en,
                     alias=mention_text,
-                    candidate=c,
+                    candidate=candidate,
                     corpus=corpus,
                 )
                 naive_identity_pairs.add((corpus, canonical_id))
@@ -1010,12 +1276,23 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
                     str(mention.get("name_raw") or "")
                 )
                 if fallback_name:
+                    fallback_name_ar = str(mention.get("name_raw") or "") or None
+                    # da#248: same mononym split on the self-canonicalized path — a
+                    # bare over-merged mononym with no bio match still resolves to the
+                    # specific person the chain neighbours select (or abstains).
+                    person = refine_mononym_name(
+                        fallback_name,
+                        _adjacent_death_years(death_year_index, hadith_id, position),
+                    )
+                    if person is not None:
+                        fallback_name = person.norm_name
+                        fallback_name_ar = person.name_ar
                     fallback_id = _make_canonical_id(fallback_name)
                     _upsert_canonical(
                         canonical_map,
                         fallback_id,
                         norm_name=fallback_name,
-                        name_ar=(str(mention.get("name_raw") or "") or None),
+                        name_ar=fallback_name_ar,
                         name_en=None,
                         alias=None,
                         candidate=None,
@@ -1061,6 +1338,26 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
                     total=total_mentions,
                     pct=round(processed / total_mentions * 100, 1),
                     resolved=sum(source_resolved.values()),
+                    canonical=len(canonical_map),
+                )
+
+        # Checkpoint on batch boundaries (da#268). ``processed`` is batch-aligned
+        # here, so a resume skips whole batches and continues identically.
+        if controller.batch_complete():
+            save_checkpoint(ckpt_dir, _snapshot())
+            logger.info(
+                "disambiguate_checkpoint_saved",
+                processed=processed,
+                total=total_mentions,
+                canonical=len(canonical_map),
+            )
+            if controller.checkpoint_written():
+                # --stop-after budget hit: checkpoint is on disk, no output written
+                # yet — emit perf summary and halt (da#276).
+                controller.stop(
+                    "disambiguate",
+                    processed=processed,
+                    total=total_mentions,
                     canonical=len(canonical_map),
                 )
 
@@ -1145,6 +1442,10 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
         _backfill_mention_canonical_ids(
             output_dir / "narrator_mentions_resolved.parquet", resolved_map
         )
+
+    # The run completed and all outputs are on disk — drop the checkpoint so the
+    # next cold run doesn't spuriously resume against stale state (da#268).
+    clear_checkpoint(ckpt_dir)
 
     logger.info(
         "disambiguate_run_complete",

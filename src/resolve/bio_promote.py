@@ -28,6 +28,7 @@ import pyarrow.parquet as pq
 from src.models.enums import DatePrecision
 from src.parse.base import safe_str, write_parquet
 from src.parse.identity import make_canonical_id
+from src.parse.name_quality import clean_narrator_name
 from src.resolve.schemas import NARRATORS_CANONICAL_SCHEMA
 from src.resolve.sect_affiliation import (
     derive_sect_affiliation,
@@ -128,6 +129,14 @@ def promote_bios_to_canonical(
 
     Returns the canonical Parquet path, or ``None`` when there are no bios to
     promote (no file written).
+
+    Crash-resume (da#272): EXEMPT from intra-stage checkpointing. This is a
+    sub-minute merge over the handful of ``narrators_bio_*`` shards (not a
+    multi-hour stream), and it is already idempotent — a MERGE into the canonical
+    table (da#99/da#117), so simply re-running it after a crash reproduces the
+    same result. A checkpoint would add machinery and a serialized-state failure
+    surface for no recovery-time saving. Recovery re-runs it via
+    ``resolve --from-step bio_promote``.
     """
     bio_files = sorted(staging_dir.glob("narrators_bio_*.parquet"))
     if not bio_files:
@@ -141,6 +150,7 @@ def promote_bios_to_canonical(
     promoted = 0
     skipped_no_name = 0
     skipped_source = 0
+    skipped_pollution = 0
 
     for bf in bio_files:
         table = pq.read_table(bf)
@@ -160,6 +170,19 @@ def promote_bios_to_canonical(
             if not norm:
                 skipped_no_name += 1
                 continue
+
+            # Apply the SAME name-quality filter the NER mention path runs (da#247/
+            # da#271). bio_promote previously bypassed it, so honorific/eulogy-laden
+            # bio names — the kaggle rijāl table is 100% such ("… رضي الله عنه",
+            # "رسول الله صلى الله عليه واله") — minted polluted canonical nodes
+            # straight from the bio table, unfiltered. Drop when the cleaner rejects
+            # the span; otherwise promote the cleaned form so a benediction-suffixed
+            # bio merges onto the clean mention-derived node instead of forking it.
+            cleaned = clean_narrator_name(norm)
+            if not cleaned:
+                skipped_pollution += 1
+                continue
+            norm = cleaned
 
             bio_id = safe_str(row.get("bio_id"))
             cid = make_canonical_id(norm)
@@ -236,6 +259,7 @@ def promote_bios_to_canonical(
         pre_existing=pre_existing,
         skipped_no_name=skipped_no_name,
         skipped_source=skipped_source,
+        skipped_pollution=skipped_pollution,
         aliases_added=aliases_added,
     )
     return canonical_path

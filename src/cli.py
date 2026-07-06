@@ -101,25 +101,48 @@ def _cmd_parse() -> None:
     print(f"Parsing complete. {total_files} staging files produced.")
 
 
-def _cmd_resolve() -> None:
+def _cmd_resolve(
+    *, from_step: str | None = None, resume: bool = True, stop_after: int | None = None
+) -> None:
     """Run the Phase 2 entity resolution pipeline."""
     from pathlib import Path
 
     from src.config import get_settings
+    from src.resolve import EXIT_STOPPED_AT_LIMIT, StopAfterReached
     from src.resolve import run_all as resolve_all
 
     settings = get_settings()
-    results = resolve_all(
-        Path(settings.data_raw_dir),
-        Path(settings.data_staging_dir),
-        Path(settings.data_curated_dir),
-    )
+    if from_step:
+        print(f"Resuming resolve from step: {from_step}")
+    if not resume:
+        print("Crash-resume disabled (--no-resume): every stage cold-starts.")
+    if stop_after is not None:
+        print(f"Bounded probe: will stop after {stop_after} checkpoint(s) (--stop-after).")
+    try:
+        results = resolve_all(
+            Path(settings.data_raw_dir),
+            Path(settings.data_staging_dir),
+            Path(settings.data_curated_dir),
+            from_step=from_step,
+            resume=resume,
+            stop_after=stop_after,
+        )
+    except StopAfterReached as stopped:
+        # A stage hit its --stop-after budget: the pipeline halted with the
+        # checkpoint on disk and no partial output written. Surface the perf
+        # summary and exit with a status distinct from completion/crash (da#276).
+        print(f"\n{stopped.summary()}")
+        sys.exit(EXIT_STOPPED_AT_LIMIT)
     total = sum(len(v) for v in results.values())
     print(f"\nResolution complete. {total} output files.")
 
 
 def _cmd_load(
-    *, skip_validation: bool = False, nodes_only: bool = False, incremental: bool = False
+    *,
+    skip_validation: bool = False,
+    nodes_only: bool = False,
+    incremental: bool = False,
+    validation_timeout: float | None = None,
 ) -> None:
     """Run the Phase 3 graph loading pipeline."""
     import time
@@ -132,6 +155,7 @@ def _cmd_load(
     _check_neo4j()
 
     from src.graph import load_all
+    from src.graph.validate import _DEFAULT_VALIDATION_TIMEOUT_SECONDS
     from src.pipeline.audit import create_audit_entry, write_audit_entry
     from src.pipeline.manifest import (
         LAST_LOADED_MANIFEST_FILENAME,
@@ -174,6 +198,12 @@ def _cmd_load(
                 entry["md5_before"] = previous_manifest[f]["md5"]
             changed_file_details.append(entry)
 
+    timeout_seconds = (
+        validation_timeout
+        if validation_timeout is not None
+        else _DEFAULT_VALIDATION_TIMEOUT_SECONDS
+    )
+
     with Neo4jClient() as client:
         summary = load_all(
             client,
@@ -184,6 +214,7 @@ def _cmd_load(
             skip_validation=skip_validation,
             nodes_only=nodes_only,
             skip_files=skipped_files if incremental else None,
+            validation_timeout_seconds=timeout_seconds,
         )
 
     duration = time.monotonic() - start
@@ -221,44 +252,58 @@ def _cmd_load(
     if summary.validation_results:
         print("\n=== Validation ===")
         for vr in summary.validation_results:
-            status = "PASS" if vr.passed else "FAIL"
-            print(f"  [{status}] {vr.query_name}: {vr.details}")
+            print(f"  [{vr.status}] {vr.query_name}: {vr.details}")
+        warned = [vr for vr in summary.validation_results if vr.warning]
         if not summary.validation_passed:
             print("\nWARNING: Some validation checks failed.")
             sys.exit(1)
+        elif warned:
+            # Non-fatal: the load succeeded and no check hard-failed; one or more
+            # checks were downgraded (e.g. timed out). da#259.
+            print(f"\nLoad OK. {len(warned)} validation check(s) downgraded to warning.")
         else:
             print("\nAll validation checks passed.")
 
 
-def _cmd_validate() -> None:
+def _cmd_validate(*, validation_timeout: float | None = None) -> None:
     """Run graph validation queries against an existing Neo4j database."""
     from pathlib import Path
 
     _check_neo4j()
 
-    from src.graph.validate import run_validation
+    from src.graph.validate import _DEFAULT_VALIDATION_TIMEOUT_SECONDS, run_validation
     from src.utils.neo4j_client import Neo4jClient
 
     queries_dir = Path("queries")
+    timeout_seconds = (
+        validation_timeout
+        if validation_timeout is not None
+        else _DEFAULT_VALIDATION_TIMEOUT_SECONDS
+    )
 
     with Neo4jClient() as client:
-        results = run_validation(client, queries_dir)
+        results = run_validation(client, queries_dir, timeout_seconds=timeout_seconds)
 
     if not results:
         print("No validation queries found.")
         sys.exit(0)
 
     print("=== Validation Results ===")
-    all_passed = True
+    any_fatal = False
+    warned = 0
     for vr in results:
-        status = "PASS" if vr.passed else "FAIL"
-        print(f"  [{status}] {vr.query_name}: {vr.details}")
-        if not vr.passed:
-            all_passed = False
+        print(f"  [{vr.status}] {vr.query_name}: {vr.details}")
+        if vr.is_fatal:
+            any_fatal = True
+        elif vr.warning:
+            warned += 1
 
-    if not all_passed:
+    if any_fatal:
         print("\nWARNING: Some validation checks failed.")
         sys.exit(1)
+    elif warned:
+        # Timed-out/downgraded checks are non-fatal (da#259).
+        print(f"\nValidation OK. {warned} check(s) downgraded to warning.")
     else:
         print("\nAll validation checks passed.")
 
@@ -424,17 +469,65 @@ def _cmd_pipeline() -> None:
 
 def main() -> None:
     """Run the isnad-ingest CLI."""
+    from src.graph.validate import _DEFAULT_VALIDATION_TIMEOUT_SECONDS
+
     parser = argparse.ArgumentParser(description="isnad-ingest: Hadith Data Ingestion Pipeline")
     subparsers = parser.add_subparsers(dest="command")
+
+    from src.resolve import RESOLVE_STEP_ORDER, RESUMABLE_STEPS
 
     subparsers.add_parser("info", help="Show configuration and database status")
     subparsers.add_parser("acquire", help="Download data sources")
     subparsers.add_parser("parse", help="Parse raw data to staging")
-    subparsers.add_parser("resolve", help="Entity resolution")
+    resolve_parser = subparsers.add_parser("resolve", help="Entity resolution")
+    resolve_parser.add_argument(
+        "--from-step",
+        choices=list(RESOLVE_STEP_ORDER),
+        default=None,
+        help=(
+            "Resume the pipeline from this step, skipping earlier steps whose "
+            "outputs already exist (da#268). Use --from-step disambiguate to "
+            "recover a mid-disambiguate crash: NER is skipped so the existing "
+            "mentions file and disambiguate's checkpoint are reused."
+        ),
+    )
+    resolve_parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help=(
+            "Force every crash-resumable stage (disambiguate, fuzzy_cluster's "
+            "block-scoring pass, dedup's FAISS/collection phase, parallels' anchor "
+            "scan) to discard its checkpoint and cold-start (da#272). Independent of "
+            "--from-step, which selects WHICH step to begin at; --no-resume selects "
+            "HOW that step starts."
+        ),
+    )
+    resolve_parser.add_argument(
+        "--stop-after",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Bounded partial-run probe (da#276): stop the resumable stage cleanly "
+            "after its Nth checkpoint write, leaving the checkpoint on disk (a "
+            "later bare run resumes from it) and writing NO final output, then halt "
+            "the pipeline with a perf summary and a distinct exit status. Only "
+            "applies to resumable stages (disambiguate, cluster, dedup, parallels); "
+            "pairing it with --from-step on an exempt stage is an error. Combine "
+            "with --from-step <stage> --no-resume for a cold bounded probe of one "
+            "stage."
+        ),
+    )
 
     load_parser = subparsers.add_parser("load", help="Load graph database")
     load_parser.add_argument(
-        "--skip-validation", action="store_true", help="Skip validation queries after loading"
+        "--skip-validation",
+        action="store_true",
+        help=(
+            "Explicitly skip post-load validation queries. Not required for a full "
+            "graph load: validation is time-bounded and a slow query downgrades to "
+            "a non-fatal warning (da#259)."
+        ),
     )
     load_parser.add_argument(
         "--nodes-only", action="store_true", help="Load only nodes (skip edges and validation)"
@@ -443,6 +536,16 @@ def main() -> None:
         "--incremental",
         action="store_true",
         help="Only load Parquet files whose hash changed since last load",
+    )
+    load_parser.add_argument(
+        "--validation-timeout",
+        type=float,
+        default=None,
+        help=(
+            "Per-query validation time budget in seconds (default: "
+            f"{int(_DEFAULT_VALIDATION_TIMEOUT_SECONDS)}). On overrun the check "
+            "is reported as a WARN and does not fail the load."
+        ),
     )
 
     enrich_parser = subparsers.add_parser("enrich", help="Compute metrics and enrichment")
@@ -464,7 +567,17 @@ def main() -> None:
         help="Only re-enrich data affected by changed Parquet files",
     )
 
-    subparsers.add_parser("validate", help="Run graph validation queries")
+    validate_parser = subparsers.add_parser("validate", help="Run graph validation queries")
+    validate_parser.add_argument(
+        "--validation-timeout",
+        type=float,
+        default=None,
+        help=(
+            "Per-query validation time budget in seconds (default: "
+            f"{int(_DEFAULT_VALIDATION_TIMEOUT_SECONDS)}). On overrun the check "
+            "is reported as a WARN and is non-fatal."
+        ),
+    )
 
     vs_parser = subparsers.add_parser("validate-staging", help="Validate staging Parquet files")
     vs_parser.add_argument(
@@ -501,6 +614,19 @@ def main() -> None:
         parser.print_help()
         sys.exit(0)
 
+    if args.command == "resolve" and args.stop_after is not None:
+        # Validate --stop-after up front (argparse exit code 2) so the bounded
+        # probe can never silently no-op (da#276).
+        if args.stop_after < 1:
+            parser.error("--stop-after N must be a positive integer")
+        if args.from_step is not None and args.from_step not in RESUMABLE_STEPS:
+            resumable = ", ".join(sorted(RESUMABLE_STEPS))
+            parser.error(
+                f"--stop-after cannot bound '{args.from_step}': it keeps no checkpoint. "
+                f"Target a resumable stage with --from-step ({resumable}), or omit "
+                f"--from-step to bound the first resumable stage (disambiguate)."
+            )
+
     if args.command == "info":
         _cmd_info()
     elif args.command == "acquire":
@@ -508,17 +634,20 @@ def main() -> None:
     elif args.command == "parse":
         _cmd_parse()
     elif args.command == "resolve":
-        _cmd_resolve()
+        _cmd_resolve(
+            from_step=args.from_step, resume=not args.no_resume, stop_after=args.stop_after
+        )
     elif args.command == "load":
         _cmd_load(
             skip_validation=args.skip_validation,
             nodes_only=args.nodes_only,
             incremental=args.incremental,
+            validation_timeout=args.validation_timeout,
         )
     elif args.command == "enrich":
         _cmd_enrich(only=args.only, skip=args.skip, incremental=args.incremental)
     elif args.command == "validate":
-        _cmd_validate()
+        _cmd_validate(validation_timeout=args.validation_timeout)
     elif args.command == "validate-staging":
         from pathlib import Path
 

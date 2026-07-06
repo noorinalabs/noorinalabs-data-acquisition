@@ -44,6 +44,11 @@ that should ever name the stage host.
    ```bash
    python3 -c "import pyarrow.parquet as pq; print(pq.read_metadata('data/curated/narrators_canonical.parquet').num_rows)"
    ```
+   > **Regenerating these on the build host?** Before committing to a full
+   > multi-hour `resolve`, sanity-check a code change and its throughput against
+   > the real data with a bounded probe — `resolve --from-step <stage> --no-resume
+   > --stop-after N`. See [Testing changes against a data subset](testing-on-subsets.md)
+   > (note the head-biased-sample caveat before trusting a head-of-data rate).
 3. **Stage validation is green** (already done): chains 100% populated, top
    narrator = أبو هريرة/سفيان (not أبيه), 0 relational + 0 English-fragment
    residue. This runbook applies the *same* artifacts/image to prod.

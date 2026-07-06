@@ -45,6 +45,7 @@ dev = [
     "pytest-cov>=4.1",
     "ruff>=0.3",
     "mypy>=1.8",
+    "duckdb>=1.1",
     "types-tqdm>=4.66",
     "types-pyyaml>=6.0.12.20250915",
     "testcontainers[neo4j,postgres]>=4.0",
@@ -80,6 +81,10 @@ plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
 module = ["pyarrow", "pyarrow.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["duckdb", "duckdb.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

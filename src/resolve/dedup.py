@@ -6,6 +6,7 @@ index, and identifies parallel hadith pairs across collections and sects.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import multiprocessing
@@ -19,15 +20,36 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.models.enums import VariantType
+from src.resolve._checkpoint import (
+    CheckpointController,
+    checkpoint_dir,
+    clear_checkpoint,
+    hash_strings,
+    load_checkpoint,
+    log_resume,
+    resolve_cadence,
+    save_checkpoint,
+)
 from src.resolve.schemas import PARALLEL_LINKS_SCHEMA
 from src.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from typing import Protocol
 
     import faiss as faiss_mod
     import numpy as np
     import numpy.typing as npt
+
+    class _Searchable(Protocol):
+        """Anything with a FAISS-style block search (a real ``faiss.Index`` or a
+        test double). Decouples the resumable collection loop from faiss so it is
+        unit-testable without the native dep."""
+
+        def search(
+            self, queries: npt.NDArray[np.float32], k: int
+        ) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.int64]]: ...
+
 
 logger = get_logger(__name__)
 
@@ -50,6 +72,28 @@ _AUTO_WORKER_CAP = 8
 # Split each worker's share into several chunks so a straggler chunk cannot
 # leave one core idle while the others finish — cheap load balancing.
 _CHUNKS_PER_WORKER = 4
+
+# Crash-resume for the FAISS search + pair-collection phase (da#272). The encode
+# is already resumable via the embedding memmap (da#245); this checkpoints the
+# stage AFTER it. Queries are searched in fixed row-blocks so a crash costs at
+# most `_DEDUP_CHECKPOINT_EVERY_N_BLOCKS` blocks of pair collection, and the
+# persisted FAISS index is reloaded on resume so an IVF index's random kmeans
+# init cannot make the resumed search diverge from the crashed run's.
+_DEDUP_SEARCH_BLOCK = 10_000
+_DEDUP_CHECKPOINT_EVERY_N_BLOCKS = 4
+_DEDUP_CHECKPOINT_SCHEMA_VERSION = 1
+_FAISS_INDEX_FILENAME = "hadith_embeddings.faiss"
+
+
+def _id_set_hash(hadith_ids: list[str]) -> str:
+    """Stable SHA-256 over the corpus id list in order.
+
+    The resume-identity of a dedup run: the same ids in the same order yield the
+    same embeddings and therefore the same pair set. Matches the ``ids_hash`` the
+    encode memmap records (:func:`_encode_with_resume`), so the two resume layers
+    agree on what "same corpus" means.
+    """
+    return hashlib.sha256("\n".join(hadith_ids).encode("utf-8")).hexdigest()
 
 
 def _classify_pair(score: float) -> VariantType:
@@ -411,6 +455,130 @@ def _encode_with_resume(
     return emb
 
 
+def _search_and_collect_resumable(
+    *,
+    embeddings: npt.NDArray[np.float32],
+    hadith_ids: list[str],
+    id_to_corpus: dict[str, str],
+    actual_k: int,
+    threshold: float,
+    ckpt_dir: Path,
+    fingerprint: str,
+    cadence: int,
+    resume: bool,
+    index_available: bool,
+    build_index: Callable[[], _Searchable],
+    reload_index: Callable[[], _Searchable],
+    block_size: int = _DEDUP_SEARCH_BLOCK,
+    stop_after: int | None = None,
+) -> tuple[list[str], list[str], list[float], list[str], list[bool]]:
+    """Search the corpus against a FAISS-like index in resumable row-blocks and
+    collect the classified parallel pairs (da#272).
+
+    Split out of :func:`run_dedup` so the crash-resume mechanics are unit-testable
+    without faiss / sentence-transformers: the index is supplied via
+    ``build_index`` / ``reload_index``, which need only return an object with a
+    ``search(matrix, k) -> (scores, indices)`` method.
+
+    On a valid checkpoint (matching layout + fingerprint) AND an available
+    persisted index, the accumulators are restored and the scan continues from the
+    next block via ``reload_index`` — so the queried index is byte-for-byte the
+    crashed run's and an IVF index's random kmeans init cannot diverge the resumed
+    search; otherwise it cold-starts via ``build_index``. The result is identical
+    to a non-blocked whole-corpus search: each query row is scored independently
+    and blocks run in ascending row order, so both the pair set and its emission
+    order match a cold run. Returns the five parallel-link column lists.
+    """
+    n = len(hadith_ids)
+    seen_pairs: set[tuple[str, str]] = set()
+    ids_a: list[str] = []
+    ids_b: list[str] = []
+    sim_scores: list[float] = []
+    variant_types: list[str] = []
+    cross_sects: list[bool] = []
+    start_row = 0
+    restored = False
+
+    if not resume:
+        clear_checkpoint(ckpt_dir)
+    else:
+        ckpt = load_checkpoint(ckpt_dir)
+        if ckpt is not None:
+            layout_ok = ckpt.get("schema_version") == _DEDUP_CHECKPOINT_SCHEMA_VERSION
+            fp_ok = ckpt.get("fingerprint") == fingerprint
+            # Resume only when the persisted index is also present — the loop must
+            # query the SAME index the crashed run built (IVF init is random).
+            if layout_ok and fp_ok and index_available:
+                seen_pairs = {(str(a), str(b)) for a, b in ckpt["seen_pairs"]}
+                ids_a = list(ckpt["ids_a"])
+                ids_b = list(ckpt["ids_b"])
+                sim_scores = list(ckpt["sim_scores"])
+                variant_types = list(ckpt["variant_types"])
+                cross_sects = list(ckpt["cross_sects"])
+                start_row = int(ckpt["processed_rows"])
+                restored = True
+                log_resume("dedup", skipped=start_row, total=n, pairs=len(ids_a))
+            else:
+                clear_checkpoint(ckpt_dir)
+
+    index = reload_index() if restored else build_index()
+
+    def _snapshot(processed_rows: int) -> dict[str, object]:
+        return {
+            "schema_version": _DEDUP_CHECKPOINT_SCHEMA_VERSION,
+            "fingerprint": fingerprint,
+            "processed_rows": processed_rows,
+            "seen_pairs": [[a, b] for (a, b) in seen_pairs],
+            "ids_a": ids_a,
+            "ids_b": ids_b,
+            "sim_scores": sim_scores,
+            "variant_types": variant_types,
+            "cross_sects": cross_sects,
+        }
+
+    controller = CheckpointController(cadence, stop_after=stop_after)
+    for block_start in range(start_row, n, block_size):
+        block_end = min(block_start + block_size, n)
+        scores_matrix, indices_matrix = index.search(embeddings[block_start:block_end], actual_k)
+        for local_i in range(block_end - block_start):
+            i = block_start + local_i
+            hid_a = hadith_ids[i]
+            for j_idx in range(actual_k):
+                neighbor = int(indices_matrix[local_i, j_idx])
+                score = float(scores_matrix[local_i, j_idx])
+
+                if neighbor < 0 or neighbor == i:
+                    continue
+                if score < threshold:
+                    continue
+
+                hid_b = hadith_ids[neighbor]
+
+                # Canonical ordering to eliminate symmetric duplicates.
+                pair_key = (hid_b, hid_a) if hid_a >= hid_b else (hid_a, hid_b)
+                if pair_key in seen_pairs:
+                    continue
+                seen_pairs.add(pair_key)
+
+                ids_a.append(pair_key[0])
+                ids_b.append(pair_key[1])
+                sim_scores.append(score)
+                variant_types.append(str(_classify_pair(score)))
+                cross_sects.append(
+                    _is_cross_sect(id_to_corpus[pair_key[0]], id_to_corpus[pair_key[1]])
+                )
+
+        if controller.batch_complete():
+            save_checkpoint(ckpt_dir, _snapshot(block_end))
+            logger.info("dedup_checkpoint_saved", processed=block_end, total=n, pairs=len(ids_a))
+            if controller.checkpoint_written():
+                # --stop-after budget hit (da#276): checkpoint on disk, output not
+                # written — perf summary + halt. run_dedup never writes its parquet.
+                controller.stop("dedup", processed=block_end, total=n, pairs=len(ids_a))
+
+    return ids_a, ids_b, sim_scores, variant_types, cross_sects
+
+
 def run_dedup(
     staging_dir: Path,
     *,
@@ -419,6 +587,9 @@ def run_dedup(
     threshold: float = 0.70,
     index_type: str = "flat",
     encode_workers: int | None = None,
+    resume: bool = True,
+    checkpoint_every_n_blocks: int | None = None,
+    stop_after: int | None = None,
 ) -> Path:
     """Run full hadith deduplication pipeline.
 
@@ -440,6 +611,20 @@ def run_dedup(
         default) reads ``DEDUP_ENCODE_WORKERS`` from settings; ``0``/unset means
         auto-scale to the box; ``1`` forces the serial fallback. Any value is
         clamped to the physical core count to avoid oversubscription.
+    resume:
+        When ``True`` (default), a valid crash-resume checkpoint of the FAISS
+        search + pair-collection phase (da#272) is restored so the phase
+        continues from the last completed block instead of rescanning. ``False``
+        discards any checkpoint and re-scans from the top (the embedding memmap
+        is still reused — that resume is governed separately, da#245).
+    checkpoint_every_n_blocks:
+        Persist the pair-collection state every N query blocks. ``None`` reads
+        ``DEDUP_CHECKPOINT_EVERY_N_BLOCKS`` then falls back to the default.
+    stop_after:
+        Bounded partial-run probe (da#276): stop after this many checkpoint writes,
+        leaving the checkpoint on disk and WITHOUT writing ``parallel_links.parquet``
+        — raises :class:`~src.resolve._checkpoint.StopAfterReached`. ``None`` runs to
+        completion.
 
     Returns
     -------
@@ -509,65 +694,63 @@ def run_dedup(
         )
         return _write_empty_output(staging_dir)
 
+    n = len(hadith_ids)
     dim = embeddings.shape[1]
-    faiss_index: faiss_mod.Index
-    if index_type == "ivf":
-        nlist = min(100, len(texts))
-        quantizer = faiss.IndexFlatIP(dim)
-        faiss_index = faiss.IndexIVFFlat(quantizer, dim, nlist, faiss.METRIC_INNER_PRODUCT)
-        faiss_index.train(embeddings)
-        faiss_index.nprobe = min(10, nlist)
-    else:
-        faiss_index = faiss.IndexFlatIP(dim)
-
-    faiss_index.add(embeddings)
-    faiss.write_index(faiss_index, str(staging_dir / "hadith_embeddings.faiss"))
-    logger.info("dedup_index_built", index_type=index_type, vectors=faiss_index.ntotal)
-
-    # Query in one call -- scores shape (n, top_k)
-    actual_k = min(top_k + 1, len(texts))  # +1 to account for self-match
-    scores_matrix, indices_matrix = faiss_index.search(embeddings, actual_k)
+    index_path = staging_dir / _FAISS_INDEX_FILENAME
+    actual_k = min(top_k + 1, n)  # +1 to account for self-match
 
     # ------------------------------------------------------------------
-    # 5. Collect and classify pairs
+    # 4. FAISS index + resumable search/pair-collection (da#272). The corpus
+    # identity + every param that changes which pairs are emitted go into the
+    # fingerprint, so a checkpoint taken against a different corpus/threshold/index
+    # is discarded rather than splicing incompatible pairs. The index build/reload
+    # is passed in as callables so the resumable loop is testable without faiss.
     # ------------------------------------------------------------------
+    ckpt_dir = checkpoint_dir(staging_dir, "dedup")
+    fingerprint = hash_strings(
+        _id_set_hash(hadith_ids), _MODEL_NAME, index_type, actual_k, round(threshold, 6), n
+    )
+    cadence = resolve_cadence(
+        checkpoint_every_n_blocks,
+        "DEDUP_CHECKPOINT_EVERY_N_BLOCKS",
+        _DEDUP_CHECKPOINT_EVERY_N_BLOCKS,
+    )
     id_to_corpus: dict[str, str] = dict(zip(hadith_ids, corpora))
-    seen_pairs: set[tuple[str, str]] = set()
 
-    ids_a: list[str] = []
-    ids_b: list[str] = []
-    sim_scores: list[float] = []
-    variant_types: list[str] = []
-    cross_sects: list[bool] = []
+    def _build_index() -> faiss_mod.Index:
+        if index_type == "ivf":
+            nlist = min(100, n)
+            quantizer = faiss.IndexFlatIP(dim)
+            idx = faiss.IndexIVFFlat(quantizer, dim, nlist, faiss.METRIC_INNER_PRODUCT)
+            idx.train(embeddings)
+            idx.nprobe = min(10, nlist)
+        else:
+            idx = faiss.IndexFlatIP(dim)
+        idx.add(embeddings)
+        faiss.write_index(idx, str(index_path))
+        logger.info("dedup_index_built", index_type=index_type, vectors=idx.ntotal)
+        return idx
 
-    for i in range(len(hadith_ids)):
-        hid_a = hadith_ids[i]
-        for j_idx in range(actual_k):
-            neighbor = int(indices_matrix[i, j_idx])
-            score = float(scores_matrix[i, j_idx])
+    def _reload_index() -> faiss_mod.Index:
+        idx = faiss.read_index(str(index_path))
+        logger.info("dedup_index_reloaded", index_type=index_type, vectors=idx.ntotal)
+        return idx
 
-            if neighbor < 0 or neighbor == i:
-                continue
-            if score < threshold:
-                continue
-
-            hid_b = hadith_ids[neighbor]
-
-            # Canonical ordering to eliminate symmetric duplicates
-            if hid_a >= hid_b:
-                pair_key = (hid_b, hid_a)
-            else:
-                pair_key = (hid_a, hid_b)
-
-            if pair_key in seen_pairs:
-                continue
-            seen_pairs.add(pair_key)
-
-            ids_a.append(pair_key[0])
-            ids_b.append(pair_key[1])
-            sim_scores.append(score)
-            variant_types.append(str(_classify_pair(score)))
-            cross_sects.append(_is_cross_sect(id_to_corpus[pair_key[0]], id_to_corpus[pair_key[1]]))
+    ids_a, ids_b, sim_scores, variant_types, cross_sects = _search_and_collect_resumable(
+        embeddings=embeddings,
+        hadith_ids=hadith_ids,
+        id_to_corpus=id_to_corpus,
+        actual_k=actual_k,
+        threshold=threshold,
+        ckpt_dir=ckpt_dir,
+        fingerprint=fingerprint,
+        cadence=cadence,
+        resume=resume,
+        index_available=index_path.exists(),
+        build_index=_build_index,
+        reload_index=_reload_index,
+        stop_after=stop_after,
+    )
 
     # ------------------------------------------------------------------
     # 6. Write output
@@ -585,6 +768,10 @@ def run_dedup(
 
     output_path = staging_dir / "parallel_links.parquet"
     pq.write_table(table, output_path)
+
+    # The search + collection phase completed and its output is on disk — drop the
+    # checkpoint so the next cold run doesn't spuriously resume (da#272).
+    clear_checkpoint(ckpt_dir)
 
     # ------------------------------------------------------------------
     # 7. Summary logging
@@ -618,13 +805,18 @@ def _write_empty_output(staging_dir: Path) -> Path:
     return output_path
 
 
-def run(staging_dir: Path, output_dir: Path) -> list[Path]:
+def run(
+    staging_dir: Path, output_dir: Path, *, resume: bool = True, stop_after: int | None = None
+) -> list[Path]:
     """Entry point matching the resolve pipeline interface.
 
     Delegates to ``run_dedup`` and wraps the result in a list for compatibility
-    with the resolve orchestrator.
+    with the resolve orchestrator. ``resume`` (da#272) threads to the FAISS
+    search + pair-collection checkpoint; ``False`` forces that phase to re-scan.
+    ``stop_after`` (da#276) bounds that phase to N checkpoint writes then raises
+    ``StopAfterReached`` (no output written).
     """
-    path = run_dedup(staging_dir)
+    path = run_dedup(staging_dir, resume=resume, stop_after=stop_after)
     if path.exists():
         return [path]
     return []
