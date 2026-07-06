@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -379,3 +380,96 @@ class TestNarratorResegmentation:
         assert table.column("position_in_chain").to_pylist() == [0, 1]
         # Schema is still conformant after filtering.
         assert table.schema == NARRATOR_MENTION_SCHEMA
+
+
+# Regex catching any residual <NAR>/<SANAD>/<MATN> structural markup in a string,
+# used by the da#318 tests to assert the stored matn is markup-free.
+_MARKUP_PRESENT = re.compile(r"<\s*/?\s*(?:NAR|SANAD|MATN)\s*/?\s*>")
+
+
+class TestMatnMarkupStrip:
+    """Structural-markup leak into ``matn_ar`` (da#318).
+
+    A malformed upstream row carries a doubled ``<SANAD>…<MATN>`` segment closed by
+    a single ``</MATN>``; ``_MATN_RE``'s first-open→first-close capture then swallows
+    the intervening ``</SANAD>``, second ``<SANAD>``, ``<NAR>…</NAR>`` and second
+    ``<MATN>`` tags verbatim into ``matn_ar``. The parser now strips them before
+    store (``_strip_structural_tags``) — WITHOUT touching ``isnad_raw_ar``, which
+    legitimately carries ``<NAR>`` tags for the chain extractor.
+    """
+
+    # A doubled-SANAD row à la ``sanadset:0:0:107270``: two ``<SANAD>…<MATN>``
+    # segments, but only ONE closing ``</MATN>`` at the very end.
+    _MALFORMED_ROW = (
+        "<SANAD><NAR>محمد بن عبدالله</NAR></SANAD>"
+        "<MATN>إنما الأعمال بالنيات"
+        "<SANAD><NAR>علي بن أبي طالب</NAR></SANAD>"
+        "<MATN>وإنما لكل امرئ ما نوى</MATN>"
+    )
+
+    def _parse_single_row(self, tmp_path: Path, hadith_field: str) -> dict[str, object]:
+        raw_dir = tmp_path / "raw" / "sanadset"
+        raw_dir.mkdir(parents=True)
+        staging_dir = tmp_path / "staging"
+        csv = f'hadith_id,book_id,hadith,grade\n1,1,"{hadith_field}",Sahih\n'
+        (raw_dir / "hadiths.csv").write_text(csv, encoding="utf-8")
+
+        parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
+
+        rows = pq.read_table(staging_dir / "hadiths_sanadset.parquet").to_pylist()
+        assert len(rows) == 1
+        return rows[0]
+
+    def test_malformed_row_matn_has_no_residual_markup(self, tmp_path: Path) -> None:
+        row = self._parse_single_row(tmp_path, self._MALFORMED_ROW)
+        matn = row["matn_ar"]
+        assert matn is not None
+        # No literal structural tag survives into the stored matn.
+        assert _MARKUP_PRESENT.search(matn) is None, matn
+        # The genuine Arabic matn text from both swallowed segments is retained.
+        assert "إنما الأعمال بالنيات" in matn
+        assert "وإنما لكل امرئ ما نوى" in matn
+
+    def test_malformed_row_isnad_raw_ar_still_carries_nar_tags(self, tmp_path: Path) -> None:
+        """Regression guard: the fix must NOT touch ``isnad_raw_ar`` (da#318 hazard)."""
+        row = self._parse_single_row(tmp_path, self._MALFORMED_ROW)
+        isnad = row["isnad_raw_ar"]
+        assert isnad is not None
+        # isnad_raw_ar is the first <SANAD>…</SANAD> content and MUST still carry its
+        # <NAR> tags verbatim — the chain extractor (_extract_narrator_mentions)
+        # depends on them.
+        assert "<NAR>" in isnad and "</NAR>" in isnad
+        assert isnad == "<NAR>محمد بن عبدالله</NAR>"
+
+    def test_well_formed_row_matn_untouched(self, tmp_path: Path) -> None:
+        row = self._parse_single_row(
+            tmp_path,
+            "<SANAD><NAR>أبو هريرة</NAR></SANAD><MATN>لا ضرر ولا ضرار</MATN>",
+        )
+        # A clean matn carries no structural tags and is stored exactly as-is.
+        assert row["matn_ar"] == "لا ضرر ولا ضرار"
+
+    def test_strip_is_idempotent(self) -> None:
+        from src.parse.sanadset import _strip_structural_tags
+
+        raw = "إنما الأعمال بالنيات<SANAD><NAR>علي</NAR></SANAD><MATN>وإنما لكل امرئ"
+        once = _strip_structural_tags(raw)
+        twice = _strip_structural_tags(once)
+        assert once == twice
+        assert once is not None
+        assert _MARKUP_PRESENT.search(once) is None
+
+    def test_strip_covers_self_closing_tag(self) -> None:
+        from src.parse.sanadset import _strip_structural_tags
+
+        out = _strip_structural_tags("متن <NAR/> نص")
+        assert out == "متن نص"
+
+    def test_strip_passes_through_clean_and_none(self) -> None:
+        from src.parse.sanadset import _strip_structural_tags
+
+        # Clean text is returned unchanged (no whitespace normalization applied).
+        assert _strip_structural_tags("متن\nنظيف") == "متن\nنظيف"
+        assert _strip_structural_tags(None) is None
+        # An all-markup string collapses to None (mirrors _extract_tag's empty rule).
+        assert _strip_structural_tags("<MATN></MATN>") is None
