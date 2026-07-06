@@ -897,22 +897,22 @@ imports: __future__, re, statistics, collections, dataclasses, typing, pyarrow, 
 ## src/resolve/dedup.py [python]
 Hadith deduplication and parallel detection.
 imports: __future__, hashlib, json, math, multiprocessing, os, time, concurrent.futures, pathlib, typing, pyarrow, pyarrow.parquet, src.models.enums, src.resolve._checkpoint, src.resolve.schemas, src.utils.logging
-- func _id_set_hash(hadith_ids) @88
-- func _classify_pair(score) @99
-- func _is_cross_sect(corpus_a, corpus_b) @108
-- func _load_hadith_texts(staging_dir) @117
-- func _build_default_model() @153
-- func _resolve_encode_workers(requested, n_items) @165
-- func _set_thread_limit(thread_limit) @190
-- func _worker_init(model_provider, thread_limit) @212
-- func _worker_encode_chunk(task) @219
-- func _encode_range_serial(texts, emb, start, n, batch_size, prog_path, model) @247
-- func _encode_range_parallel(texts, emb, start, n, batch_size, workers, model_provider, prog_path, mp_start_method) @283
-- func _encode_with_resume(texts, hadith_ids, staging_dir, model, batch_size, workers, model_provider, mp_start_method) @365
-- func _search_and_collect_resumable(embeddings, hadith_ids, id_to_corpus, actual_k, threshold, ckpt_dir, fingerprint, cadence, resume, index_available, build_index, reload_index, block_size, stop_after) @458
-- func run_dedup(staging_dir, batch_size, top_k, threshold, index_type, encode_workers, resume, checkpoint_every_n_blocks, stop_after) @582
-- func _write_empty_output(staging_dir) @799
-- func run(staging_dir, output_dir, resume, stop_after) @808
+- func _id_set_hash(hadith_ids) @87
+- func _classify_pair(score) @98
+- func _is_cross_sect(sect_a, sect_b) @107
+- func _load_hadith_texts(staging_dir) @127
+- func _build_default_model() @165
+- func _resolve_encode_workers(requested, n_items) @177
+- func _set_thread_limit(thread_limit) @202
+- func _worker_init(model_provider, thread_limit) @224
+- func _worker_encode_chunk(task) @231
+- func _encode_range_serial(texts, emb, start, n, batch_size, prog_path, model) @259
+- func _encode_range_parallel(texts, emb, start, n, batch_size, workers, model_provider, prog_path, mp_start_method) @295
+- func _encode_with_resume(texts, hadith_ids, staging_dir, model, batch_size, workers, model_provider, mp_start_method) @377
+- func _search_and_collect_resumable(embeddings, hadith_ids, id_to_sect, actual_k, threshold, ckpt_dir, fingerprint, cadence, resume, index_available, build_index, reload_index, block_size, stop_after) @470
+- func run_dedup(staging_dir, batch_size, top_k, threshold, index_type, encode_workers, resume, checkpoint_every_n_blocks, stop_after) @592
+- func _write_empty_output(staging_dir) @809
+- func run(staging_dir, output_dir, resume, stop_after) @818
 
 ## src/resolve/disambiguate.py [python]
 Narrator disambiguation via multi-stage matching.
@@ -2816,40 +2816,40 @@ imports: __future__, pathlib, pyarrow.parquet, pytest, src.models.enums, src.res
   - method test_thematic(self) @81
   - method test_thematic_low(self) @84
 - class TestIsCrossSect @91
-  - method test_sunni_shia_is_cross(self) @92
-  - method test_shia_sunni_is_cross(self) @95
-  - method test_sunni_sunni_not_cross(self) @98
-  - method test_unknown_corpus(self) @101
-- class TestLoadHadithTexts @108
-  - method test_loads_valid_texts(self, tmp_path) @109
-  - method test_skips_null_matn(self, tmp_path) @120
-  - method test_no_files_returns_empty(self, tmp_path) @131
-- class TestWriteEmptyOutput @139
-  - method test_creates_empty_parquet(self, tmp_path) @140
-- class TestCanonicalPairOrdering @151
-  - method test_output_pairs_are_canonically_ordered(self, tmp_path) @152
-- class TestEmbeddingPipeline @185
-  - method test_run_dedup_with_tiny_sample(self, tmp_path) @186
-  - method test_faiss_index_created(self, tmp_path) @218
-  - method test_cross_sect_flagging(self, tmp_path) @230
-- class TestGracefulFallback @252
-  - method test_empty_output_on_no_texts(self, tmp_path) @253
+  - method test_sunni_shia_is_cross(self) @94
+  - method test_shia_sunni_is_cross(self) @97
+  - method test_same_sect_not_cross(self) @100
+  - method test_missing_sect_not_cross(self) @103
+- class TestLoadHadithTexts @112
+  - method test_loads_valid_texts(self, tmp_path) @113
+  - method test_skips_null_matn(self, tmp_path) @125
+  - method test_no_files_returns_empty(self, tmp_path) @136
+- class TestWriteEmptyOutput @144
+  - method test_creates_empty_parquet(self, tmp_path) @145
+- class TestCanonicalPairOrdering @156
+  - method test_output_pairs_are_canonically_ordered(self, tmp_path) @157
+- class TestEmbeddingPipeline @190
+  - method test_run_dedup_with_tiny_sample(self, tmp_path) @191
+  - method test_faiss_index_created(self, tmp_path) @223
+  - method test_cross_sect_flagging(self, tmp_path) @235
+- class TestGracefulFallback @257
+  - method test_empty_output_on_no_texts(self, tmp_path) @258
 
 ## tests/test_resolve/test_dedup_faiss_resume.py [python]
 Crash-resume tests for dedup's FAISS search + pair-collection phase (da#272).
 imports: __future__, pathlib, numpy, numpy.typing, pytest, src.resolve, src.resolve.dedup
-- class FakeIndex @43
-  - method __init__(self, emb) @46
-  - method search(self, queries, k) @49
-- class CrashingIndex(FakeIndex) @58
-  - method __init__(self, emb, crash_after) @61
-  - method search(self, queries, k) @66
-- func _collect(ckpt_dir, fingerprint, resume, index_available, build_index, reload_index, block_size, cadence) @75
-- func _cold(ckpt_dir, fingerprint) @103
-- func test_cold_collection_finds_cross_sect_pairs(tmp_path) @116
-- func test_resumed_collection_is_output_identical_to_cold(tmp_path) @124
-- func test_stale_fingerprint_cold_starts(tmp_path) @164
-- func test_resume_false_ignores_checkpoint(tmp_path) @192
+- class FakeIndex @44
+  - method __init__(self, emb) @47
+  - method search(self, queries, k) @50
+- class CrashingIndex(FakeIndex) @59
+  - method __init__(self, emb, crash_after) @62
+  - method search(self, queries, k) @67
+- func _collect(ckpt_dir, fingerprint, resume, index_available, build_index, reload_index, block_size, cadence) @76
+- func _cold(ckpt_dir, fingerprint) @104
+- func test_cold_collection_finds_cross_sect_pairs(tmp_path) @117
+- func test_resumed_collection_is_output_identical_to_cold(tmp_path) @125
+- func test_stale_fingerprint_cold_starts(tmp_path) @165
+- func test_resume_false_ignores_checkpoint(tmp_path) @193
 
 ## tests/test_resolve/test_dedup_parallel.py [python]
 Tests for the parallelized (process-pool) embedding encode (da#246).
@@ -3244,15 +3244,15 @@ imports: __future__, sys, pathlib, numpy, numpy.typing, pyarrow, pyarrow.parquet
 - func _links(staging) @47
 - func test_parallels_stop_leaves_checkpoint_and_no_output(tmp_path, monkeypatch) @51
 - func test_parallels_stop_then_resume_equals_uninterrupted(tmp_path, monkeypatch) @70
-- class _FakeIndex @102
-  - method __init__(self, emb) @103
-  - method search(self, queries, k) @106
-- func _collect(ckpt_dir, resume, index_available, stop_after) @114
-- func test_dedup_stop_then_resume_equals_uninterrupted(tmp_path) @134
-- func test_cli_maps_stop_to_distinct_exit_code(monkeypatch) @156
-- func test_cli_completion_is_not_a_stopped_exit(monkeypatch) @175
-- func test_cli_rejects_invalid_stop_after(argv, monkeypatch) @198
-- func test_cli_valid_combination_threads_all_flags(monkeypatch) @205
+- class _FakeIndex @103
+  - method __init__(self, emb) @104
+  - method search(self, queries, k) @107
+- func _collect(ckpt_dir, resume, index_available, stop_after) @115
+- func test_dedup_stop_then_resume_equals_uninterrupted(tmp_path) @135
+- func test_cli_maps_stop_to_distinct_exit_code(monkeypatch) @157
+- func test_cli_completion_is_not_a_stopped_exit(monkeypatch) @176
+- func test_cli_rejects_invalid_stop_after(argv, monkeypatch) @199
+- func test_cli_valid_combination_threads_all_flags(monkeypatch) @206
 
 ## tests/test_resolve/test_tabaqa_dates.py [python]
 Tests for the ṭabaqa → estimated-window date fallback (da#166).

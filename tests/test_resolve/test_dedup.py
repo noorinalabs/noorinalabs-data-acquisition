@@ -89,17 +89,21 @@ class TestClassifyPair:
 # Tests: _is_cross_sect
 # ---------------------------------------------------------------------------
 class TestIsCrossSect:
+    # da#321: cross-sect is derived from the authoritative `sect` column, not the
+    # source-corpus name — matching parallels.py so the composed link is stable.
     def test_sunni_shia_is_cross(self) -> None:
-        assert _is_cross_sect("sunnah", "thaqalayn") is True
+        assert _is_cross_sect("sunni", "shia") is True
 
     def test_shia_sunni_is_cross(self) -> None:
-        assert _is_cross_sect("thaqalayn", "lk") is True
+        assert _is_cross_sect("shia", "sunni") is True
 
-    def test_sunni_sunni_not_cross(self) -> None:
-        assert _is_cross_sect("sunnah", "lk") is False
+    def test_same_sect_not_cross(self) -> None:
+        assert _is_cross_sect("sunni", "sunni") is False
 
-    def test_unknown_corpus(self) -> None:
-        assert _is_cross_sect("unknown", "sunnah") is False
+    def test_missing_sect_not_cross(self) -> None:
+        # A null/empty sect on either side is not enough to call it cross-sect.
+        assert _is_cross_sect(None, "sunni") is False
+        assert _is_cross_sect("sunni", "") is False
 
 
 # ---------------------------------------------------------------------------
@@ -112,10 +116,11 @@ class TestLoadHadithTexts:
             _make_hadith("h-2", "The best of you is the one who learns the Quran"),
         ]
         write_hadiths(tmp_path / "hadiths_test.parquet", rows)
-        ids, texts, corpora = _load_hadith_texts(tmp_path)
+        ids, texts, sects = _load_hadith_texts(tmp_path)
         assert len(ids) == 2
         assert len(texts) == 2
-        assert all(c == "sunnah" for c in corpora)
+        # Third element is now the authoritative `sect` column (da#321).
+        assert all(s == "sunni" for s in sects)
 
     def test_skips_null_matn(self, tmp_path: Path) -> None:
         rows = [
@@ -124,12 +129,12 @@ class TestLoadHadithTexts:
             _make_hadith("h-3", "   "),
         ]
         write_hadiths(tmp_path / "hadiths_test.parquet", rows)
-        ids, texts, corpora = _load_hadith_texts(tmp_path)
+        ids, texts, sects = _load_hadith_texts(tmp_path)
         assert len(ids) == 1
         assert ids[0] == "h-1"
 
     def test_no_files_returns_empty(self, tmp_path: Path) -> None:
-        ids, texts, corpora = _load_hadith_texts(tmp_path)
+        ids, texts, sects = _load_hadith_texts(tmp_path)
         assert ids == []
 
 
