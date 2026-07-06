@@ -429,6 +429,62 @@ class TestInformationalInventoryClassification:
         assert "sanadset_orphan_inventory" in _CLASSIFIER_REGISTRY
 
 
+class TestDefaultClassifierBlockSummaryAware:
+    """da#319 follow-up: the fallback ``_classify_default`` must interpret the
+    per-block summary shape (an unregistered multi-statement file) by SUMMING
+    ``row_count`` across blocks, while keeping ``len(rows)`` semantics for the
+    single-statement path's real flat rows byte-for-byte.
+    """
+
+    def test_block_summary_zero_total_is_pass(self) -> None:
+        rows: list[dict[str, object]] = [
+            {"block": 1, "row_count": 0},
+            {"block": 2, "row_count": 0},
+        ]
+        result = _classify("unregistered_check", rows)
+        assert result.passed is True
+        assert result.row_count == 0
+
+    def test_block_summary_nonzero_total_is_fail_on_sum_not_block_count(self) -> None:
+        # 2 blocks (len==2) but real totals are 0 -> must PASS. If the default
+        # classifier keyed on len(rows) this would wrongly FAIL.
+        rows: list[dict[str, object]] = [
+            {"block": 1, "row_count": 0},
+            {"block": 2, "row_count": 0},
+        ]
+        assert _classify("unregistered_check", rows).passed is True
+        # Now a genuine nonzero total -> FAIL, and row_count is the SUM (5), not 2.
+        rows_nonzero: list[dict[str, object]] = [
+            {"block": 1, "row_count": 5},
+            {"block": 2, "row_count": 0},
+        ]
+        result = _classify("unregistered_check", rows_nonzero)
+        assert result.passed is False
+        assert result.row_count == 5
+
+    def test_single_statement_real_rows_keep_len_semantics(self) -> None:
+        # Real flat query rows (NOT the exact {block,row_count} 2-key shape) must
+        # still classify on len(rows) exactly as before the fix.
+        real_rows: list[dict[str, object]] = [
+            {"narrator_id": "nar:1", "name": "A"},
+            {"narrator_id": "nar:2", "name": "B"},
+        ]
+        result = _classify("unregistered_check", real_rows)
+        assert result.passed is False
+        assert result.row_count == 2
+        assert _classify("unregistered_check", []).passed is True
+
+    def test_real_rows_named_block_and_rowcount_with_extra_keys_not_summary(self) -> None:
+        # Defensive: a real row that merely happens to include block/row_count
+        # columns AMONG others is NOT the summary shape (exact 2-key match), so
+        # it keeps len-based semantics rather than being summed.
+        real_rows: list[dict[str, object]] = [
+            {"block": "b", "row_count": 9, "extra": 1},
+        ]
+        result = _classify("unregistered_check", real_rows)
+        assert result.row_count == 1  # len(rows), not summed 9
+
+
 class _SequencedClient:
     """Stub client that returns one canned row-set per call and counts calls.
 
@@ -524,10 +580,16 @@ class TestMultiStatementExecution:
         assert results[0].query_name == "chain_integrity"
         assert results[0].status == "PASS"
 
-    def test_unregistered_multi_statement_file_executes_without_error(self, tmp_path: Path) -> None:
+    def test_unregistered_multi_statement_all_zero_rows_passes(self, tmp_path: Path) -> None:
         """Generic split-and-run: works for ANY multi-statement file, not just
         the two named in da#319 -- a future third file gets the same
-        statement-splitting treatment even without a dedicated classifier."""
+        statement-splitting treatment even without a dedicated classifier.
+
+        Outcome assertion (not just call-count): with every block returning 0
+        rows, the fallback ``_classify_default`` must PASS. Before the block-
+        summary-aware fix it FAILed unconditionally, because ``len(rows)`` was
+        the block count (2), never 0 -- the exact da#319 bug relocated to the
+        default path."""
         text = "MATCH (a) RETURN a.id AS id;\nMATCH (b) RETURN b.id AS id"
         _write_multi_statement_file(tmp_path, "some_future_check", text)
         client = _SequencedClient(rows_per_call=[[], []])
@@ -536,6 +598,28 @@ class TestMultiStatementExecution:
         assert len(client.queries_seen) == 2
         assert len(results) == 1
         assert results[0].query_name == "some_future_check"
+        # Summed row_count across blocks is 0 -> conservative zero-is-pass.
+        assert results[0].passed is True
+        assert results[0].status == "PASS"
+        assert results[0].row_count == 0
+
+    def test_unregistered_multi_statement_nonzero_rows_fails(self, tmp_path: Path) -> None:
+        """Companion to the all-zero case: an unregistered multi-statement file
+        whose statements return rows must FAIL under the default classifier's
+        conservative zero-is-pass semantics -- and it must fail on the SUMMED
+        row total, not the block count. Here block 1 returns 3 rows and block 2
+        returns 0 (summed total 3 > 0 -> FAIL), which also proves the count is
+        the real row total, not len(blocks)=2."""
+        text = "MATCH (a) RETURN a.id AS id;\nMATCH (b) RETURN b.id AS id"
+        _write_multi_statement_file(tmp_path, "some_future_check", text)
+        client = _SequencedClient(rows_per_call=[[{"id": "x"}, {"id": "y"}, {"id": "z"}], []])
+        results = run_validation(client, tmp_path, timeout_seconds=5.0)  # type: ignore[arg-type]
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert results[0].status == "FAIL"
+        assert results[0].is_fatal is True
+        assert results[0].row_count == 3
 
     def test_error_in_second_statement_is_hard_failure_for_whole_file(self, tmp_path: Path) -> None:
         """A real Cypher error partway through a multi-statement file still

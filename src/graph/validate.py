@@ -230,22 +230,50 @@ def _classify_collection_coverage(
     return ValidationResult(query_name, passed, details, count)
 
 
+def _row_count_of(row: dict[str, object]) -> int:
+    """Extract the ``row_count`` int a block-summary dict carries (0 if absent/odd-shaped)."""
+    value = row.get("row_count", 0)
+    return value if isinstance(value, int) else 0
+
+
+def _is_block_summary_rows(rows: list[dict[str, object]]) -> bool:
+    """True if *rows* is the per-block summary shape (not a flat real row-set).
+
+    For a multi-statement file, ``run_validation`` cannot present a single flat
+    row-set to a classifier, so it hands over one summary dict per statement,
+    constructed with **exactly** the keys ``{"block", "row_count"}``. An exact
+    key-set match distinguishes those from real Cypher result rows (which carry
+    the query's actual column names), so the single-statement path — where the
+    real rows are passed straight through — is never mis-detected. Empty input
+    is not a block-summary (there are no blocks to sum).
+    """
+    return bool(rows) and all(set(row.keys()) == {"block", "row_count"} for row in rows)
+
+
 def _classify_default(
     query_name: str,
     rows: list[dict[str, object]],
     deviation_threshold: float,
 ) -> ValidationResult:
-    """Default classifier — pass if 0 rows (conservative)."""
-    count = len(rows)
+    """Default classifier — pass if 0 rows (conservative).
+
+    For a multi-statement file with no dedicated classifier, ``run_validation``
+    hands over one per-block summary dict per statement rather than a flat
+    row-set. In that shape the true result-row count is the **sum** of each
+    block's ``row_count``, not ``len(rows)`` — the latter is the *block* count,
+    which for a ≥2-statement file is never 0 and would make the file
+    unconditionally FAIL, relocating the exact da#319 "clean load trips
+    sys.exit(1)" bug to the next multi-statement validation file added. When the
+    input is the block-summary shape, apply zero-is-pass to the summed total;
+    otherwise keep the single-statement ``len(rows)`` semantics byte-for-byte.
+    """
+    if _is_block_summary_rows(rows):
+        count = sum(_row_count_of(row) for row in rows)
+    else:
+        count = len(rows)
     passed = count == 0
     details = f"{count} row(s) returned" if count else "empty result"
     return ValidationResult(query_name, passed, details, count)
-
-
-def _row_count_of(row: dict[str, object]) -> int:
-    """Extract the ``row_count`` int a block-summary dict carries (0 if absent/odd-shaped)."""
-    value = row.get("row_count", 0)
-    return value if isinstance(value, int) else 0
 
 
 def _classify_informational_inventory(
