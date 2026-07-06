@@ -12,6 +12,7 @@ import yaml
 
 from src.graph.load_edges import load_all_edges
 from src.graph.load_nodes import load_all_nodes
+from src.graph.validate import run_validation
 from src.parse.schemas import COLLECTION_SCHEMA, HADITH_SCHEMA
 from src.resolve.schemas import NARRATORS_CANONICAL_SCHEMA
 from src.utils.neo4j_client import Neo4jClient
@@ -556,3 +557,72 @@ class TestEdgeLoading:
         rows = neo4j_client.execute_read("MATCH ()-[r:GRADED_BY]->() RETURN count(r) AS cnt")
         # All 3 sample hadiths have grade="sahih", so should have grading edges
         assert rows[0]["cnt"] >= 0
+
+
+class TestPostLoadValidationAgainstRealFiles:
+    """da#319 regression guard: run against the checked-in ``.cypher`` files.
+
+    ``graph_integrity_deferred_inventory.cypher`` (ADR-004) and
+    ``sanadset_orphan_inventory.cypher`` (ADR-003) are each 5-statement
+    scripts. Reading a whole file as ONE query string and handing it to a
+    single ``tx.run()`` previously raised, against a REAL Neo4j driver::
+
+        neo4j.exceptions.CypherSyntaxError: Expected exactly one statement
+        per query but got: 5
+
+    A canned-row unit stub (``tests/test_graph/test_validate.py``) cannot
+    reproduce a driver-level syntax error, which is exactly how this bug
+    shipped — the unit suite was green while every real load's post-load
+    validation hard-failed. This exercises ``run_validation`` against the
+    actual repo files (not a synthetic fixture) over a real container.
+    """
+
+    QUERIES_DIR = Path(__file__).resolve().parents[2] / "queries"
+
+    def _load_sample_graph(self, neo4j_client: Neo4jClient, tmp_path: Path) -> None:
+        staging, curated = _write_staging_data(tmp_path)
+        load_all_nodes(neo4j_client, staging, curated, strict=False)
+        load_all_edges(neo4j_client, staging, curated, strict=False)
+
+    def test_all_validation_files_run_without_syntax_error(
+        self, neo4j_client: Neo4jClient, tmp_path: Path
+    ) -> None:
+        self._load_sample_graph(neo4j_client, tmp_path)
+
+        # All 5 files in queries/validation/ must produce a result -- most
+        # importantly this call must not raise (the pre-fix behavior against a
+        # real driver was a CypherSyntaxError bubbling out of run_validation
+        # for the two multi-statement files).
+        results = run_validation(neo4j_client, self.QUERIES_DIR, timeout_seconds=30.0)
+
+        names = {r.query_name for r in results}
+        assert names == {
+            "chain_integrity",
+            "collection_coverage",
+            "graph_integrity_deferred_inventory",
+            "orphan_narrators",
+            "sanadset_orphan_inventory",
+        }
+        by_name = {r.query_name: r for r in results}
+        # The two da#319 multi-statement files specifically must never be a
+        # hard failure on a clean load -- that is the bug this PR fixes.
+        # (`orphan_narrators` legitimately FAILs here: this minimal node/edge
+        # fixture wires no NARRATED/TRANSMITTED_TO edges for the 5 sample
+        # narrators, an unrelated, expected fixture limitation -- not a da#319
+        # regression -- so it is intentionally excluded from this assertion.)
+        for name in ("graph_integrity_deferred_inventory", "sanadset_orphan_inventory"):
+            assert not by_name[name].is_fatal, (name, by_name[name].details)
+
+    def test_inventory_files_classify_as_informational_pass(
+        self, neo4j_client: Neo4jClient, tmp_path: Path
+    ) -> None:
+        self._load_sample_graph(neo4j_client, tmp_path)
+
+        results = run_validation(neo4j_client, self.QUERIES_DIR, timeout_seconds=30.0)
+        by_name = {r.query_name: r for r in results}
+
+        for name in ("graph_integrity_deferred_inventory", "sanadset_orphan_inventory"):
+            result = by_name[name]
+            assert result.passed is True
+            assert result.status == "PASS"
+            assert result.warning is False

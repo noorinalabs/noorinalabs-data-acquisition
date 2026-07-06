@@ -13,6 +13,7 @@ from src.graph.validate import (
     _CLASSIFIER_REGISTRY,
     ValidationResult,
     _classify,
+    _split_statements,
     register_classifier,
     run_validation,
 )
@@ -317,3 +318,253 @@ class TestBoundedValidation:
         results = run_validation(client, tmp_path, timeout_seconds=5.0)  # type: ignore[arg-type]
         validation_passed = not any(v.is_fatal for v in results)
         assert validation_passed is True
+
+
+# --- da#319: multi-statement validation files ----------------------------------
+
+
+class TestSplitStatements:
+    """``_split_statements`` splits a file's text on top-level ``;`` boundaries.
+
+    These files use only ``//`` line comments and never a semicolon inside a
+    string, so a plain split is safe (see the docstring on the function under
+    test). A single-statement file with no ``;`` must round-trip unchanged so
+    the pre-da#319 behavior is preserved exactly.
+    """
+
+    def test_single_statement_no_semicolon_is_unchanged(self) -> None:
+        text = "MATCH (n:Narrator) RETURN n.id AS narrator_id\nORDER BY n.id"
+        assert _split_statements(text) == [text]
+
+    def test_multi_statement_splits_on_semicolon(self) -> None:
+        text = "MATCH (a) RETURN a;\nMATCH (b) RETURN b;\nMATCH (c) RETURN c"
+        result = _split_statements(text)
+        assert result == ["MATCH (a) RETURN a", "MATCH (b) RETURN b", "MATCH (c) RETURN c"]
+
+    def test_trailing_semicolon_does_not_add_empty_statement(self) -> None:
+        assert _split_statements("MATCH (a) RETURN a;\n") == ["MATCH (a) RETURN a"]
+
+    def test_comment_only_segment_is_dropped(self) -> None:
+        text = "// just a header\n// no code here\n;\nMATCH (a) RETURN a"
+        assert _split_statements(text) == ["MATCH (a) RETURN a"]
+
+    def test_leading_header_comment_stays_attached_to_first_statement(self) -> None:
+        text = "// header line 1\n// header line 2\nMATCH (a) RETURN a;\nMATCH (b) RETURN b"
+        result = _split_statements(text)
+        assert len(result) == 2
+        assert "header line 1" in result[0]
+        assert result[1] == "MATCH (b) RETURN b"
+
+    def test_empty_text_returns_no_statements(self) -> None:
+        assert _split_statements("") == []
+        assert _split_statements("   \n  ") == []
+
+    def test_semicolon_inside_comment_prose_is_not_a_split_point(self) -> None:
+        """Regression: this is the real da#319 shape that broke a naive split.
+
+        ``graph_integrity_deferred_inventory.cypher`` has a comment reading
+        "...decision must cover; it is contractual, not a defect." — a plain
+        ``text.split(";")`` cuts that single sentence into two "statements",
+        and the fragment ``it is contractual, not a defect.`` is not valid
+        Cypher (caught by the real-Neo4j integration test, not a canned-row
+        unit stub, since only a real driver rejects the fragment).
+        """
+        text = (
+            "// the missing count is the population a future decision must\n"
+            "// cover; it is contractual, not a defect.\n"
+            "MATCH (a) RETURN a;\n"
+            "MATCH (b) RETURN b"
+        )
+        result = _split_statements(text)
+        assert len(result) == 2
+        assert result[0].endswith("MATCH (a) RETURN a")
+        assert result[1] == "MATCH (b) RETURN b"
+        # The comment (with its embedded `;`) stays attached to the first
+        # statement rather than being sliced into its own fragment.
+        assert "it is contractual, not a defect." in result[0]
+
+    def test_semicolon_in_comment_on_otherwise_single_statement_file(self) -> None:
+        """A single-statement file whose only comment contains a `;` must
+        still be recognized as ONE statement (not two)."""
+        text = "// note: these; are fine in prose\nMATCH (a) RETURN a"
+        assert _split_statements(text) == [text]
+
+
+class TestInformationalInventoryClassification:
+    """da#319: ADR-003/ADR-004 inventory reports are owner-accepted sizing
+
+    reports, not pass/fail checks -- they must always PASS while still
+    surfacing the counts, mirroring the ``hadith_number_coverage`` precedent
+    in ``src/parse/validate.py``.
+    """
+
+    def test_graph_integrity_deferred_inventory_pass_regardless_of_counts(self) -> None:
+        rows: list[dict[str, object]] = [
+            {"block": 1, "row_count": 12},
+            {"block": 2, "row_count": 0},
+            {"block": 3, "row_count": 587},
+        ]
+        result = _classify("graph_integrity_deferred_inventory", rows)
+        assert result.passed is True
+        assert result.status == "PASS"
+        assert result.row_count == 599
+        assert "block 1: 12" in result.details
+        assert "block 3: 587" in result.details
+
+    def test_sanadset_orphan_inventory_pass_regardless_of_counts(self) -> None:
+        rows: list[dict[str, object]] = [{"block": 1, "row_count": 7580}]
+        result = _classify("sanadset_orphan_inventory", rows)
+        assert result.passed is True
+        assert result.status == "PASS"
+        assert result.row_count == 7580
+
+    def test_pass_on_no_blocks(self) -> None:
+        result = _classify("graph_integrity_deferred_inventory", [])
+        assert result.passed is True
+        assert result.row_count == 0
+        assert "no statement blocks" in result.details
+
+    def test_both_names_registered(self) -> None:
+        assert "graph_integrity_deferred_inventory" in _CLASSIFIER_REGISTRY
+        assert "sanadset_orphan_inventory" in _CLASSIFIER_REGISTRY
+
+
+class _SequencedClient:
+    """Stub client that returns one canned row-set per call and counts calls.
+
+    Unlike ``_FakeClient`` (which returns the same canned rows/behavior for
+    every call), this stub is for proving ``run_validation`` executes a
+    multi-statement file as N separate ``execute_read`` calls -- each call
+    gets its own entry from ``rows_per_call``.
+    """
+
+    def __init__(self, rows_per_call: list[list[dict[str, Any]]]) -> None:
+        self._rows_per_call = rows_per_call
+        self.queries_seen: list[str] = []
+
+    def execute_read(
+        self,
+        query: str,
+        parameters: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> list[dict[str, Any]]:
+        idx = len(self.queries_seen)
+        self.queries_seen.append(query)
+        return self._rows_per_call[idx]
+
+
+def _write_multi_statement_file(queries_dir: Path, name: str, text: str) -> None:
+    validation = queries_dir / "validation"
+    validation.mkdir(parents=True, exist_ok=True)
+    (validation / f"{name}.cypher").write_text(text, encoding="utf-8")
+
+
+class TestMultiStatementExecution:
+    """da#319: a multi-statement ``.cypher`` file is split and run per-statement.
+
+    Root cause: the Neo4j driver enforces one statement per ``tx.run()`` and
+    raises ``CypherSyntaxError: Expected exactly one statement per query but
+    got: N`` when handed a whole multi-block file as one string. These tests
+    prove ``run_validation`` now issues one ``execute_read`` call per
+    top-level statement instead of one call for the whole file, without
+    erroring, and aggregates the result back into a single ``ValidationResult``
+    per file (query_name unchanged).
+    """
+
+    def test_five_statement_file_executes_five_separate_calls(self, tmp_path: Path) -> None:
+        # Mirrors the real da#319 shape: graph_integrity_deferred_inventory.cypher
+        # and sanadset_orphan_inventory.cypher are both 5-statement scripts.
+        text = (
+            "// header comment for the whole file\n"
+            "MATCH (a) RETURN count(a) AS n;\n\n"
+            "// block 2\n"
+            "MATCH (b) RETURN count(b) AS n;\n\n"
+            "MATCH (c) RETURN count(c) AS n;\n\n"
+            "MATCH (d) RETURN count(d) AS n;\n\n"
+            "MATCH (e) RETURN count(e) AS n"
+        )
+        _write_multi_statement_file(tmp_path, "graph_integrity_deferred_inventory", text)
+        client = _SequencedClient(
+            rows_per_call=[[{"n": 4}], [{"n": 0}], [{"n": 12}], [{"n": 1}], [{"n": 587}]]
+        )
+        results = run_validation(client, tmp_path, timeout_seconds=5.0)  # type: ignore[arg-type]
+
+        assert len(client.queries_seen) == 5, (
+            "each top-level statement must be its own tx.run() call, not one "
+            "5-statement blob (da#319 CypherSyntaxError root cause)"
+        )
+        assert len(results) == 1, "aggregated into a single ValidationResult per file"
+        result = results[0]
+        assert result.query_name == "graph_integrity_deferred_inventory"
+        # Registered informational classifier -> always PASS even with nonzero
+        # counts in every block (ADR-004: owner-accepted tracked inventory).
+        assert result.passed is True
+        assert result.status == "PASS"
+        assert result.row_count == 5  # sum of per-block row counts (1 each)
+
+    def test_sanadset_orphan_inventory_five_statements(self, tmp_path: Path) -> None:
+        text = ";\n".join(f"MATCH (n{i}) RETURN count(n{i}) AS n" for i in range(5))
+        _write_multi_statement_file(tmp_path, "sanadset_orphan_inventory", text)
+        client = _SequencedClient(rows_per_call=[[{"n": 1}] for _ in range(5)])
+        results = run_validation(client, tmp_path, timeout_seconds=5.0)  # type: ignore[arg-type]
+
+        assert len(client.queries_seen) == 5
+        assert len(results) == 1
+        assert results[0].passed is True
+        assert results[0].status == "PASS"
+
+    def test_single_statement_file_still_executes_exactly_once(self, tmp_path: Path) -> None:
+        """Backward-compat: pre-da#319 single-statement files are untouched."""
+        _write_query(tmp_path, name="chain_integrity")
+        client = _SequencedClient(rows_per_call=[[]])
+        results = run_validation(client, tmp_path, timeout_seconds=5.0)  # type: ignore[arg-type]
+
+        assert len(client.queries_seen) == 1
+        assert results[0].query_name == "chain_integrity"
+        assert results[0].status == "PASS"
+
+    def test_unregistered_multi_statement_file_executes_without_error(self, tmp_path: Path) -> None:
+        """Generic split-and-run: works for ANY multi-statement file, not just
+        the two named in da#319 -- a future third file gets the same
+        statement-splitting treatment even without a dedicated classifier."""
+        text = "MATCH (a) RETURN a.id AS id;\nMATCH (b) RETURN b.id AS id"
+        _write_multi_statement_file(tmp_path, "some_future_check", text)
+        client = _SequencedClient(rows_per_call=[[], []])
+        results = run_validation(client, tmp_path, timeout_seconds=5.0)  # type: ignore[arg-type]
+
+        assert len(client.queries_seen) == 2
+        assert len(results) == 1
+        assert results[0].query_name == "some_future_check"
+
+    def test_error_in_second_statement_is_hard_failure_for_whole_file(self, tmp_path: Path) -> None:
+        """A real Cypher error partway through a multi-statement file still
+        surfaces as a fatal failure for the file (no silent partial pass)."""
+        validation = tmp_path / "validation"
+        validation.mkdir()
+        (validation / "graph_integrity_deferred_inventory.cypher").write_text(
+            "MATCH (a) RETURN a;\nMATCH (b) RETURN b", encoding="utf-8"
+        )
+
+        class _FailingSecondCall:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def execute_read(
+                self,
+                query: str,
+                parameters: dict[str, Any] | None = None,
+                *,
+                timeout: float | None = None,
+            ) -> list[dict[str, Any]]:
+                self.calls += 1
+                if self.calls == 2:
+                    raise RuntimeError("boom")
+                return []
+
+        client = _FailingSecondCall()
+        results = run_validation(client, tmp_path, timeout_seconds=5.0)  # type: ignore[arg-type]
+        assert client.calls == 2
+        assert len(results) == 1
+        assert results[0].is_fatal is True
+        assert results[0].details == "query execution failed"
