@@ -340,6 +340,7 @@ def _cmd_enrich(
     only: list[str] | None = None,
     skip: list[str] | None = None,
     incremental: bool = False,
+    betweenness_sampling_size: int | None = None,
 ) -> None:
     """Run the Phase 4 enrichment pipeline."""
     import time
@@ -359,6 +360,13 @@ def _cmd_enrich(
 
     settings = get_settings()
     _check_neo4j()
+
+    # CLI --betweenness-sampling-size overrides the configured default (da#326).
+    sampling_size = (
+        betweenness_sampling_size
+        if betweenness_sampling_size is not None
+        else settings.betweenness_sampling_size
+    )
 
     staging_dir = Path(settings.data_staging_dir)
     data_dir = staging_dir.parent
@@ -396,7 +404,13 @@ def _cmd_enrich(
 
     with Neo4jClient() as client:
         summary = enrich_all(
-            client, staging_dir, only=only, skip=skip, affected_corpora=affected_corpora
+            client,
+            staging_dir,
+            only=only,
+            skip=skip,
+            affected_corpora=affected_corpora,
+            betweenness_sampling_size=sampling_size,
+            betweenness_sampling_seed=settings.betweenness_sampling_seed,
         )
 
     duration = time.monotonic() - start
@@ -593,6 +607,16 @@ def main() -> None:
         action="store_true",
         help="Only re-enrich data affected by changed Parquet files",
     )
+    enrich_parser.add_argument(
+        "--betweenness-sampling-size",
+        type=int,
+        default=None,
+        help=(
+            "Pivot count for sampled (approximate) betweenness centrality "
+            "(da#326). Overrides the configured default. 0 = exact betweenness "
+            "(intractable at prod scale; use only for small graphs)."
+        ),
+    )
 
     validate_parser = subparsers.add_parser("validate", help="Run graph validation queries")
     validate_parser.add_argument(
@@ -683,7 +707,12 @@ def main() -> None:
             validation_timeout=args.validation_timeout,
         )
     elif args.command == "enrich":
-        _cmd_enrich(only=args.only, skip=args.skip, incremental=args.incremental)
+        _cmd_enrich(
+            only=args.only,
+            skip=args.skip,
+            incremental=args.incremental,
+            betweenness_sampling_size=args.betweenness_sampling_size,
+        )
     elif args.command == "validate":
         _cmd_validate(validation_timeout=args.validation_timeout)
     elif args.command == "validate-staging":

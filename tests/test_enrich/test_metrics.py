@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 from neo4j import exceptions as neo4j_exc
 
-from src.enrich.metrics import _gds_available, run_metrics
+from src.enrich.metrics import _gds_available, _write_betweenness, run_metrics
 from src.models.enrich import MetricsResult
 
 
@@ -18,6 +18,13 @@ def mock_client() -> MagicMock:
     client.execute_read.return_value = []
     client.execute_write.return_value = []
     return client
+
+
+def _betweenness_call(client: MagicMock):
+    """Return the (args, kwargs) of the single gds.betweenness.write call."""
+    calls = [c for c in client.execute_write.call_args_list if "gds.betweenness.write" in c.args[0]]
+    assert len(calls) == 1, f"expected exactly one betweenness call, got {len(calls)}"
+    return calls[0]
 
 
 class TestGdsAvailable:
@@ -100,3 +107,77 @@ class TestRunMetrics:
             "degree_computed",
             "communities_found",
         }
+
+
+class TestBetweennessSampling:
+    """da#326 — sampled vs exact betweenness tractability."""
+
+    def _gds_up(self, mock_client: MagicMock) -> None:
+        """Prime read side-effects so run_metrics runs the full algo sequence."""
+        mock_client.execute_read.side_effect = [
+            [{"version": "2.13.8"}],  # gds.version()
+            [{"exists": False}],  # gds.graph.exists
+            [{"cnt": 7}],  # count enriched
+            [],  # top-5
+        ]
+        mock_client.execute_write.return_value = [{"communityCount": 2, "nodePropertiesWritten": 7}]
+
+    def test_sampled_path_passes_sampling_params(self, mock_client: MagicMock) -> None:
+        """A positive sampling_size runs sampled Brandes with size + seed."""
+        self._gds_up(mock_client)
+
+        run_metrics(mock_client, sampling_size=2000, sampling_seed=42)
+
+        call = _betweenness_call(mock_client)
+        query, params = call.args[0], call.args[1]
+        assert "samplingSize: $samplingSize" in query
+        assert "samplingSeed: $samplingSeed" in query
+        assert params["samplingSize"] == 2000
+        assert params["samplingSeed"] == 42
+
+    def test_exact_path_when_sampling_size_none(self, mock_client: MagicMock) -> None:
+        """Unset sampling_size (default) runs exact betweenness — no sampling params."""
+        self._gds_up(mock_client)
+
+        run_metrics(mock_client)  # sampling_size defaults to None
+
+        call = _betweenness_call(mock_client)
+        query, params = call.args[0], call.args[1]
+        assert "samplingSize" not in query
+        assert "samplingSeed" not in query
+        assert params == {"name": "transmission_graph"}
+
+    def test_exact_path_when_sampling_size_zero(self, mock_client: MagicMock) -> None:
+        """sampling_size=0 is the explicit small-graph exact opt-out."""
+        self._gds_up(mock_client)
+
+        run_metrics(mock_client, sampling_size=0)
+
+        call = _betweenness_call(mock_client)
+        assert "samplingSize" not in call.args[0]
+
+    def test_result_flags_set_on_sampled_run(self, mock_client: MagicMock) -> None:
+        """betweenness_computed (and peers) are True on a successful sampled run."""
+        self._gds_up(mock_client)
+
+        result = run_metrics(mock_client, sampling_size=1500)
+
+        assert result.betweenness_computed is True
+        assert result.pagerank_computed is True
+        assert result.louvain_computed is True
+        assert result.degree_computed is True
+
+    def test_write_betweenness_helper_sampled(self, mock_client: MagicMock) -> None:
+        """_write_betweenness emits sampling params directly for a positive size."""
+        _write_betweenness(mock_client, sampling_size=1000, sampling_seed=7)
+
+        call = _betweenness_call(mock_client)
+        assert call.args[1]["samplingSize"] == 1000
+        assert call.args[1]["samplingSeed"] == 7
+
+    def test_write_betweenness_helper_exact(self, mock_client: MagicMock) -> None:
+        """_write_betweenness omits sampling params for None/0."""
+        _write_betweenness(mock_client, sampling_size=None, sampling_seed=42)
+
+        call = _betweenness_call(mock_client)
+        assert "samplingSize" not in call.args[0]

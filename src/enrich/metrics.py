@@ -66,12 +66,68 @@ def _drop_graph(client: Neo4jClient) -> None:
         log.warning("gds_graph_drop_failed", error=str(exc))
 
 
+def _write_betweenness(
+    client: Neo4jClient,
+    *,
+    sampling_size: int | None,
+    sampling_seed: int,
+) -> None:
+    """Write betweenness_centrality to NARRATOR nodes.
+
+    Exact Brandes betweenness is O(V*E) — intractable on the prod graph
+    (~150k narrators / 2.68M TRANSMITTED_TO edges ≈ 4e11, the da#250-class
+    timeout risk). When *sampling_size* is a positive int we run GDS's sampled
+    (approximate) Brandes over that many pivot nodes, which preserves the
+    choke-point *ranking* at a fraction of the cost; a fixed *sampling_seed*
+    keeps successive runs deterministic. When *sampling_size* is None or 0 we
+    fall back to exact betweenness — correct only for small graphs (tests).
+    """
+    if sampling_size and sampling_size > 0:
+        client.execute_write(
+            "CALL gds.betweenness.write($name, {"
+            "writeProperty: 'betweenness_centrality',"
+            " samplingSize: $samplingSize, samplingSeed: $samplingSeed})"
+            " YIELD nodePropertiesWritten RETURN nodePropertiesWritten",
+            {
+                "name": GRAPH_NAME,
+                "samplingSize": sampling_size,
+                "samplingSeed": sampling_seed,
+            },
+        )
+        log.info(
+            "betweenness_computed",
+            mode="sampled",
+            sampling_size=sampling_size,
+            sampling_seed=sampling_seed,
+        )
+    else:
+        client.execute_write(
+            "CALL gds.betweenness.write($name, {writeProperty: 'betweenness_centrality'})"
+            " YIELD nodePropertiesWritten RETURN nodePropertiesWritten",
+            {"name": GRAPH_NAME},
+        )
+        log.info("betweenness_computed", mode="exact")
+
+
 def run_metrics(
     client: Neo4jClient,
     *,
     affected_corpora: set[str] | None = None,
+    sampling_size: int | None = None,
+    sampling_seed: int = 42,
 ) -> MetricsResult:
-    """Compute graph metrics and write back to NARRATOR nodes."""
+    """Compute graph metrics and write back to NARRATOR nodes.
+
+    Parameters
+    ----------
+    sampling_size:
+        Number of pivot nodes for sampled (approximate) betweenness centrality.
+        A positive value runs GDS's tractable sampled Brandes; None or 0 runs
+        exact betweenness (small-graph / test path). See ``_write_betweenness``.
+        Production callers thread ``settings.betweenness_sampling_size`` here.
+    sampling_seed:
+        Deterministic seed for the sampled-betweenness pivot selection.
+    """
     if not _gds_available(client):
         return MetricsResult(
             narrators_enriched=0,
@@ -85,14 +141,9 @@ def run_metrics(
     _ensure_graph_projection(client)
 
     try:
-        # Betweenness centrality
-        client.execute_write(
-            "CALL gds.betweenness.write($name, {writeProperty: 'betweenness_centrality'})"
-            " YIELD nodePropertiesWritten RETURN nodePropertiesWritten",
-            {"name": GRAPH_NAME},
-        )
+        # Betweenness centrality (sampled at prod scale — see _write_betweenness)
+        _write_betweenness(client, sampling_size=sampling_size, sampling_seed=sampling_seed)
         betweenness_computed = True
-        log.info("betweenness_computed")
 
         # PageRank
         client.execute_write(
