@@ -21,8 +21,17 @@ dependencies = [
     # advisory GHSA-g75f-g53v-794x (ReDoS) has no fixed release; da runs no
     # pip-audit gate so no --ignore-vuln is required here.
     "bleach>=6.4.0",
+    # Direct floor on the urllib3 transitive (pulled in via kaggle / docker) to
+    # clear CVE-2026-44432 (DoS via HTTP response decompression) +
+    # CVE-2026-44431 (cross-origin info disclosure), fixed in 2.7.0. Clears the
+    # loader-image Publish-to-GHCR Trivy digest-scan gate (da#331). Runtime
+    # exposure is nil (loader ops use the Neo4j bolt driver, not urllib3 HTTP).
+    "urllib3>=2.7.0",
     "beautifulsoup4>=4.12",
-    "lxml>=5.1",
+    # Floor lxml to clear CVE-2026-41066 (HIGH; information disclosure via
+    # untrusted XML), fixed in 6.1.0 — clears the loader-image Trivy gate
+    # (da#331) alongside the urllib3 floor above.
+    "lxml>=6.1.0",
     "tqdm>=4.66",
     "tenacity>=8.2",
     "rapidfuzz>=3.6",
