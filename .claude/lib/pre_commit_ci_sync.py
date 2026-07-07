@@ -55,6 +55,22 @@ from pathlib import Path
 # Each kind maps to the keyword patterns that identify it on EITHER side
 # (pre-commit id/entry text or CI run/uses text). Patterns are substrings
 # matched case-insensitively against the relevant lines.
+#
+# `build` matches only real build-QUALITY GATES — a job whose purpose is to
+# fail the PR if the project does not build/compile (`build-and-validate`,
+# `build-and-test`, `npm run build`). It deliberately does NOT match bare
+# `docker build` / `docker buildx`: those are runtime image-MOVING (retag,
+# promote, publish to a registry, cold-rebuild dry-runs, digest resolution),
+# which is the deploy/publish job itself, not a quality gate a local pre-commit
+# hook could mirror. A bare `docker build` substring also matches `docker
+# buildx` and the `Set up Docker Buildx` step name, so a repo that uses buildx
+# at runtime (image-publishing CI in isnad-graph / ingest-platform, deploy,
+# and now this repo's ghcr-publish.yml — da#329) would otherwise see a
+# permanent un-mirrorable "build" kind and the drift gate could never exit 0.
+# If a repo ever adds a genuine docker-build-as-quality-gate, name that job
+# `build-and-validate` / `build-and-test` (or add an explicit pattern) so it is
+# mirror-tracked. PROPOSED-CANONICAL (noorinalabs-main#576); aligned with the
+# version landed in noorinalabs-deploy#391 / isnad-graph#938.
 _KIND_PATTERNS: dict[str, tuple[str, ...]] = {
     "ruff-format": ("ruff-format", "ruff format"),
     "ruff-lint": ("ruff check", "id: ruff", "- ruff"),
@@ -67,7 +83,7 @@ _KIND_PATTERNS: dict[str, tuple[str, ...]] = {
     "gitleaks": ("gitleaks",),
     "actionlint": ("actionlint",),
     "pip-audit": ("pip-audit", "pip audit"),
-    "build": ("build-and-validate", "build-and-test", "npm run build", "docker build"),
+    "build": ("build-and-validate", "build-and-test", "npm run build"),
     # `cspell` closes the spell-check blind spot (noorinalabs-main#684): the CI
     # `Spellcheck (cspell)` job (.github/workflows/docs.yml) runs the
     # `streetsidesoftware/cspell-action` (or a `cspell` CLI), but until this kind

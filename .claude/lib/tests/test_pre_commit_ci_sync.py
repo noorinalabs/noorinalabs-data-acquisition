@@ -139,5 +139,54 @@ class RealRepoCspellParity(unittest.TestCase):
         )
 
 
+class DockerBuildxNotBuildKind(unittest.TestCase):
+    """Regression for the `build`-kind false-match (deploy#391 / isnad-graph#938,
+    da#329): a docker image-PUBLISH workflow uses `Set up Docker Buildx` and
+    `docker buildx build`, whose substring `docker build` used to classify as the
+    `build` quality-gate kind. A registry publish is not a local fast-feedback
+    check, so that produced a permanent un-mirrorable `build` drift and the gate
+    could never exit 0 on a docker-publish repo. The pattern now matches only
+    genuine build-quality-gate names (`build-and-validate`, `build-and-test`,
+    `npm run build`)."""
+
+    def test_buildx_setup_step_name_not_build_kind(self) -> None:
+        wf = """
+jobs:
+  build-and-push-load:
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f # v4
+"""
+        self.assertNotIn("build", kinds_from_ci(wf))
+
+    def test_buildx_build_run_line_not_build_kind(self) -> None:
+        self.assertNotIn("build", kinds_from_ci("      - run: docker buildx build --push .\n"))
+
+    def test_publish_workflow_no_harmful_build_drift(self) -> None:
+        # The whole point: a repo whose only build-ish CI is a docker publish
+        # (no npm/compile quality gate) must not see harmful `build` drift.
+        wf = """
+jobs:
+  build-and-push-load:
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f # v4
+      - name: Build and push
+        uses: docker/build-push-action@f9f3042 # v7
+"""
+        cfg = """
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+"""
+        harmful, _ = compute_drift(kinds_from_precommit(cfg), kinds_from_ci(wf))
+        self.assertNotIn("build", harmful)
+
+    def test_real_build_quality_gate_still_classified(self) -> None:
+        # A genuine build-quality gate must still register so it stays mirrored.
+        self.assertIn("build", kinds_from_ci("      - run: npm run build\n"))
+
+
 if __name__ == "__main__":
     unittest.main()
