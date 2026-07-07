@@ -82,6 +82,32 @@ class TestChainIntegrityClassification:
         assert result.row_count == 1
 
 
+class TestTransmittedToHadithRefClassification:
+    """da#325 regression guard: 0 dangling edge hadith_ids = pass."""
+
+    def test_registered(self) -> None:
+        assert "transmitted_to_hadith_ref" in _CLASSIFIER_REGISTRY
+
+    def test_cypher_file_exists(self) -> None:
+        path = QUERIES_DIR / "transmitted_to_hadith_ref.cypher"
+        assert path.exists(), f"Missing {path}"
+
+    def test_zero_results_is_pass(self) -> None:
+        result = _classify("transmitted_to_hadith_ref", [])
+        assert result.passed is True
+        assert result.row_count == 0
+
+    def test_dangling_edge_id_is_fail(self) -> None:
+        # An edge hadith_id that matches no Hadith node — the da#325 mismatch.
+        rows: list[dict[str, object]] = [
+            {"hadith_id": "sanadset:sanadset:0:0:2326"},
+        ]
+        result = _classify("transmitted_to_hadith_ref", rows)
+        assert result.passed is False
+        assert result.row_count == 1
+        assert "da#325" in result.details
+
+
 class TestCollectionCoverageClassification:
     """Collection coverage: deviation within threshold = pass."""
 

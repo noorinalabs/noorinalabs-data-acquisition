@@ -57,8 +57,56 @@ class TestBuildChainPairs:
         ]
         pairs = _build_chain_pairs(mentions)
         assert len(pairs) == 2
-        assert pairs[0] == {"from_id": "nar:1", "to_id": "nar:2", "position": 0, "hadith_id": "h1"}
-        assert pairs[1] == {"from_id": "nar:2", "to_id": "nar:3", "position": 1, "hadith_id": "h1"}
+        # hadith_id is canonicalized to match Hadith.id (da#325): "h1" -> "hdt:h1".
+        assert pairs[0] == {
+            "from_id": "nar:1",
+            "to_id": "nar:2",
+            "position": 0,
+            "hadith_id": "hdt:h1",
+        }
+        assert pairs[1] == {
+            "from_id": "nar:2",
+            "to_id": "nar:3",
+            "position": 1,
+            "hadith_id": "hdt:h1",
+        }
+
+    def test_hadith_id_is_canonicalized(self) -> None:
+        # da#325: the edge hadith_id must match Hadith.id — canonical (hdt: prefix,
+        # main#139 double-prefix collapsed), not the raw staging id.
+        mentions = [
+            {
+                "canonical_narrator_id": "nar:1",
+                "position_in_chain": 0,
+                "hadith_id": "sanadset:sanadset:0:0:2326",
+            },
+            {
+                "canonical_narrator_id": "nar:2",
+                "position_in_chain": 1,
+                "hadith_id": "sanadset:sanadset:0:0:2326",
+            },
+        ]
+        pairs = _build_chain_pairs(mentions)
+        assert len(pairs) == 1
+        assert pairs[0]["hadith_id"] == "hdt:sanadset:0:0:2326"
+
+    def test_hadith_id_already_canonical_unchanged(self) -> None:
+        # Idempotent: a canonical id passes through untouched (hadith_node_id no-op).
+        mentions = [
+            {"canonical_narrator_id": "nar:1", "position_in_chain": 0, "hadith_id": "hdt:s:0:0:1"},
+            {"canonical_narrator_id": "nar:2", "position_in_chain": 1, "hadith_id": "hdt:s:0:0:1"},
+        ]
+        pairs = _build_chain_pairs(mentions)
+        assert pairs[0]["hadith_id"] == "hdt:s:0:0:1"
+
+    def test_missing_hadith_id_preserved_as_empty(self) -> None:
+        # A missing/empty raw id stays "" — never a bare "hdt:" (da#325 guard).
+        mentions = [
+            {"canonical_narrator_id": "nar:1", "position_in_chain": 0},
+            {"canonical_narrator_id": "nar:2", "position_in_chain": 1},
+        ]
+        pairs = _build_chain_pairs(mentions)
+        assert pairs[0]["hadith_id"] == ""
 
     def test_single_narrator_no_pairs(self) -> None:
         mentions = [
@@ -103,7 +151,12 @@ class TestBuildChainPairs:
         pairs = _build_chain_pairs(mentions)
         # nar:1->nar:1 dropped; only nar:1->nar:2 survives.
         assert len(pairs) == 1
-        assert pairs[0] == {"from_id": "nar:1", "to_id": "nar:2", "position": 1, "hadith_id": "h1"}
+        assert pairs[0] == {
+            "from_id": "nar:1",
+            "to_id": "nar:2",
+            "position": 1,
+            "hadith_id": "hdt:h1",
+        }
         assert all(p["from_id"] != p["to_id"] for p in pairs)
 
 
