@@ -28,7 +28,10 @@ dependencies = [
     # exposure is nil (loader ops use the Neo4j bolt driver, not urllib3 HTTP).
     "urllib3>=2.7.0",
     "beautifulsoup4>=4.12",
-    "lxml>=5.1",
+    # Floor lxml to clear CVE-2026-41066 (HIGH; information disclosure via
+    # untrusted XML), fixed in 6.1.0 — clears the loader-image Trivy gate
+    # (da#331) alongside the urllib3 floor above.
+    "lxml>=6.1.0",
     "tqdm>=4.66",
     "tenacity>=8.2",
     "rapidfuzz>=3.6",
