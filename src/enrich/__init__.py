@@ -37,6 +37,8 @@ def run_all(
     only: list[str] | None = None,
     skip: list[str] | None = None,
     affected_corpora: set[str] | None = None,
+    betweenness_sampling_size: int | None = None,
+    betweenness_sampling_seed: int = 42,
 ) -> EnrichSummary:
     """Run enrichment pipeline: metrics -> topics -> historical.
 
@@ -49,6 +51,12 @@ def run_all(
     affected_corpora:
         If provided (incremental mode), only process data from these corpora.
         Passed through to individual enrichment steps for filtering.
+    betweenness_sampling_size:
+        Pivot count for sampled (approximate) betweenness centrality (da#326).
+        Positive = tractable sampled Brandes; None or 0 = exact. Threaded to
+        ``run_metrics``; production callers pass ``settings.betweenness_sampling_size``.
+    betweenness_sampling_seed:
+        Deterministic seed for the sampled-betweenness pivot selection.
     """
     steps_completed: list[str] = []
     steps_failed: list[str] = []
@@ -60,7 +68,12 @@ def run_all(
     if _should_run("metrics", only, skip):
         try:
             log.info("enrich_step_start", step="metrics")
-            metrics_result = run_metrics(client, affected_corpora=affected_corpora)
+            metrics_result = run_metrics(
+                client,
+                affected_corpora=affected_corpora,
+                sampling_size=betweenness_sampling_size,
+                sampling_seed=betweenness_sampling_seed,
+            )
             steps_completed.append("metrics")
             log.info("enrich_step_done", step="metrics")
         except Exception:

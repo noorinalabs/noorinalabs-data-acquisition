@@ -61,6 +61,15 @@ class Settings(BaseSettings):
     # capped in dedup); 1 = serial; >1 = that many workers, clamped to cores.
     dedup_encode_workers: int = 0
 
+    # Betweenness-centrality sampling pivots for the enrich metrics phase (da#326).
+    # Exact Brandes betweenness is O(V*E) (~4e11 at 150k nodes / 2.68M edges) and
+    # intractable at prod scale, so GDS uses sampled (approximate) Brandes with this
+    # many pivot nodes — the choke-point *ranking* is preserved. 0 = exact (no
+    # sampling); appropriate only for small graphs. Default 2000 pivots (~1.3% of the
+    # 150k narrator graph). Deterministic across runs via betweenness_sampling_seed.
+    betweenness_sampling_size: int = 2000
+    betweenness_sampling_seed: int = 42
+
     log_level: str = "INFO"
     log_format: str = "console"
 
