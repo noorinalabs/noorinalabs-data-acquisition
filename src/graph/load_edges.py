@@ -144,6 +144,13 @@ def _build_chain_pairs(
     Each mention must have ``canonical_narrator_id``, ``position_in_chain``,
     and ``hadith_id``.  Returns dicts with ``from_id``, ``to_id``,
     ``position``, and ``hadith_id``.
+
+    The emitted ``hadith_id`` is canonicalized through :func:`hadith_node_id`
+    (adds the ``hdt:`` prefix and collapses the main#139 double-prefix) so it
+    matches ``Hadith.id`` — the value ``GET /graph/hadith/{id}/chain`` joins on.
+    Storing the raw staging id here (``sanadset:sanadset:...``) was da#325: it
+    matched no Hadith node, so the chain reconstruction returned empty for every
+    hadith. A missing/empty raw id is preserved as ``""`` (never a bare ``hdt:``).
     """
     sorted_mentions = sorted(mentions, key=lambda r: r.get("position_in_chain", 0))
     # Filter to mentions with resolved narrator IDs
@@ -152,6 +159,10 @@ def _build_chain_pairs(
     for i in range(len(resolved) - 1):
         from_id = resolved[i]["canonical_narrator_id"]
         to_id = resolved[i + 1]["canonical_narrator_id"]
+        # Canonicalize the hadith id to match Hadith.id (da#325). Guard the empty
+        # case: a missing id stays "" rather than becoming a bare "hdt:".
+        raw_hadith_id = resolved[i].get("hadith_id", "")
+        hadith_id = hadith_node_id(raw_hadith_id) if raw_hadith_id else ""
         # Drop self-loops: two ADJACENT mentions that resolve to the same
         # canonical narrator (a repeated narrator in the raw chain, or two
         # mentions the disambiguator collapsed onto one node) would otherwise
@@ -164,7 +175,7 @@ def _build_chain_pairs(
             logger.debug(
                 "transmitted_to_self_loop_skipped",
                 narrator_id=from_id,
-                hadith_id=resolved[i].get("hadith_id", ""),
+                hadith_id=hadith_id,
             )
             continue
         pairs.append(
@@ -172,7 +183,7 @@ def _build_chain_pairs(
                 "from_id": from_id,
                 "to_id": to_id,
                 "position": resolved[i].get("position_in_chain", i),
-                "hadith_id": resolved[i].get("hadith_id", ""),
+                "hadith_id": hadith_id,
             }
         )
     return pairs

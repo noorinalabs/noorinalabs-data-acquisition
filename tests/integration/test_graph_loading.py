@@ -602,6 +602,7 @@ class TestPostLoadValidationAgainstRealFiles:
             "graph_integrity_deferred_inventory",
             "orphan_narrators",
             "sanadset_orphan_inventory",
+            "transmitted_to_hadith_ref",
         }
         by_name = {r.query_name: r for r in results}
         # The two da#319 multi-statement files specifically must never be a

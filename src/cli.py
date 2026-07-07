@@ -308,6 +308,33 @@ def _cmd_validate(*, validation_timeout: float | None = None) -> None:
         print("\nAll validation checks passed.")
 
 
+def _cmd_migrate_transmitted_hadith_ids(*, batch_size: int = 1000) -> None:
+    """Canonicalize existing TRANSMITTED_TO.hadith_id edge ids in place (da#325).
+
+    Remediates a live graph whose ``TRANSMITTED_TO`` edges carry the raw staging
+    ``hadith_id`` (``sanadset:sanadset:...``) instead of the canonical
+    ``Hadith.id`` (``hdt:sanadset:...``) — the mismatch that made the isnad-chain
+    endpoint empty for every hadith. The loader fix only helps NEW loads; this
+    rewrites the ~2.68M existing edges in place. Idempotent and safe to re-run.
+    """
+    _check_neo4j()
+
+    from src.graph.migrate import migrate_transmitted_hadith_ids
+    from src.utils.neo4j_client import Neo4jClient
+
+    with Neo4jClient() as client:
+        result = migrate_transmitted_hadith_ids(client, batch_size=batch_size)
+
+    print("=== TRANSMITTED_TO.hadith_id migration (da#325) ===")
+    print(f"  Distinct hadith_id values seen  : {result.distinct_ids_seen}")
+    print(f"  Distinct values needing rewrite : {result.distinct_ids_rewritten}")
+    print(f"  Edges updated                   : {result.edges_updated}")
+    if result.distinct_ids_rewritten == 0:
+        print("\nAll TRANSMITTED_TO.hadith_id values already canonical — nothing to do.")
+    else:
+        print("\nMigration complete.")
+
+
 def _cmd_enrich(
     *,
     only: list[str] | None = None,
@@ -622,6 +649,17 @@ def main() -> None:
         help="Maximum drift percentage from baseline (default: 30.0)",
     )
 
+    migrate_parser = subparsers.add_parser(
+        "migrate-transmitted-hadith-ids",
+        help="Canonicalize existing TRANSMITTED_TO.hadith_id edge ids in place (da#325)",
+    )
+    migrate_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1000,
+        help="Edges rewritten per write batch (default: 1000)",
+    )
+
     audit_parser = subparsers.add_parser("audit", help="View recent pipeline audit entries")
     audit_parser.add_argument(
         "--last",
@@ -695,6 +733,8 @@ def main() -> None:
         if not report.passed and strictness == Strictness.STRICT:
             print("\nValidation FAILED in strict mode. Pipeline halted.")
             sys.exit(1)
+    elif args.command == "migrate-transmitted-hadith-ids":
+        _cmd_migrate_transmitted_hadith_ids(batch_size=args.batch_size)
     elif args.command == "audit":
         _cmd_audit(last_n=args.last)
     elif args.command == "pipeline":

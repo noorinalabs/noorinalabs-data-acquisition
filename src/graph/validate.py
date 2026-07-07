@@ -213,6 +213,28 @@ def _classify_chain_integrity(
     return ValidationResult(query_name, passed, details, count)
 
 
+def _classify_transmitted_to_hadith_ref(
+    query_name: str,
+    rows: list[dict[str, object]],
+    deviation_threshold: float,
+) -> ValidationResult:
+    """Regression guard for da#325: every edge ``hadith_id`` must resolve.
+
+    The query returns the distinct ``TRANSMITTED_TO.hadith_id`` values that match
+    no ``Hadith`` node — the exact failure that made ``GET /graph/hadith/{id}/
+    chain`` empty for every hadith (raw ``sanadset:...`` edge ids vs canonical
+    ``hdt:sanadset:...`` node ids). 0 rows = every edge id references a Hadith.
+    """
+    count = len(rows)
+    passed = count == 0
+    details = (
+        "all TRANSMITTED_TO.hadith_id reference a Hadith node"
+        if passed
+        else f"{count} TRANSMITTED_TO.hadith_id value(s) match no Hadith node (da#325)"
+    )
+    return ValidationResult(query_name, passed, details, count)
+
+
 def _classify_collection_coverage(
     query_name: str,
     rows: list[dict[str, object]],
@@ -310,6 +332,7 @@ def _classify_informational_inventory(
 _CLASSIFIER_REGISTRY: dict[str, ClassifierFunc] = {
     "orphan_narrators": _classify_orphan_narrators,
     "chain_integrity": _classify_chain_integrity,
+    "transmitted_to_hadith_ref": _classify_transmitted_to_hadith_ref,
     "collection_coverage": _classify_collection_coverage,
     "graph_integrity_deferred_inventory": _classify_informational_inventory,
     "sanadset_orphan_inventory": _classify_informational_inventory,
