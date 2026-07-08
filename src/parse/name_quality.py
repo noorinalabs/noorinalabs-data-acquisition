@@ -671,6 +671,106 @@ _MATN_OPENERS = frozenset(
     }
 )
 
+# --- Matn function-word / Qur'anic-verse signature (da#317) --------------------
+# Standalone matn function words — prepositions, personal pronouns, demonstratives,
+# and conditional / negation / conjunction particles — that a real *proper-noun*
+# narrator name NEVER carries as a whole token. The da#308 gate caught verb-led and
+# grading-formula matn but MISSED (a) conjunction-initial narrative (``و…``/``ف…``),
+# (b) divine-name / Qur'anic-verse phraseology, and (c) short function-word-only
+# fragments (``وما`` "and not"). On the #723 reload ~26% of the 150,187 canonical
+# "narrators" were such matn/verse sentences in the zero-degree tail (row 1 of the
+# id-ordered /narrators list is Qur'an 22:32). These particles are the text-only
+# signature of that class (no graph / degree input — the gate runs at NER time).
+#
+# PRECISION: none is ever a component of a real name, and every rule that consults
+# this set runs AFTER the nasab-connector precision guard (so any genuine lineage /
+# kunya is already spared). Crucially ``على`` (preposition "on", alif-maqsura final)
+# is a DISTINCT token from ``علي`` (the name ʿAlī, ya final) because
+# ``normalize_arabic`` does NOT fold ى→ي — so no ʿAlī is ever mistaken for the
+# preposition. ``من`` is deliberately EXCLUDED (it is the partitive the mubham
+# guards 5/5b key on, and folding it in here would be redundant/entangling).
+_MATN_PARTICLES = frozenset(
+    {
+        # prepositions
+        "على",  # "on / upon" (alif-maqsura — NOT the name علي)
+        "في",  # "in"
+        "الى",  # "to / towards"
+        "عند",  # "at / with"
+        "بعد",  # "after"
+        "قبل",  # "before"
+        "مع",  # "with"
+        "لدى",  # "at / with"
+        "بين",  # "between"
+        "نحو",  # "towards / about"
+        # personal / attached pronouns
+        "نحن",  # "we"
+        "انا",  # "I"
+        "انت",  # "you (m.)"
+        "انتم",  # "you (pl.)"
+        "هم",  # "they"
+        "هما",  # "they two"
+        "اليك",  # "to you"
+        "اليه",  # "to him"
+        "اليها",  # "to her"
+        "اليهم",  # "to them"
+        "لك",  # "to you"
+        "له",  # "to him"
+        "لها",  # "to her"
+        "لهم",  # "to them"
+        "لنا",  # "to us"
+        # demonstratives / place adverbs
+        "هذا",  # "this (m.)"
+        "هذه",  # "this (f.)"
+        "هؤلاء",  # "these"
+        "ذلك",  # "that (m.)"
+        "تلك",  # "that (f.)"
+        "هناك",  # "there"
+        "هناكا",  # "there" (pausal/poetic form seen in the evidence set)
+        "هنا",  # "here"
+        "حيث",  # "where"
+        # conditional / negation / conjunction / interrogative particles
+        "لو",  # "if"
+        "لولا",  # "if not"
+        "ما",  # "not / what"
+        "لا",  # "no / not"
+        "لم",  # "did not"
+        "لن",  # "will not"
+        "او",  # "or"
+        "ام",  # "or (interrog.)"
+        "الا",  # "except / but" (exceptive particle; never a name component)
+        "لكن",  # "but"
+        "بل",  # "rather"
+        "قد",  # "already / indeed"
+        "كل",  # "all / every"
+        "بعض",  # "some"
+        "اما",  # "as for / either"
+        "انما",  # "only / but"
+        "كي",  # "so that"
+        "كيف",  # "how"
+        "متى",  # "when"
+        "اين",  # "where"
+        "لذلك",  # "therefore"
+        "لذا",  # "hence"
+        "كذلك",  # "likewise"
+        "كذا",  # "such / thus"
+    }
+)
+
+
+def _is_matn_particle(token: str) -> bool:
+    """True when *token* (normalized) is a bare matn function word (da#317).
+
+    Matches directly, or after folding a single leading ``و``/``ف`` proclitic
+    ("and / so") — so ``وما`` ("and not") and ``فلو`` ("so if") count, while a real
+    ``و``/``ف``-initial name (``وهب`` → ``هب``, ``فاطمه`` → ``اطمه``) folds to a
+    non-particle stem and is NOT matched. ``في`` ("in") is matched directly (its
+    ``ف`` is not a proclitic), so the fold never strips it to a bare ``ي``.
+    """
+    if token in _MATN_PARTICLES:
+        return True
+    return token[:1] in ("و", "ف") and len(token) > 1 and token[1:] in _MATN_PARTICLES
+
+
 # Grading / commentary formulae as TOKEN sequences (da#308). Matched as a
 # contiguous token subsequence, not a raw substring, so "حسن صحيح" does not fire
 # inside the single token "الحسن" + "صحيح" of a real name (Kavitha #4).
@@ -991,8 +1091,14 @@ def _is_matn_sentence(tokens: list[str], kept_text: str, was_truncated: bool) ->
         return True
 
     # (2) Matn / discourse verb leading the span: a bare opener ("نعم") or a
-    #     verb-led sentence ("قلت … / صلى النبي …").
-    if bare[0] in _MATN_OPENERS:
+    #     verb-led sentence ("قلت … / صلى النبي …"). da#317 folds a single leading
+    #     و/ف proclitic before the opener check so a conjunction-initial narrative
+    #     opener ("فقلت" = "so I said", "وقلت", "فنهى") is caught — none of the
+    #     openers is a real name, and no و/ف-initial real name folds to an opener
+    #     stem (وهب→هب, فاطمه→اطمه), so this has no false-positive surface.
+    lead = bare[0]
+    lead_folded = lead[1:] if lead[:1] in ("و", "ف") and len(lead) > 1 else lead
+    if lead in _MATN_OPENERS or lead_folded in _MATN_OPENERS:
         if n == 1 or n >= _MATN_SENTENCE_MIN_TOKENS:
             return True
         # (2s) Short residue (da#311): n == 2 falls under the general min-token
@@ -1036,6 +1142,35 @@ def _is_matn_sentence(tokens: list[str], kept_text: str, was_truncated: bool) ->
     nasab = sum(1 for t in bare if t in _NASAB_CONNECTORS)
     if nasab >= 2 or nasab / n >= _NASAB_SPARE_DENSITY:
         return False
+
+    # (2a) Divine-name / Qur'anic-verse signature (da#317): the bare divine name
+    #      الله occurring TWICE OR MORE is a verse / oath / matn signature, never a
+    #      real name. A theophoric compound carries الله at most once (عبد الله,
+    #      عبيد الله, هبه الله); a two-theophoric nasab (عبد الله بن عبيد الله)
+    #      ALWAYS has a بن connector, so the precision guard above already spared it
+    #      before this point. Catches Qur'an 22:32 ("… شعاءر الله فانها من تقوى
+    #      القلوب") that leads the id-ordered /narrators list. رسول/نبي + الله is a
+    #      Prophet reference already dropped by step 6b upstream.
+    if sum(1 for t in bare if t == "الله") >= 2:
+        return True
+
+    # (2b) Matn function-word density (da#317): a span (past the nasab guard) with
+    #      TWO OR MORE standalone matn particles — a preposition (على/في/الى),
+    #      pronoun (نحن/اليك/له), conditional/negation (لو/ما/لا), or demonstrative
+    #      (هذا/ذلك/هناك), each optionally carrying a leading و/ف proclitic — is
+    #      narrative matn, not a name ("وتهيات للحج … على الخروج … نحن لذلك … اليك";
+    #      "فقلت لو كنت هناك ما قتلتهم"). A real proper-noun name carries ZERO such
+    #      tokens, so the ≥2 threshold has no false-positive surface on real names.
+    if sum(1 for t in bare if _is_matn_particle(t)) >= 2:
+        return True
+
+    # (2c) All-function-word fragment (da#317): a span whose EVERY token is a matn
+    #      particle (leading و/ف proclitic folded) is a bare narrative fragment, not
+    #      a name — "وما" ("and not"), a lone "على", "ثم" already handled elsewhere.
+    #      Distinct from clean_narrator_name's all-residue guard (isnad-formula
+    #      words); this covers the pure prepositional/pronominal fragments.
+    if all(_is_matn_particle(t) for t in bare):
+        return True
 
     if n < _MATN_SENTENCE_MIN_TOKENS:
         return False
