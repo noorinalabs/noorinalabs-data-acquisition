@@ -49,6 +49,10 @@ class DatePrecision(StrEnum):
     - ``BEFORE``: "died before X" → ``latest = X``, ``earliest = None``.
     - ``TABAQA_ESTIMATE``: no year attested; window derived from the ṭabaqa
       (generation) layer.
+    - ``ISNAD_ESTIMATE``: no year attested; window derived from the *isnad
+      adjacency* of a mention's chain neighbours (the narrator_split peel, da#337 /
+      da#340) — a distinct provenance from the ṭabaqa layer, so it carries its own
+      value rather than overloading ``TABAQA_ESTIMATE``.
     - ``UNKNOWN``: nothing is known about the date.
     """
 
@@ -58,6 +62,7 @@ class DatePrecision(StrEnum):
     AFTER = "after"
     BEFORE = "before"
     TABAQA_ESTIMATE = "tabaqa_estimate"
+    ISNAD_ESTIMATE = "isnad_estimate"
     UNKNOWN = "unknown"
 
 

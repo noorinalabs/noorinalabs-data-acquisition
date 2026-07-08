@@ -21,6 +21,7 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from src.models.enums import DatePrecision
 from src.parse.identity import make_canonical_id, make_discriminated_canonical_id
 from src.resolve.generic_name import is_generic_name
 from src.resolve.narrator_split import (
@@ -36,6 +37,7 @@ from src.utils.arabic import normalize_arabic
 
 _ABU_ABDALLAH = normalize_arabic("أبو عبد الله")
 _ZUHRI = normalize_arabic("الزهري")
+_SHUBA = normalize_arabic("شعبة")
 _THAWRI = normalize_arabic("سفيان الثوري")
 _SUFYAN = normalize_arabic("سفيان")
 
@@ -110,11 +112,26 @@ def test_within_band_gap_estimates_stay_one_band() -> None:
 
 
 def test_same_band_label_collision_tiebreak_by_anchor() -> None:
-    # Two peeled bands both inside the TABA_TABII window (single-match label d:150-250)
-    # get distinct ids via the anchor-name tie-break. Use 3 bands so two share a label.
-    datable = _dm(20, 15, "aaa") + _dm(160, 15, "zzz") + _dm(245, 15, "mmm")
+    # PR-3a: a fixture that *provably triggers* the same-label anchor tie-break (the old
+    # fixture at 20/160/245 did NOT — 160→d:150 and 245→d:225 land in DISTINCT 25-year
+    # buckets, so it passed trivially without exercising the branch). Two peeled bands
+    # inside the wide LATER generation window (280-400) — d.310 and d.395 — BOTH resolve
+    # to the single generation label ``d:280-400`` (its uniquely-matching sub-range
+    # 301-400 is 99 AH wide, > SPLIT_BAND_GAP=80, so two distinct bands CAN share it).
+    # A third, larger, earlier band (d.120) is the retained primary. Only the anchor-name
+    # tie-break keeps the two colliding peeled ids distinct.
+    datable = _dm(120, 30, "ret") + _dm(310, 15, "aaa") + _dm(395, 15, "bbb")
     plan = plan_split(_ABU_ABDALLAH, datable)
     assert plan.is_split
+    assert len(plan.peeled) == 2
+    # Both peeled bands collapsed to the SAME base generation label — the collision the
+    # tie-break exists for — so each discriminator is label|anchor (contains "|").
+    assert all(b.discriminator.startswith("d:280-400") for b in plan.peeled)
+    assert all("|" in b.discriminator for b in plan.peeled), (
+        "the same-label tie-break must fire (discriminator = label|anchor)"
+    )
+    # The tie-break appends the band's smallest anchor name, so the two ids are distinct.
+    assert {b.discriminator for b in plan.peeled} == {"d:280-400|aaa", "d:280-400|bbb"}
     ids = {b.new_id for b in plan.peeled}
     assert len(ids) == len(plan.peeled)  # every peeled id distinct
 
@@ -185,6 +202,29 @@ def _hadiths_against_anchor(
     return rows
 
 
+def _hadiths_candidate_teaches(
+    candidate_id: str,
+    anchor_id: str,
+    count: int,
+    start: int,
+    prefix: str,
+) -> list[dict[str, Any]]:
+    """``count`` two-narrator chains: candidate at pos 0, anchor at pos 1 (student).
+
+    The mirror of :func:`_hadiths_against_anchor` — here the attested anchor is the
+    candidate's *student* (position +1), which dies a transmission gap *later*, so the
+    candidate's per-mention estimate is ``anchor_death - MID_GAP``. Pairing both helpers
+    for one hub gives it teacher-generation AND student-generation neighbours (a real
+    multi-generation spread) that the ±MID_GAP correction must fold into one band.
+    """
+    rows: list[dict[str, Any]] = []
+    for i in range(count):
+        hid = f"{prefix}:h{start + i}"
+        rows.append(_mention_row(f"{prefix}-c{start + i}", hid, 0, candidate_id))
+        rows.append(_mention_row(f"{prefix}-a{start + i}", hid, 1, anchor_id))
+    return rows
+
+
 def _read_canonical(out: Path) -> dict[str, dict[str, Any]]:
     return {
         r["canonical_id"]: r for r in pq.read_table(out / "narrators_canonical.parquet").to_pylist()
@@ -223,7 +263,9 @@ def test_stage_splits_two_bands_and_peels(tmp_path: Path) -> None:
     ]
     assert len(peeled) == 1
     assert peeled[0]["death_year_ah"] == 250
-    assert peeled[0]["death_date_precision"] == "tabaqa_estimate"
+    # da#340: peeled rows carry the first-class ISNAD_ESTIMATE precision, not the old
+    # TABAQA_ESTIMATE overload — the window is an isnad-adjacency estimate.
+    assert peeled[0]["death_date_precision"] == "isnad_estimate"
     assert peeled[0]["mention_count"] == 14
 
     # Mentions of the late band are remapped to the peeled id; early band unchanged.
@@ -300,6 +342,16 @@ def test_stage_idempotent(tmp_path: Path) -> None:
     first_c = pq.read_table(out / "narrators_canonical.parquet").to_pylist()
     first_m = pq.read_table(out / "narrator_mentions_resolved.parquet").to_pylist()
 
+    # da#340: the peeled row carries ISNAD_ESTIMATE — and it is precisely because the
+    # evidence gate excludes that precision (via _ESTIMATED_PRECISIONS) that the re-run
+    # below is a strict no-op. If a peeled estimate re-seeded the attested pool, the
+    # second run could re-split; idempotence and the precision change are one property.
+    peeled_first = [
+        r for r in first_c if r["name_ar_normalized"] == _ABU_ABDALLAH and r["canonical_id"] != cand
+    ]
+    assert len(peeled_first) == 1
+    assert peeled_first[0]["death_date_precision"] == DatePrecision.ISNAD_ESTIMATE.value
+
     # Second run is a strict no-op (every node now a single band → abstain).
     assert split_generic_narrators(out) is None
     second_c = pq.read_table(out / "narrators_canonical.parquet").to_pylist()
@@ -308,31 +360,104 @@ def test_stage_idempotent(tmp_path: Path) -> None:
     assert first_m == second_m
 
 
-def test_stage_protected_hub_keeps_dominant_node(tmp_path: Path) -> None:
-    # A dominant single-band hub (al-Zuhrī) coexisting with a real split must end as
-    # ONE node retaining ≥90% of its mentions (here 100% — single band abstains).
+def _hub_multigen_mentions(
+    cand: str,
+    canonical: list[dict[str, Any]],
+    teacher_deaths: list[int],
+    student_deaths: list[int],
+    per_anchor: int,
+    prefix: str,
+) -> list[dict[str, Any]]:
+    """A hub with teacher-generation AND student-generation attested neighbours.
+
+    ``teacher_deaths`` are earlier-dying neighbours (candidate is the student, +MID_GAP);
+    ``student_deaths`` later-dying (candidate is the teacher, -MID_GAP). Appends the anchor
+    rows to ``canonical`` and returns the chain mentions. The point is a genuine spread of
+    attested neighbour death-years that the ±MID_GAP correction must fold back into ONE
+    band — a delta-function of identical neighbours (the old fixture) never exercises it.
+    """
+    mentions: list[dict[str, Any]] = []
+    for k, d in enumerate(teacher_deaths):
+        aid = f"nar:{prefix}_t{k}"
+        canonical.append(_anchor_row(aid, d))
+        mentions += _hadiths_against_anchor(cand, aid, per_anchor, k * 1000, f"{prefix}t{k}")
+    for k, d in enumerate(student_deaths):
+        aid = f"nar:{prefix}_s{k}"
+        canonical.append(_anchor_row(aid, d))
+        mentions += _hadiths_candidate_teaches(cand, aid, per_anchor, k * 1000, f"{prefix}s{k}")
+    return mentions
+
+
+def test_stage_protected_hubs_multigen_spread_abstain(tmp_path: Path) -> None:
+    # LOAD-BEARING (da#337 PR-3a): two real hubs — al-Zuhrī (d.124) and Shuʿba (d.160) —
+    # each mentioned across chains whose ±1 neighbours span a *range* of attested death
+    # years (a teacher generation dying decades earlier + a student generation dying
+    # decades later). Raw neighbour deaths span ~110 AH, so the ±MID_GAP correction is
+    # genuinely exercised: it must pull that spread back to ONE band per hub so each hub
+    # ABSTAINS (stays whole). This is the property the old delta-function fixture (100
+    # identical mentions at one death year) never tested — an abstain there was free.
     out = tmp_path / "curated"
     zuhri = make_canonical_id(_ZUHRI)
-    cand = make_canonical_id(_ABU_ABDALLAH)
-    canonical = [
-        _canonical_row(zuhri, _ZUHRI, 100),
-        _canonical_row(cand, _ABU_ABDALLAH, 54),
-        _anchor_row("nar:early", 150 - MID_GAP),
-        _anchor_row("nar:late", 250 - MID_GAP),
-        _anchor_row("nar:zuhri_anchor", 124 - MID_GAP),
+    shuba = make_canonical_id(_SHUBA)
+    canonical: list[dict[str, Any]] = [
+        _canonical_row(zuhri, _ZUHRI, 60),
+        _canonical_row(shuba, _SHUBA, 60),
     ]
-    mentions = _hadiths_against_anchor(zuhri, "nar:zuhri_anchor", 100, 0, "z")
-    mentions += _hadiths_against_anchor(cand, "nar:early", 40, 0, "e")
-    mentions += _hadiths_against_anchor(cand, "nar:late", 14, 0, "l")
+    # al-Zuhrī d.124: teachers d.70/85 → est 117/132; students d.165/180 → est 118/133.
+    mentions = _hub_multigen_mentions(zuhri, canonical, [70, 85], [165, 180], 15, "z")
+    # Shuʿba d.160: teachers d.105/120 → est 152/167; students d.200/215 → est 153/168.
+    mentions += _hub_multigen_mentions(shuba, canonical, [105, 120], [200, 215], 15, "s")
+    _write(out, canonical, mentions)
+
+    # Both hubs screen IN as candidates (so the death-band gate really runs)…
+    assert is_generic_name(_ZUHRI, 60) is True
+    assert is_generic_name(_SHUBA, 60) is True
+    # …and both abstain, so the stage is a whole-corpus no-op (no node split at all).
+    assert split_generic_narrators(out) is None
+    by_id = _read_canonical(out)
+    for hub in (zuhri, shuba):
+        assert by_id[hub]["mention_count"] == 60  # intact
+        assert [
+            r
+            for r in by_id.values()
+            if r["name_ar_normalized"] == by_id[hub]["name_ar_normalized"]
+            and r["canonical_id"] != hub
+        ] == []  # no same-name peel
+
+
+def test_stage_hub_peels_small_spurious_band_keeps_ge_90pct(tmp_path: Path) -> None:
+    # The case that actually proves the ≥90%-retention constraint the stage exists for:
+    # a dominant band (92% of mentions) coexisting with a small, well-separated, still-
+    # qualifying spurious band (8%) that peels off. The primary MUST retain ≥90% AND the
+    # small band MUST split to its own node — an abstain (which keeps 100%) would NOT
+    # exercise this, and a partition that shed >10% would violate the guard.
+    out = tmp_path / "curated"
+    cand = make_canonical_id(_ABU_ABDALLAH)
+    total = 200
+    small = 16  # 8% — ≥ SPLIT_MIN_SUPPORT (10) so it genuinely qualifies and peels
+    dominant = total - small  # 184 = 92%
+    canonical = [
+        _canonical_row(cand, _ABU_ABDALLAH, total),
+        _anchor_row("nar:dominant", 150 - MID_GAP),  # candidate est ≈ 150
+        _anchor_row("nar:spurious", 260 - MID_GAP),  # candidate est ≈ 260 (>80 away)
+    ]
+    mentions = _hadiths_against_anchor(cand, "nar:dominant", dominant, 0, "dom")
+    mentions += _hadiths_against_anchor(cand, "nar:spurious", small, 0, "spur")
     _write(out, canonical, mentions)
 
     assert split_generic_narrators(out) is not None
     by_id = _read_canonical(out)
-    # al-Zuhrī stayed whole: still one node, mention_count intact, no same-name peel.
-    assert by_id[zuhri]["mention_count"] == 100
-    zuhri_peels = [
+    # Primary kept its bare id and ≥90% of its mentions (184/200 = 92%).
+    retained = by_id[cand]["mention_count"]
+    assert retained == dominant
+    assert retained >= 0.90 * total
+    # The 8% spurious band peeled to its own same-name node with exactly `small` mentions.
+    peeled = [
         r
         for r in by_id.values()
-        if r["name_ar_normalized"] == _ZUHRI and r["canonical_id"] != zuhri
+        if r["name_ar_normalized"] == _ABU_ABDALLAH and r["canonical_id"] != cand
     ]
-    assert zuhri_peels == []
+    assert len(peeled) == 1
+    assert peeled[0]["mention_count"] == small
+    assert peeled[0]["death_year_ah"] == 260
+    assert peeled[0]["death_date_precision"] == DatePrecision.ISNAD_ESTIMATE.value
