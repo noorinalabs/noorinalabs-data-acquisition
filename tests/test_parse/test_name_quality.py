@@ -962,3 +962,146 @@ class TestIsnadResidueFloor:
     )
     def test_waw_initial_real_name_survives(self, name: str) -> None:
         assert clean_narrator_name(normalize_arabic(name)) == normalize_arabic(name)
+
+
+class TestMatnSentenceVerseGate:
+    """da#317 — matn-sentence / Qur'anic-verse pollution in the zero-degree tail.
+
+    The da#308/da#311 gate caught verb-led, grading-formula, apposition, and
+    ask-verb matn but MISSED three classes that on the #723 reload made up ~26% of
+    the 150,187 canonical "narrators" (all zero-degree orphans, id-ordered row 1 is
+    Qur'an 22:32):
+
+    (a) **conjunction-initial narrative** — a ``و…``/``ف…`` proclitic opener the
+        opener check did not fold ("فقلت لو كنت …", "وتهيات للحج …");
+    (b) **divine-name / Qur'anic-verse signature** — the bare divine name الله
+        occurring twice+ ("الله ومن يعظم شعاءر الله فانها من تقوى القلوب");
+    (c) **short function-word-only fragment** — a bare particle span ("وما" =
+        "and not").
+
+    The gate decides purely from the NAME TEXT (no graph / degree input — it runs at
+    NER time). All new rules run AFTER the nasab-connector precision guard, so a
+    genuine lineage / kunya is spared before any of them can fire.
+    """
+
+    # --- DROP: the four canonical issue examples (all normalized here) ---
+    @pytest.mark.parametrize(
+        "matn",
+        [
+            # (b) Qur'an 22:32 — the id-ordered /narrators row 1 (repeated الله)
+            "الله ومن يعظم شعائر الله فإنها من تقوى القلوب",
+            # (a) conjunction-initial narrative, dense in function words
+            "وتهيأت للحج وودعت الناس وكنت على الخروج فورد نحن لذلك كارهون والأمر إليك",
+            # (a) ف-proclitic matn opener ("so I said …")
+            "فقلت لو كنت هناك ما قتلتهم",
+            # (c) short function-word-only fragment
+            "وما",
+        ],
+    )
+    def test_issue_examples_dropped(self, matn: str) -> None:
+        assert clean_narrator_name(normalize_arabic(matn)) is None
+
+    # --- DROP: further matn/verse shapes of the three classes ---
+    @pytest.mark.parametrize(
+        "matn",
+        [
+            # divine-name repetition (verse / oath phraseology)
+            "ان الله يامر بالعدل والاحسان وايتاء ذي القربى",
+            "الله لا اله الا هو الحي القيوم",
+            # conjunction-initial narrative with ≥2 particles
+            "فلما راى ذلك قال لهم انا معكم",
+            "وكان ذلك في يوم من الايام على عهد النبي",
+            # function-word-dense matn, no verb opener
+            "هذا هو الذي كان على ذلك",
+            # bare/short function-word fragments (proclitic folded)
+            "على",
+            "فلو",
+            "ما",
+        ],
+    )
+    def test_additional_matn_verse_classes_dropped(self, matn: str) -> None:
+        assert clean_narrator_name(normalize_arabic(matn)) is None
+
+    # --- KEEP (recall guard): real transmitters MUST survive unchanged. The
+    # coordinator's explicit recall set — long nasab, al-Zuhri, Abu Hurayra, the
+    # al-Qummi numeric form, theophoric الله compounds, and mononyms/nisbas. ---
+    @pytest.mark.parametrize(
+        "name",
+        [
+            # long nasab chain (≥2 connectors → spared) — the issue's recall example
+            "شاكر بن أبي بكر أحمد بن محمد الحريمي الخياط",
+            "محمد بن مسلم بن شهاب الزهري",  # al-Zuhri
+            "أبو هريرة",  # Abu Hurayra (kunya, nasab density spares it)
+            # theophoric compounds carry الله exactly ONCE → not the verse signal
+            "عبد الله بن عمر",
+            "عبيد الله بن عبد الله بن عتبة",
+            "هبة الله بن نصر",  # الله as second theophoric element, preceded by هبة
+            "عطاء الله الشيرازي",
+            # a two-theophoric nasab (الله twice) is spared by the nasab guard first
+            "عبد الله بن عبيد الله العمري",
+            # connector-less mononyms / nisba-only names (nasab == 0) survive on merit
+            "قتاده",
+            "مالك",
+            "الزهري",
+            "سفيان الثوري",
+            "الاوزاعي",
+        ],
+    )
+    def test_recall_guard_real_names_preserved(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) == normalize_arabic(name)
+
+    # --- RECALL (coordinator audit): a real DOUBLE-theophoric narrator must KEEP.
+    # The divine-name rule (bare الله ≥2 → drop) must NOT count an الله that is the
+    # second half of a theophoric compound (عبد الله, هبة الله, سعد الله). Adding
+    # legitimate nisbas dilutes the nasab density below the 0.15 spare threshold, so
+    # before this fix "عبد الله بن عبد الله القرشي الاموي" false-dropped while the
+    # shorter "عبد الله بن عبد الله" (density 0.2) survived — a perverse regression
+    # where more real name-material caused a drop. All of these must survive. ---
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "عبد الله بن عبد الله",
+            "عبد الله بن عبد الله القرشي الأموي",
+            "عبد الله بن عبد الله الرازي قاضي الري",
+            "عبد الله بن هبة الله الحلي البزاز",
+            "عبد الله بن عبد الله الشنتريني الزاهد",
+            "عبد الله بن عبد الله التجيبي القرطبي",
+            "عبد الله بن سعد الله الشيخ ضياء الدين القرمي",
+            "عبيد الله بن عبد الله بن عتبة بن مسعود",
+            "أمة الله بنت عبد الرحمن",
+        ],
+    )
+    def test_double_theophoric_narrator_preserved(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) is not None
+
+    # --- the verse detection MUST still fire after the theophoric exclusion: its two
+    # الله are sentence-initial + شعائر الله (شعائر is NOT a theophoric head). ---
+    def test_verse_still_dropped_after_theophoric_fix(self) -> None:
+        verse = "الله ومن يعظم شعائر الله فإنها من تقوى القلوب"
+        assert clean_narrator_name(normalize_arabic(verse)) is None
+
+    # --- PRECISION: the al-Qummi numeric-prefixed form still recovers (da#311 3b
+    # non-regression) — the leading ordinal strips and the real name survives. ---
+    def test_qummi_numeric_form_recovered(self) -> None:
+        assert clean_narrator_name(normalize_arabic("1 علي بن ابراهيم")) == normalize_arabic(
+            "علي بن ابراهيم"
+        )
+
+    # --- PRECISION: على (preposition, alif-maqsura) must not be confused with علي
+    # (the name ʿAlī, ya-final) — normalize_arabic does not fold ى→ي, so ʿAlī and
+    # every nasab built on it survive while the preposition particle rule fires. ---
+    @pytest.mark.parametrize(
+        "name",
+        ["علي", "علي بن ابي طالب", "علي بن الحسين", "علي بن ابراهيم"],
+    )
+    def test_ali_not_confused_with_preposition(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) == normalize_arabic(name)
+
+    # --- PRECISION: a lone particle count of ONE does not drop an otherwise real
+    # name (the density threshold is 2), and و/ف-initial real names are untouched. ---
+    @pytest.mark.parametrize(
+        "name",
+        ["وهب بن منبه", "وكيع بن الجراح", "فروة بن مسيك", "فاطمه بنت سعد"],
+    )
+    def test_single_particle_and_conjunction_names_preserved(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) is not None
