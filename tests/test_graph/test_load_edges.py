@@ -18,7 +18,7 @@ from src.graph.load_edges import (
     load_all_edges,
 )
 from src.parse.identity import make_canonical_id, narrator_node_id
-from src.parse.schemas import NETWORK_EDGE_SCHEMA
+from src.parse.schemas import EDGE_RELATION_TRANSMITTED_TO, NETWORK_EDGE_SCHEMA
 from src.utils.arabic import normalize_arabic
 from tests.test_graph.conftest import (
     MockNeo4jClient,
@@ -1063,3 +1063,217 @@ class TestParallelOfConformance:
 
         events = {(e["event"], e.get("log_level")) for e in logs}
         assert ("parallel_of_loaded_zero", "warning") in events
+
+
+class TestCompositionGateOnChainEdges:
+    """da#333 — the canonical-hadith composition gate applied to the chain-edge path.
+
+    The node loader excludes fawaz's six-books Hadith nodes (deduped to the lk
+    spine) but the narrator-mention chain path did not, so fawaz's NER-derived
+    six-books chains loaded as ~196k orphaned TRANSMITTED_TO edges keyed
+    ``fawaz:<book>:<n>`` with no Hadith node. The gate drops a mention whose
+    hadith would not be a canonical node — mirroring the node dedup — while
+    leaving lk / other canonical chains untouched.
+
+    Carve-out: ``mis`` is chains-only for Sahih Muslim and its transmission edges
+    are produced as ``network_edges_mis.parquet`` (keyed ``mis:sahih_muslim:...``),
+    NOT as narrator mentions — NER never runs over mis. They therefore never reach
+    this mention path, so the gate cannot drop them; ``test_mis_network_edges_...``
+    pins that the co-present mis edge file is handled by its own loader unchanged.
+    """
+
+    def test_fawaz_six_books_mention_drops_transmitted_to(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        write_narrator_mentions_resolved(
+            staging_dir,
+            [
+                {
+                    "mention_id": "m1",
+                    "hadith_id": "fawaz:bukhari:1",
+                    "source_corpus": "fawaz",
+                    "position_in_chain": 0,
+                    "canonical_narrator_id": "nar:1",
+                },
+                {
+                    "mention_id": "m2",
+                    "hadith_id": "fawaz:bukhari:1",
+                    "source_corpus": "fawaz",
+                    "position_in_chain": 1,
+                    "canonical_narrator_id": "nar:2",
+                },
+            ],
+        )
+        results = load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
+        tt = next(r for r in results if r.edge_type == "TRANSMITTED_TO")
+        # Dropped at the source: no pair built, no missing-endpoint counted, and no
+        # TRANSMITTED_TO write ever issued to the client.
+        assert tt.created == 0
+        assert tt.missing_endpoints == 0
+        assert not any(
+            "TRANSMITTED_TO" in str(q) and "MERGE" in str(q) for q, _ in mock_client.calls
+        )
+
+    def test_fawaz_six_books_mention_drops_narrated(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        write_narrator_mentions_resolved(
+            staging_dir,
+            [
+                {
+                    "mention_id": "m1",
+                    "hadith_id": "fawaz:bukhari:1",
+                    "source_corpus": "fawaz",
+                    "position_in_chain": 0,
+                    "canonical_narrator_id": "nar:1",
+                },
+            ],
+        )
+        results = load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
+        narrated = next(r for r in results if r.edge_type == "NARRATED")
+        assert narrated.created == 0
+        assert narrated.missing_endpoints == 0
+        assert not any("NARRATED" in str(q) for q, _ in mock_client.calls)
+
+    def test_fawaz_unique_collection_mention_kept_transmitted_to(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        # fawaz's UNIQUE collections (nawawi/dehlawi/qudsi) DO load nodes, so their
+        # chains must survive the gate — only the six-books duplicates are dropped.
+        mock_client.set_read_results(
+            [{"from_id": "nar:1", "to_id": "nar:2", "from_exists": True, "to_exists": True}]
+        )
+        write_narrator_mentions_resolved(
+            staging_dir,
+            [
+                {
+                    "mention_id": "m1",
+                    "hadith_id": "fawaz:nawawi:5",
+                    "source_corpus": "fawaz",
+                    "position_in_chain": 0,
+                    "canonical_narrator_id": "nar:1",
+                },
+                {
+                    "mention_id": "m2",
+                    "hadith_id": "fawaz:nawawi:5",
+                    "source_corpus": "fawaz",
+                    "position_in_chain": 1,
+                    "canonical_narrator_id": "nar:2",
+                },
+            ],
+        )
+        results = load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
+        tt = next(r for r in results if r.edge_type == "TRANSMITTED_TO")
+        assert tt.created == 1
+
+    def test_lk_mention_kept_transmitted_to(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        mock_client.set_read_results(
+            [{"from_id": "nar:1", "to_id": "nar:2", "from_exists": True, "to_exists": True}]
+        )
+        write_narrator_mentions_resolved(
+            staging_dir,
+            [
+                {
+                    "mention_id": "m1",
+                    "hadith_id": "lk:bukhari:1",
+                    "source_corpus": "lk",
+                    "position_in_chain": 0,
+                    "canonical_narrator_id": "nar:1",
+                },
+                {
+                    "mention_id": "m2",
+                    "hadith_id": "lk:bukhari:1",
+                    "source_corpus": "lk",
+                    "position_in_chain": 1,
+                    "canonical_narrator_id": "nar:2",
+                },
+            ],
+        )
+        results = load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
+        tt = next(r for r in results if r.edge_type == "TRANSMITTED_TO")
+        assert tt.created == 1
+
+    def test_lk_mention_kept_narrated(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        mock_client.set_read_results(
+            [
+                {
+                    "narrator_id": "nar:1",
+                    "hadith_id": "hdt:lk:bukhari:1",
+                    "narrator_exists": True,
+                    "hadith_exists": True,
+                }
+            ]
+        )
+        write_narrator_mentions_resolved(
+            staging_dir,
+            [
+                {
+                    "mention_id": "m1",
+                    "hadith_id": "lk:bukhari:1",
+                    "source_corpus": "lk",
+                    "position_in_chain": 0,
+                    "canonical_narrator_id": "nar:1",
+                }
+            ],
+        )
+        results = load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
+        narrated = next(r for r in results if r.edge_type == "NARRATED")
+        assert narrated.created == 1
+
+    def test_mis_network_edges_unaffected_by_mention_gate(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """The mis carve-out. mis transmission edges live in network_edges_mis.parquet
+        (declared relation TRANSMITTED_TO) and are keyed ``mis:sahih_muslim:...`` — a
+        NON-canonical id (mis loads no Hadith nodes). They never enter the
+        narrator-mention path, so the da#333 gate cannot touch them: the mention-path
+        gate drops the co-present fawaz six-books chain, while the mis network-edge
+        file is handled by its own loader exactly as before (routed off STUDIED_UNDER
+        by its declared relation — the da#133 behaviour, unchanged, no error).
+        """
+        # fawaz six-books mention — must be dropped by the gate.
+        write_narrator_mentions_resolved(
+            staging_dir,
+            [
+                {
+                    "mention_id": "m1",
+                    "hadith_id": "fawaz:bukhari:1",
+                    "source_corpus": "fawaz",
+                    "position_in_chain": 0,
+                    "canonical_narrator_id": "nar:1",
+                },
+                {
+                    "mention_id": "m2",
+                    "hadith_id": "fawaz:bukhari:1",
+                    "source_corpus": "fawaz",
+                    "position_in_chain": 1,
+                    "canonical_narrator_id": "nar:2",
+                },
+            ],
+        )
+        # mis's real transmission edges — network_edges, keyed to a mis hadith id.
+        _write_network_edges(
+            staging_dir,
+            "mis",
+            [
+                {
+                    "from_narrator_name": "Yahya",
+                    "to_narrator_name": "Malik",
+                    "hadith_id": "mis:sahih_muslim:1:5",
+                    "source": "mis",
+                    "relation": EDGE_RELATION_TRANSMITTED_TO,
+                }
+            ],
+        )
+        results = load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
+        tt = next(r for r in results if r.edge_type == "TRANSMITTED_TO")
+        studied = next(r for r in results if r.edge_type == "STUDIED_UNDER")
+        # fawaz six-books dropped from the mention path ...
+        assert tt.created == 0
+        # ... and the mis network-edge file is routed by relation (skipped off
+        # STUDIED_UNDER, da#133) without error — the gate did not perturb it.
+        assert studied.created == 0

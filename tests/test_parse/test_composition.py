@@ -9,6 +9,7 @@ from src.parse.composition import (
     HADITH_COMPOSITION,
     canonical_matn_identity,
     is_canonical_hadith,
+    is_canonical_hadith_id,
     is_cross_edition_dedup_source,
 )
 
@@ -62,6 +63,61 @@ class TestIsCanonicalHadith:
         monkeypatch.setitem(HADITH_COMPOSITION, "explicit_none_source", None)
         assert is_canonical_hadith("explicit_none_source", "any_collection")
         assert is_canonical_hadith("explicit_none_source", "another_collection")
+
+
+class TestIsCanonicalHadithId:
+    """The id-parsing gate the chain-edge loader applies (da#333).
+
+    Mirrors :class:`TestIsCanonicalHadith` but drives the gate from a
+    ``hadith_id`` (a ``source_id``, optionally ``hdt:``-prefixed) — the only
+    corpus/collection signal ``src.graph.load_edges`` has on the narrator-mention
+    chain path — instead of the ``(source_corpus, collection_name)`` columns the
+    node loader reads.
+    """
+
+    def test_fawaz_six_books_id_is_not_canonical(self) -> None:
+        # The da#333 bug set: fawaz's six-books chains are deduped to lk, so their
+        # mentions must NOT produce edges (no fawaz:<book> Hadith node exists).
+        for book in ("bukhari", "muslim", "nasai", "abudawud", "ibnmajah", "tirmidhi", "malik"):
+            assert not is_canonical_hadith_id(f"fawaz:{book}:1")
+
+    def test_fawaz_unique_collection_id_is_canonical(self) -> None:
+        # fawaz's UNIQUE collections still load nodes, so their chains are kept.
+        for coll in ("nawawi", "dehlawi", "qudsi"):
+            assert is_canonical_hadith_id(f"fawaz:{coll}:5")
+
+    def test_lk_six_books_id_is_canonical(self) -> None:
+        # lk is the canonical spine — every lk id (incl. Muslim) is kept.
+        assert is_canonical_hadith_id("lk:bukhari:1")
+        assert is_canonical_hadith_id("lk:muslim:1")
+
+    def test_mis_id_is_not_canonical(self) -> None:
+        # mis loads NO Hadith nodes (its matn duplicates lk), so a mis-keyed id is
+        # non-canonical. This is why mis chains must NOT flow through the
+        # narrator-mention path — and they do not: mis emits network_edges_mis.
+        assert not is_canonical_hadith_id("mis:sahih_muslim:1:5")
+
+    def test_sanadset_id_is_canonical(self) -> None:
+        # sanadset admits all collections at the per-source level (da#219).
+        assert is_canonical_hadith_id("sanadset:0:0:2326")
+
+    def test_hdt_prefixed_id_is_handled(self) -> None:
+        # The loader may hand either the raw staging id or an hdt:-prefixed one;
+        # bare_source_id strips the prefix so both classify identically.
+        assert not is_canonical_hadith_id("hdt:fawaz:bukhari:1")
+        assert is_canonical_hadith_id("hdt:lk:bukhari:1")
+
+    def test_double_prefixed_id_is_collapsed(self) -> None:
+        # main#139 double-corpus ids collapse before the gate reads the corpus.
+        assert is_canonical_hadith_id("sanadset:sanadset:0:0:1")
+        assert not is_canonical_hadith_id("fawaz:fawaz:bukhari:1")
+
+    def test_unknown_or_bare_corpus_defers_to_default_keep(self) -> None:
+        # An id with no collection segment (toy ids in older tests, or a bare
+        # corpus) defers to is_canonical_hadith, which keeps any unlisted corpus —
+        # the conservative default. Guards the existing "h1"/"hdt:h1" edge tests.
+        assert is_canonical_hadith_id("h1")
+        assert is_canonical_hadith_id("hdt:h1")
 
 
 class TestCrossEditionDedupSource:
