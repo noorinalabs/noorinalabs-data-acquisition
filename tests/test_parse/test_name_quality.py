@@ -1050,6 +1050,36 @@ class TestMatnSentenceVerseGate:
     def test_recall_guard_real_names_preserved(self, name: str) -> None:
         assert clean_narrator_name(normalize_arabic(name)) == normalize_arabic(name)
 
+    # --- RECALL (coordinator audit): a real DOUBLE-theophoric narrator must KEEP.
+    # The divine-name rule (bare الله ≥2 → drop) must NOT count an الله that is the
+    # second half of a theophoric compound (عبد الله, هبة الله, سعد الله). Adding
+    # legitimate nisbas dilutes the nasab density below the 0.15 spare threshold, so
+    # before this fix "عبد الله بن عبد الله القرشي الاموي" false-dropped while the
+    # shorter "عبد الله بن عبد الله" (density 0.2) survived — a perverse regression
+    # where more real name-material caused a drop. All of these must survive. ---
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "عبد الله بن عبد الله",
+            "عبد الله بن عبد الله القرشي الأموي",
+            "عبد الله بن عبد الله الرازي قاضي الري",
+            "عبد الله بن هبة الله الحلي البزاز",
+            "عبد الله بن عبد الله الشنتريني الزاهد",
+            "عبد الله بن عبد الله التجيبي القرطبي",
+            "عبد الله بن سعد الله الشيخ ضياء الدين القرمي",
+            "عبيد الله بن عبد الله بن عتبة بن مسعود",
+            "أمة الله بنت عبد الرحمن",
+        ],
+    )
+    def test_double_theophoric_narrator_preserved(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) is not None
+
+    # --- the verse detection MUST still fire after the theophoric exclusion: its two
+    # الله are sentence-initial + شعائر الله (شعائر is NOT a theophoric head). ---
+    def test_verse_still_dropped_after_theophoric_fix(self) -> None:
+        verse = "الله ومن يعظم شعائر الله فإنها من تقوى القلوب"
+        assert clean_narrator_name(normalize_arabic(verse)) is None
+
     # --- PRECISION: the al-Qummi numeric-prefixed form still recovers (da#311 3b
     # non-regression) — the leading ordinal strips and the real name survives. ---
     def test_qummi_numeric_form_recovered(self) -> None:

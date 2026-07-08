@@ -757,6 +757,36 @@ _MATN_PARTICLES = frozenset(
 )
 
 
+# Theophoric compound HEADS (da#317 recall fix) — the first element of an
+# ``X + الله`` given name (``عبد الله`` "servant of God", ``هبة الله`` "gift of
+# God", …). When counting the bare divine name الله for the Qur'anic-verse
+# signature, an الله immediately preceded by one of these is the SECOND half of a
+# real theophoric name, not verse repetition — so it must NOT count. Without this,
+# a genuine double-theophoric narrator (``عبد الله بن عبد الله القرشي الاموي``)
+# false-drops once its nisbas dilute the nasab density below the spare threshold.
+# عبد/عبيد are ~99% of the class; the rest are the common Islamic ``…الله`` heads.
+# Normalized-Arabic forms (هبة→هبه, امة→امه, رحمة→رحمه).
+_THEOPHORIC_HEADS = frozenset(
+    {
+        "عبد",  # servant of
+        "عبيد",  # (diminutive) servant of
+        "امه",  # handmaid of (امة)
+        "هبه",  # gift of (هبة)
+        "سعد",  # good-fortune of
+        "نصر",  # victory of
+        "فضل",  # grace of
+        "رحمه",  # mercy of (رحمة)
+        "ضياء",  # light/radiance of
+        "نور",  # light of
+        "سيف",  # sword of
+        "عطاء",  # gift of
+        "جار",  # neighbour of
+        "حبيب",  # beloved of
+        "ذبيح",  # sacrifice of
+    }
+)
+
+
 def _is_matn_particle(token: str) -> bool:
     """True when *token* (normalized) is a bare matn function word (da#317).
 
@@ -1145,13 +1175,21 @@ def _is_matn_sentence(tokens: list[str], kept_text: str, was_truncated: bool) ->
 
     # (2a) Divine-name / Qur'anic-verse signature (da#317): the bare divine name
     #      الله occurring TWICE OR MORE is a verse / oath / matn signature, never a
-    #      real name. A theophoric compound carries الله at most once (عبد الله,
-    #      عبيد الله, هبه الله); a two-theophoric nasab (عبد الله بن عبيد الله)
-    #      ALWAYS has a بن connector, so the precision guard above already spared it
-    #      before this point. Catches Qur'an 22:32 ("… شعاءر الله فانها من تقوى
-    #      القلوب") that leads the id-ordered /narrators list. رسول/نبي + الله is a
-    #      Prophet reference already dropped by step 6b upstream.
-    if sum(1 for t in bare if t == "الله") >= 2:
+    #      real name. An الله that is the SECOND half of a theophoric compound name
+    #      (``عبد الله``, ``هبه الله`` — preceded by a _THEOPHORIC_HEADS token) does
+    #      NOT count: a double-theophoric narrator (``عبد الله بن عبد الله القرشي
+    #      الاموي``) is a real name whose nasab density can dip below the spare
+    #      threshold once nisbas are added, so counting its theophoric الله would
+    #      false-drop it. The verse signal still fires on Qur'an 22:32 ("الله ومن …
+    #      شعاءر الله …"): its first الله is sentence-initial (no head) and the
+    #      second follows شعاءر (not a theophoric head) → still counts 2. رسول/نبي +
+    #      الله is a Prophet reference already dropped by step 6b upstream.
+    allah_count = sum(
+        1
+        for i, t in enumerate(bare)
+        if t == "الله" and not (i > 0 and bare[i - 1] in _THEOPHORIC_HEADS)
+    )
+    if allah_count >= 2:
         return True
 
     # (2b) Matn function-word density (da#317): a span (past the nasab guard) with
