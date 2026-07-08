@@ -131,6 +131,42 @@ on the failing stage. For the Kafka-driven canonical path, only run
 `make acquire`; downstream consumers in
 `noorinalabs-isnad-ingest-platform` pick up the `pipeline.raw.landed` signal.
 
+### Publish resolved Parquet to B2, then batch-load the graph (da#342)
+
+The graph load is split into a **producer** (this repo, on the build VM) and a
+**consumer** (the `deploy-data-load.yml` workflow in `noorinalabs-deploy`, #546).
+The build VM runs `make resolve`, then publishes the resolve output to the
+`noorinalabs-pipeline` B2 bucket with `make publish-parquet`; the workflow then
+pulls that versioned object set from B2 on the VPS and MERGEs it into Neo4j. This
+retires the old `scripts/load_staging.sh` box one-off (IaC over one-offs).
+
+```bash
+make resolve                          # Phase 2 → data/curated/ + data/staging/
+make publish-parquet DRY_RUN=true     # preview the object plan; uploads nothing
+make publish-parquet                  # copy to noorinalabs-pipeline/<parquet_ref>/
+```
+
+- `publish-parquet` needs `PIPELINE_B2_KEY_ID` / `PIPELINE_B2_KEY` in the
+  environment (rclone native-env credentials — never on argv or in logs).
+- The default `parquet_ref` is `staged/narrator-resolve/<UTC-date>-<git-short-sha>`.
+  Override with `PARQUET_REF=...` (bucket-relative — no bucket name, no leading
+  slash). Version it per resolve run so a prior-good set stays re-loadable.
+- Pass `NODES_ONLY=true` to publish only the nodes-load staging set
+  (`hadiths_*`, `collections_*`); the edge-bearing Parquet is omitted.
+- The helper verifies the objects landed (curated set is mandatory) and prints
+  the final `parquet_ref` as its last stdout line.
+
+Then dispatch the loader, pasting the echoed `parquet_ref`:
+
+```bash
+gh workflow run deploy-data-load.yml -R noorinalabs/noorinalabs-deploy \
+  -f env=stg -f parquet_ref=<echoed-ref> -f load_args=load
+```
+
+`deploy-data-load.yml` defaults `dry_run=true` (a fat-fingered dispatch only
+verifies B2 presence + prints the plan). Prod runs **only** as a promotion of a
+verified-good stg load. See the workflow header for the full contract.
+
 ## Configuration
 
 Configuration is loaded from two surfaces:

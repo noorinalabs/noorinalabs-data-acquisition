@@ -1,4 +1,4 @@
-.PHONY: help setup setup-hooks acquire parse resolve load enrich pipeline test test-integration lint format typecheck check clean validate validate-staging profile-data duck
+.PHONY: help setup setup-hooks acquire parse resolve load enrich pipeline publish-parquet test test-integration lint format typecheck check clean validate validate-staging profile-data duck
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -21,6 +21,12 @@ resolve: ## Phase 2: Entity resolution (NER + disambiguation + dedup)
 
 load: ## Phase 3: Load graph into Neo4j
 	uv run isnad-ingest load
+
+publish-parquet: ## Publish resolved Parquet to noorinalabs-pipeline B2 (producer for deploy-data-load.yml); PARQUET_REF=/DRY_RUN=true/NODES_ONLY=true passthrough
+	uv run python scripts/publish_parquet.py \
+		$(if $(PARQUET_REF),--parquet-ref $(PARQUET_REF),) \
+		$(if $(filter true,$(DRY_RUN)),--dry-run,) \
+		$(if $(filter true,$(NODES_ONLY)),--nodes-only,)
 
 enrich: ## Phase 4: Compute metrics, topics, historical overlay
 	uv run isnad-ingest enrich
