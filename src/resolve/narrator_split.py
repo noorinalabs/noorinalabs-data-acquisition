@@ -58,7 +58,13 @@ Algorithm (per eligible canonical id ``C``, name ``N``)
    window the midpoint falls in, e.g. ``d:150-250``, else a fixed 25-year bucket
    ``d:<floor(mid/25)*25>``). Two peeled clusters that collapse to the same label are
    tie-broken by appending the bare normalized **name** (not id — cascade-free) of the
-   band's lexicographically-smallest attested anchor neighbour.
+   band's lexicographically-smallest attested anchor neighbour. This same-label tie-break
+   IS reachable, not dead code (da#337 PR-3a review): two peeled bands are ≥
+   :data:`SPLIT_BAND_GAP` (80 AH) apart by construction, which rules out a shared 25-year
+   bucket, but a *generation-window* label whose unique-match sub-range is wider than that
+   gap can still be hit by two distinct bands — concretely the ``LATER`` window (280-400),
+   whose uniquely-matching sub-range 301-400 is 99 AH wide, so two bands e.g. d.310/d.395
+   both label ``d:280-400`` and the anchor tie-break is what keeps their ids distinct.
 7. Names ``mononym_split`` already resolves (:func:`is_registered_mononym`) are
    skipped — that registered-mononym splitter owns them; we do not fight it.
 
@@ -79,22 +85,26 @@ Outputs
 Estimated-window provenance
 ---------------------------
 A peeled row's death window is an *isnad-adjacency estimate*, not attested and not a
-ṭabaqa estimate. The :class:`~src.models.enums.DatePrecision` enum has no dedicated
-value for it, so — pending a first-class ``isnad_estimate`` precision (PR-3 tuning) —
-peeled rows carry ``TABAQA_ESTIMATE`` precision: the enum's generic "derived window,
-not attested" bucket. This is deliberate and load-bearing: it (a) marks the death as
-an *estimate* for display, (b) keeps the ``tabaqa_dates`` fallback from re-touching an
-already-estimated row, and (c) **excludes peeled nodes from the attested-neighbour
-evidence pool**, so re-running the stage is a strict no-op (each peeled node is a
-single band ⇒ abstains) — see the idempotence note below.
+ṭabaqa estimate. It carries the first-class
+:attr:`~src.models.enums.DatePrecision.ISNAD_ESTIMATE` precision (da#340) — its own
+"derived from isnad adjacency, not attested" bucket, no longer overloading the
+semantically-wrong ``TABAQA_ESTIMATE``. This precision is deliberate and load-bearing:
+it (a) marks the death as an *estimate* for display, (b) keeps the ``tabaqa_dates``
+fallback from re-touching an already-estimated row (``tabaqa_dates`` only touches
+undated rows), and (c) **excludes peeled nodes from the attested-neighbour evidence
+pool** — the evidence gate treats *any* non-attested precision (``TABAQA_ESTIMATE`` OR
+``ISNAD_ESTIMATE``, see :data:`_ESTIMATED_PRECISIONS`) as unusable — so re-running the
+stage is a strict no-op (each peeled node is a single band ⇒ abstains). See the
+idempotence note below.
 
 Idempotence
 -----------
 A second full run reads the already-split table: the primary retains exactly one
 qualifying band and every peeled node is a single band, so all candidates abstain and
-no file is rewritten. Because peeled estimates are excluded from the attested pool, a
-re-run's evidence for every candidate is a subset of the first run's — splitting only
-ever gets *harder* — so no candidate newly splits. The stage returns ``None`` (no-op).
+no file is rewritten. Because peeled ``ISNAD_ESTIMATE`` rows (like ṭabaqa estimates)
+are excluded from the attested pool, a re-run's evidence for every candidate is a
+subset of the first run's — splitting only ever gets *harder* — so no candidate newly
+splits. The stage returns ``None`` (no-op).
 
 Accepted v1 limitation (documented, NOT fixed here per da#337 scope)
 -------------------------------------------------------------------
@@ -169,6 +179,14 @@ SPLIT_MIN_SEPARATION = 50
 # More than this many *qualifying* bands means the name is a generic bucket we cannot
 # cleanly resolve into a few people — abstain and log for audit rather than shatter it.
 SPLIT_MAX_CLUSTERS = 6
+
+# Precisions that mark an *estimated* (non-attested) death window and so must never be
+# used as isnad-adjacency evidence: the ṭabaqa layer's estimate AND this stage's own
+# ISNAD_ESTIMATE peel (da#340). Excluding both is what keeps the pass cascade-free and a
+# re-run a strict no-op — a peeled node's own estimate can never re-seed a further split.
+_ESTIMATED_PRECISIONS = frozenset(
+    {DatePrecision.TABAQA_ESTIMATE.value, DatePrecision.ISNAD_ESTIMATE.value}
+)
 
 # Audit report: one row per peeled (discriminated) node — the owner's review artifact
 # before any prod re-load. ``exemplar_anchors`` are a few of the attested chain
@@ -371,16 +389,17 @@ def _as_int(value: Any) -> int | None:
 
 
 def _attested_death(rec: dict[str, Any]) -> int | None:
-    """A record's death year iff it is *attested* (present, precision ≠ ṭabaqa estimate).
+    """A record's death year iff it is *attested* (present, precision not an estimate).
 
-    An estimated window — ṭabaqa (``tabaqa_estimate``) OR a prior isnad-split peel,
-    which this stage also stores as ``tabaqa_estimate`` — is never used as evidence,
-    keeping the pass cascade-free and re-runs a strict no-op.
+    An estimated window — the ṭabaqa layer's ``tabaqa_estimate`` OR a prior isnad-split
+    peel's ``isnad_estimate`` (da#340), i.e. any precision in
+    :data:`_ESTIMATED_PRECISIONS` — is never used as evidence, keeping the pass
+    cascade-free and re-runs a strict no-op.
     """
     year = _as_int(rec.get("death_year_ah"))
     if year is None:
         return None
-    if rec.get("death_date_precision") == DatePrecision.TABAQA_ESTIMATE.value:
+    if rec.get("death_date_precision") in _ESTIMATED_PRECISIONS:
         return None
     return year
 
@@ -431,11 +450,29 @@ def _build_chain_index(
     mentions_path: Path,
     candidate_ids: set[str],
 ) -> tuple[dict[str, list[tuple[int, str]]], dict[str, list[tuple[str, int, str]]]]:
-    """Stream the mentions once → (chains, candidate_mentions).
+    """Stream the mentions (two bounded passes) → (chains, candidate_mentions).
 
     ``chains``: ``hadith_id -> [(position, canonical_id), ...]`` for neighbour lookup.
     ``candidate_mentions``: ``candidate_id -> [(hadith_id, position, mention_id), ...]``.
-    Bounded to one row-group at a time on read.
+
+    Memory (da#337 PR-3a — OOM audit, cf. #723). ``chains`` is deliberately restricted
+    to *only* the hadiths that contain ≥1 candidate mention. A candidate's per-mention
+    death estimate is derived solely from its ±1 neighbours **within the same hadith**,
+    so a hadith with no candidate mention can never contribute a neighbour lookup and is
+    pure dead weight in ``chains``. The earlier one-pass build kept every hadith's full
+    chain resident — i.e. the *entire* mentions table — which is exactly the class of
+    full-table-resident structure that OOM'd resolve in #723. Restricting to
+    candidate-touching hadiths bounds the resident footprint to O(mentions in hadiths
+    that name a generic-name candidate) + O(candidate mentions), both a small fraction
+    of the multi-million-row corpus (generic-name candidates are a curated minority),
+    instead of O(all mentions).
+
+    The cost is two streaming passes (2× sequential read) instead of one, each with a
+    one-row-group working set — the standard time-for-memory trade, mirroring
+    ``fuzzy_cluster``'s multi-pass streaming IO shell. Pass 1 collects the candidate
+    mentions and the set of hadiths they occur in; pass 2 fills ``chains`` for only
+    those hadiths (retaining every position in them, so non-candidate neighbours are
+    still present for the ±1 lookup).
     """
     chains: dict[str, list[tuple[int, str]]] = {}
     candidate_mentions: dict[str, list[tuple[str, int, str]]] = {}
@@ -444,6 +481,9 @@ def _build_chain_index(
 
     pf = pq.ParquetFile(mentions_path)
     cols = ["mention_id", "hadith_id", "position_in_chain", "canonical_narrator_id"]
+
+    # Pass 1 — candidate mentions + the hadiths that contain them.
+    candidate_hadith_ids: set[str] = set()
     for rg_idx in range(pf.metadata.num_row_groups):
         table = pf.read_row_group(rg_idx, columns=cols)
         mention_ids = table.column("mention_id").to_pylist()
@@ -453,9 +493,25 @@ def _build_chain_index(
         for mid, hid, pos, cid in zip(mention_ids, hadith_ids, positions, cids, strict=True):
             if cid is None or hid is None or pos is None:
                 continue
-            chains.setdefault(hid, []).append((int(pos), cid))
             if cid in candidate_ids:
                 candidate_mentions.setdefault(cid, []).append((hid, int(pos), mid))
+                candidate_hadith_ids.add(hid)
+
+    if not candidate_hadith_ids:
+        return chains, candidate_mentions
+
+    # Pass 2 — full chains, but only for candidate-touching hadiths (bounded footprint).
+    chain_cols = ["hadith_id", "position_in_chain", "canonical_narrator_id"]
+    for rg_idx in range(pf.metadata.num_row_groups):
+        table = pf.read_row_group(rg_idx, columns=chain_cols)
+        hadith_ids = table.column("hadith_id").to_pylist()
+        positions = table.column("position_in_chain").to_pylist()
+        cids = table.column("canonical_narrator_id").to_pylist()
+        for hid, pos, cid in zip(hadith_ids, positions, cids, strict=True):
+            if cid is None or hid is None or pos is None:
+                continue
+            if hid in candidate_hadith_ids:
+                chains.setdefault(hid, []).append((int(pos), cid))
     return chains, candidate_mentions
 
 
@@ -499,8 +555,8 @@ def _peeled_record(primary_rec: dict[str, Any], band: PeeledBand, name_norm: str
     """A new canonical row for a peeled band, conforming to NARRATORS_CANONICAL_SCHEMA.
 
     Inherits the shared name/provenance fields from the primary record; carries the
-    band's estimated death window with ``tabaqa_estimate`` precision (see the module
-    docstring on estimated-window provenance); birth stays unknown.
+    band's estimated death window with ``isnad_estimate`` precision (da#340 — see the
+    module docstring on estimated-window provenance); birth stays unknown.
     """
     rec: dict[str, Any] = {f.name: None for f in NARRATORS_CANONICAL_SCHEMA}
     for col in (
@@ -520,7 +576,7 @@ def _peeled_record(primary_rec: dict[str, Any], band: PeeledBand, name_norm: str
     rec["death_year_ah"] = band.midpoint_ah
     rec["death_year_ah_earliest"] = band.earliest_ah
     rec["death_year_ah_latest"] = band.latest_ah
-    rec["death_date_precision"] = DatePrecision.TABAQA_ESTIMATE.value
+    rec["death_date_precision"] = DatePrecision.ISNAD_ESTIMATE.value
     rec["birth_date_precision"] = DatePrecision.UNKNOWN.value
     rec["generation"] = _generation_for_year(band.midpoint_ah).value
     rec["mention_count"] = band.mention_count

@@ -127,13 +127,17 @@ OUTLIER_GAP = 25
 # da#165 review).
 _ALT_MARKERS = ("أو", "او", "وقيل", "وقئل", " or ")
 
-# Closed (two-sided / point) precisions: they assert a central estimate.
+# Closed (two-sided / point) precisions: they assert a central estimate. Both
+# derived-window kinds (``TABAQA_ESTIMATE`` and ``ISNAD_ESTIMATE``, da#340) belong
+# here for the same reason — each carries a concrete point + bounds — so this set
+# stays exhaustive over the "asserts a central estimate" precisions.
 _CLOSED_PRECISIONS = frozenset(
     {
         DatePrecision.EXACT,
         DatePrecision.RANGE,
         DatePrecision.CIRCA,
         DatePrecision.TABAQA_ESTIMATE,
+        DatePrecision.ISNAD_ESTIMATE,
     }
 )
 

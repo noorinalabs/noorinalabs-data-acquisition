@@ -567,6 +567,7 @@ class TestDatePrecisionEnum:
         assert DatePrecision.AFTER == "after"
         assert DatePrecision.BEFORE == "before"
         assert DatePrecision.TABAQA_ESTIMATE == "tabaqa_estimate"
+        assert DatePrecision.ISNAD_ESTIMATE == "isnad_estimate"
         assert DatePrecision.UNKNOWN == "unknown"
 
     def test_member_set_is_exhaustive(self) -> None:
@@ -577,6 +578,7 @@ class TestDatePrecisionEnum:
             "after",
             "before",
             "tabaqa_estimate",
+            "isnad_estimate",
             "unknown",
         }
 
