@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import hashlib
 
+from src.parse.identity import ID_DELIMITER, bare_source_id
 from src.utils.arabic import is_arabic, normalize_arabic
 
 # source_corpus -> allowed collection slugs.
@@ -117,6 +118,34 @@ def is_canonical_hadith(source_corpus: str, collection_name: str) -> bool:
     if allowed is None:
         return True
     return collection_name in allowed
+
+
+def is_canonical_hadith_id(hadith_id: str) -> bool:
+    """Return True if the hadith identified by *hadith_id* would be loaded as a
+    canonical Hadith node, per :data:`HADITH_COMPOSITION`.
+
+    The id-parsing complement to :func:`is_canonical_hadith` for the chain-edge
+    loader (``src.graph.load_edges``). The node loader has the hadith row's
+    ``source_corpus`` + ``collection_name`` columns to hand; the edge loader only
+    has the narrator-mention's ``hadith_id`` (a ``source_id``, optionally
+    ``hdt:``-prefixed), so it recovers ``(corpus, collection)`` from the id
+    grammar ``<corpus>:<collection>[:<part>...]`` (:mod:`src.parse.identity`)
+    before applying the same gate.
+
+    Applying this on the edge path mirrors the node dedup (da#333): a
+    narrator-mention whose hadith is NOT canonical — e.g. ``fawaz``'s six-books
+    chains, which are deduplicated to the ``lk`` spine and so load no Hadith node
+    — must not produce ``TRANSMITTED_TO`` / ``NARRATED`` edges, or it orphans an
+    edge against a Hadith node that was never loaded (the ~196k
+    ``fawaz:<book>:<n>`` dangling chains). An id with no recoverable collection
+    segment (a bare corpus, or a toy/id-less value) defers to
+    :func:`is_canonical_hadith`, which keeps any corpus not named in the
+    composition map — the conservative, irreversible-load-friendly default.
+    """
+    segments = bare_source_id(hadith_id).split(ID_DELIMITER)
+    corpus = segments[0] if segments else ""
+    collection = segments[1] if len(segments) > 1 else ""
+    return is_canonical_hadith(corpus, collection)
 
 
 def is_cross_edition_dedup_source(source_corpus: str) -> bool:

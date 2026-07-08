@@ -16,6 +16,7 @@ from typing import Any
 
 import pyarrow.parquet as pq
 
+from src.parse.composition import is_canonical_hadith_id
 from src.parse.identity import (
     collection_node_id,
     grading_node_id,
@@ -249,11 +250,24 @@ def _load_transmitted_to(
     # chain mention has no ``provenance`` column (row.get → None), so this only
     # ever excludes curated links.
     by_hadith: dict[str, list[dict[str, Any]]] = {}
+    dropped_noncanonical = 0
     for fp in files:
         rows = _read_parquet_rows(fp)
         for row in rows:
             hid = row.get("hadith_id") or row.get("source_hadith_id")
             if not hid:
+                continue
+            if not is_canonical_hadith_id(hid):
+                # da#333: a mention whose hadith is NOT a canonical node — e.g.
+                # fawaz's six-books chains, deduplicated to the lk spine — must not
+                # produce a TRANSMITTED_TO edge, mirroring the node dedup
+                # (``load_nodes._load_hadiths``). Without this gate the edge orphans
+                # against a Hadith node that was never loaded (the ~196k
+                # ``fawaz:<book>:<n>`` dangling chains that duplicate lk). ``mis`` is
+                # unaffected: its transmission edges are produced as
+                # ``network_edges_mis.parquet``, never as narrator mentions, so they
+                # never reach this narrator-mention path.
+                dropped_noncanonical += 1
                 continue
             if row.get("provenance"):
                 continue  # curated NARRATED-only link — never a transmission pair
@@ -265,7 +279,7 @@ def _load_transmitted_to(
         all_pairs.extend(_build_chain_pairs(mentions))
 
     if not all_pairs:
-        logger.info("transmitted_to_no_pairs")
+        logger.info("transmitted_to_no_pairs", dropped_noncanonical=dropped_noncanonical)
         return EdgeLoadResult("TRANSMITTED_TO", 0, 0, 0)
 
     # Check for missing endpoints
@@ -292,6 +306,7 @@ def _load_transmitted_to(
         created=created,
         missing_endpoints=missing,
         total_pairs=len(all_pairs),
+        dropped_noncanonical=dropped_noncanonical,
     )
     return EdgeLoadResult("TRANSMITTED_TO", created, 0, missing)
 
@@ -350,6 +365,7 @@ def _load_narrated(
     # mention's ``provenance`` (present only on curated orphan-links, da#228; null
     # for ordinary chain mentions) rides along so it lands on the NARRATED edge.
     first_narrators: dict[str, tuple[int, str, str | None]] = {}  # hid -> (pos, nid, provenance)
+    dropped_noncanonical = 0
     for fp in files:
         rows = _read_parquet_rows(fp)
         for row in rows:
@@ -357,6 +373,15 @@ def _load_narrated(
             nid = row.get("canonical_narrator_id")
             pos = row.get("position_in_chain", 0)
             if not hid or not nid:
+                continue
+            if not is_canonical_hadith_id(hid):
+                # da#333: mirror the node dedup — a mention whose hadith is not a
+                # canonical node (fawaz six-books, deduped to lk) yields no NARRATED
+                # edge. Such an edge would otherwise be a guaranteed missing-endpoint
+                # (no Hadith node exists for it); dropping it at the source keeps the
+                # edge path consistent with the node loader. ``mis`` never reaches
+                # here (its edges come from ``network_edges_mis.parquet``).
+                dropped_noncanonical += 1
                 continue
             if hid not in first_narrators or pos < first_narrators[hid][0]:
                 first_narrators[hid] = (pos, nid, row.get("provenance"))
@@ -385,7 +410,12 @@ def _load_narrated(
         if valid_batch
         else 0
     )
-    logger.info("narrated_loaded", created=created, missing_endpoints=missing)
+    logger.info(
+        "narrated_loaded",
+        created=created,
+        missing_endpoints=missing,
+        dropped_noncanonical=dropped_noncanonical,
+    )
     return EdgeLoadResult("NARRATED", created, 0, missing)
 
 
