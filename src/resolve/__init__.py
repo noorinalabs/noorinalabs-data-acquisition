@@ -55,6 +55,7 @@ RESOLVE_STEP_ORDER = (
     "disambiguate",
     "bio_promote",
     "cluster",
+    "narrator_split",
     "reconcile",
     "tabaqa_dates",
     "muhaddithat_links",
@@ -341,6 +342,7 @@ def run_all(
         disambiguate,
         fuzzy_cluster,
         muhaddithat_links,
+        narrator_split,
         ner,
         parallels,
         tabaqa_dates,
@@ -351,6 +353,7 @@ def run_all(
         "disambiguate": [],
         "bio_promote": [],
         "cluster": [],
+        "narrator_split": [],
         "reconcile": [],
         "tabaqa_dates": [],
         "muhaddithat_links": [],
@@ -472,6 +475,35 @@ def run_all(
             logger.error("resolve_step_failed", step="cluster", traceback=traceback.format_exc())
     else:
         logger.info("resolve_step_skipped_precomputed", step="cluster")
+
+    # Step 3.55: Same-name split (da#337) — the *split* mirror of fuzzy_cluster's
+    # merge. For each over-collapsed generic-name node (recall-first screen
+    # generic_name.is_generic_name), peel it into distinct canonical nodes ONLY when
+    # ≥2 well-separated, well-supported death-year bands (from attested chain-neighbour
+    # dates) prove multiple referents; a genuinely single person (Sufyān al-Thawrī,
+    # al-Zuhrī) clusters to one band and abstains. Runs AFTER cluster so it operates on
+    # the final merged canonical set, and BEFORE reconcile/tabaqa_dates/dedup so the
+    # peeled ids and remapped mentions flow through the date + parallel stages. Rewrites
+    # the canonical table + remaps mentions + emits narrator_splits.parquet (audit).
+    # Idempotent: a re-run re-reads the split table, every node is a single band, all
+    # abstain, and nothing is rewritten.
+    if _do("narrator_split"):
+        try:
+            logger.info("resolve_step", step="narrator_split", status="running")
+            split_path = narrator_split.split_generic_narrators(output_dir, staging_dir=staging_dir)
+            results["narrator_split"] = [split_path] if split_path is not None else []
+            logger.info(
+                "resolve_step",
+                step="narrator_split",
+                status="complete",
+                files=len(results["narrator_split"]),
+            )
+        except Exception:  # noqa: BLE001
+            logger.error(
+                "resolve_step_failed", step="narrator_split", traceback=traceback.format_exc()
+            )
+    else:
+        logger.info("resolve_step_skipped_precomputed", step="narrator_split")
 
     # Step 3.6: Multi-source date reconciliation (da#165). After bio_promote and
     # cluster have built the final canonical set, fold each narrator's per-source
