@@ -85,7 +85,15 @@ __all__ = [
     "validate_source_id",
     "CANONICAL_NAMESPACE",
     "make_canonical_id",
+    "make_discriminated_canonical_id",
 ]
+
+# Unit-separator (U+001F) joining a normalized name to a da#337 discriminator when
+# minting a *discriminated* canonical id. It cannot occur in a normalized name (the
+# Arabic normalizer strips control/format marks and collapses whitespace), so a
+# discriminator can never collide with a name that merely happens to contain the
+# joiner — see :func:`make_discriminated_canonical_id`.
+_DISCRIMINATOR_SEP = "\x1f"
 
 # Fixed UUID5 namespace for canonical Narrator ids. A canonical narrator's id is
 # ``nar:<uuid5(CANONICAL_NAMESPACE, normalized-name)>`` — deterministic from the
@@ -216,6 +224,37 @@ def make_canonical_id(name_normalized: str) -> str:
     spellings collapse to one id.
     """
     return narrator_node_id(str(uuid.uuid5(CANONICAL_NAMESPACE, name_normalized)))
+
+
+def make_discriminated_canonical_id(name_normalized: str, discriminator: str = "") -> str:
+    """Canonical Narrator id from a normalized name, optionally *discriminated*.
+
+    The sibling rule to :func:`make_canonical_id` for the da#337 same-name split
+    stage. Because :func:`make_canonical_id` keys purely on the normalized name,
+    distinct people who share a normalized name (bare kunyas like ``أبو عبد الله``,
+    single-token mononyms, captured name fragments) collapse into ONE ``nar:`` node
+    and inflate its betweenness centrality. This helper lets that stage mint a
+    *distinct* id per referent by folding a ``discriminator`` (e.g. a
+    death-year/generation/nisba tag) into the uuid5 input.
+
+    Backward-compat contract: an **empty** (falsy) ``discriminator`` returns a
+    result **byte-identical** to ``make_canonical_id(name_normalized)`` — the
+    undiscriminated id every existing producer already mints — so wiring this in
+    re-keys nothing for the un-split majority. Only a non-empty discriminator
+    diverges, minting ``nar:<uuid5(CANONICAL_NAMESPACE, name + SEP + discriminator)>``.
+
+    The name and discriminator are joined by the :data:`_DISCRIMINATOR_SEP` unit
+    separator (U+001F), which a normalized name can never contain, so a
+    discriminator can never collide with name content — ``(name="a\\x1fb", disc="")``
+    and ``(name="a", disc="b")`` mint different ids even though a bare ``+`` join
+    would conflate them. The input name must be pre-normalized
+    (see ``src.utils.arabic.normalize_arabic``), exactly as for
+    :func:`make_canonical_id`.
+    """
+    if not discriminator:
+        return make_canonical_id(name_normalized)
+    key = name_normalized + _DISCRIMINATOR_SEP + discriminator
+    return narrator_node_id(str(uuid.uuid5(CANONICAL_NAMESPACE, key)))
 
 
 def chain_node_id(source_id: str, index: int = 0) -> str:

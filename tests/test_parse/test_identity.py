@@ -21,9 +21,12 @@ from src.parse.identity import (
     grading_node_id,
     hadith_node_id,
     is_double_prefixed,
+    make_canonical_id,
+    make_discriminated_canonical_id,
     narrator_node_id,
     validate_source_id,
 )
+from src.utils.arabic import normalize_arabic
 
 
 class TestSourceCorpora:
@@ -165,3 +168,67 @@ class TestValidateSourceId:
     def test_empty_segment_flagged(self) -> None:
         problems = validate_source_id("sunnah::1")
         assert any("empty segment" in p for p in problems)
+
+
+class TestMakeDiscriminatedCanonicalId:
+    """The da#337 discriminated-id helper — sibling of ``make_canonical_id``."""
+
+    def test_empty_discriminator_is_byte_identical_to_make_canonical_id(self) -> None:
+        # The backward-compat contract: no discriminator == today's id, exactly.
+        name = "محمد بن اسماعيل"
+        assert make_discriminated_canonical_id(name) == make_canonical_id(name)
+        assert make_discriminated_canonical_id(name, "") == make_canonical_id(name)
+
+    def test_deterministic_on_repeat(self) -> None:
+        name = "ابو عبد الله"
+        assert make_discriminated_canonical_id(name, "d161") == make_discriminated_canonical_id(
+            name, "d161"
+        )
+        # And the empty-discriminator path is equally stable across calls.
+        assert make_discriminated_canonical_id(name) == make_discriminated_canonical_id(name)
+
+    def test_distinct_discriminators_yield_distinct_ids(self) -> None:
+        name = "سفيان"
+        id_thawri = make_discriminated_canonical_id(name, "d161")
+        id_ibn_uyayna = make_discriminated_canonical_id(name, "d198")
+        assert id_thawri != id_ibn_uyayna
+        # Both diverge from the undiscriminated collapse the split is fixing.
+        assert id_thawri != make_canonical_id(name)
+        assert id_ibn_uyayna != make_canonical_id(name)
+
+    def test_same_name_and_discriminator_same_id(self) -> None:
+        assert make_discriminated_canonical_id("سفيان", "kufa") == make_discriminated_canonical_id(
+            "سفيان", "kufa"
+        )
+
+    def test_result_carries_narrator_prefix(self) -> None:
+        assert make_discriminated_canonical_id("سفيان", "d161").startswith("nar:")
+
+    def test_separator_disambiguates_name_discriminator_boundary(self) -> None:
+        # The unit separator makes the name↔discriminator boundary unambiguous, so
+        # two DIFFERENT splits of the same character run do NOT collide the way a
+        # bare "name + discriminator" concatenation would ("ab"+"c" == "a"+"bc").
+        assert make_discriminated_canonical_id("ab", "c") != make_discriminated_canonical_id(
+            "a", "bc"
+        )
+
+    def test_discriminated_never_collides_with_a_real_normalized_name(self) -> None:
+        # The separator is collision-safe against undiscriminated ids because a
+        # normalized name can NEVER contain U+001F — normalize_arabic maps it to a
+        # space (Python ``\s`` matches U+001F), so no real name reproduces a
+        # discriminated key ``name + \x1f + disc``. Demonstrated on genuine
+        # normalized inputs: a discriminated id differs from the plain id of its
+        # base name AND from the plain id of the name+discriminator run.
+        base = normalize_arabic("سفيان")
+        disc = make_discriminated_canonical_id(base, "d161")
+        assert disc != make_canonical_id(base)
+        assert disc != make_canonical_id(normalize_arabic("سفيان d161"))
+
+    def test_separator_edge_case_is_a_precondition_violation(self) -> None:
+        # KNOWN, FLAGGED edge case (see PR notes): the ONLY way the empty-disc path
+        # collides with a discriminated id is a synthetic "name" that literally
+        # contains U+001F — which violates the pre-normalized-input precondition
+        # (normalize_arabic strips it) and so cannot arise in production. Asserting
+        # the honest behavior here: the empty-disc path is byte-identical to
+        # make_canonical_id, unconditionally (the backward-compat contract).
+        assert make_discriminated_canonical_id("a\x1fb", "") == make_canonical_id("a\x1fb")
