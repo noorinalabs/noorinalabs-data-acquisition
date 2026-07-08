@@ -65,6 +65,36 @@ class TestAggregationGate:
         assert is_generic_name(_MONONYM, GENERIC_MIN_MENTIONS) is True
 
 
+class TestRecallFirstCandidacy:
+    """The screen deliberately over-includes 2-token names; PR-2 gates the split.
+
+    Regression-locks the load-bearing design decision Ivana flagged: an ism+nisba
+    hub screens IN on purpose (it is a candidate, not a confirmed collapse), and a
+    theophoric compound must screen in the same way — so the nisba-vs-theophoric
+    call is NOT attempted here (it belongs to PR-2's death-year-band evidence gate).
+    """
+
+    def test_ism_nisba_hub_screens_in_by_design(self) -> None:
+        # سفيان الثوري (Sufyān al-Thawrī) is a SPECIFIC, heavily-attested person
+        # already disambiguated by its nisba — NOT a same-name collapse. It screens
+        # in ON PURPOSE (a 2-token name): is_generic_name is a candidacy screen, and
+        # PR-2's death-year-band evidence gate — not this function — decides the
+        # (non-)split, abstaining on a single-band person like this. Pinned so the
+        # deliberate over-inclusion cannot silently regress into a name-shape guard.
+        assert is_generic_name(normalize_arabic("سفيان الثوري"), _MC) is True
+
+    def test_theophoric_compound_screens_in(self) -> None:
+        # عبد الله ("ʿAbd Allāh"), a bare two-token compound given name shared by
+        # countless people, must ALSO screen in — a naive "second token is
+        # ال-prefixed ⇒ nisba ⇒ protect" rule would wrongly exclude it (الله is
+        # ال-prefixed too), which is exactly why that call is deferred to PR-2.
+        assert is_generic_name(normalize_arabic("عبد الله"), _MC) is True
+
+    def test_full_ism_nasab_still_screens_out(self) -> None:
+        # The thin-name axis still holds: a full ism+nasab is not a candidate.
+        assert is_generic_name(normalize_arabic("محمد بن اسماعيل البخاري"), _MC) is False
+
+
 class TestDegenerateInput:
     @pytest.mark.parametrize("name", ["", "   ", "\t\n"])
     def test_empty_or_whitespace_is_false_without_crash(self, name: str) -> None:
