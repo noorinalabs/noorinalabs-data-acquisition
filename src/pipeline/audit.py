@@ -13,9 +13,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from src.utils.logging import get_logger
+
 __all__ = ["AuditEntry", "list_recent_entries", "write_audit_entry"]
 
 AUDIT_DIR_NAME = "audit"
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -31,19 +35,27 @@ class AuditEntry:
     summary: dict[str, Any] = field(default_factory=dict)
 
 
-def write_audit_entry(data_dir: Path, entry: AuditEntry) -> Path:
+def write_audit_entry(data_dir: Path, entry: AuditEntry) -> Path | None:
     """Write an audit entry to ``data/audit/{timestamp}-{stage}.json``.
 
-    Returns the path of the written file.
+    Best-effort: the audit trail is operational visibility, not a
+    correctness dependency, so a filesystem failure here (e.g. a
+    read-only container mount) must never fail an otherwise-completed
+    pipeline stage. Returns the path of the written file, or ``None``
+    if the write could not be performed.
     """
     audit_dir = data_dir / AUDIT_DIR_NAME
-    audit_dir.mkdir(parents=True, exist_ok=True)
-
     safe_ts = entry.timestamp.replace(":", "-").replace("+", "p")
     filename = f"{safe_ts}-{entry.stage}.json"
     path = audit_dir / filename
 
-    path.write_text(json.dumps(asdict(entry), indent=2) + "\n")
+    try:
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(asdict(entry), indent=2) + "\n")
+    except OSError:
+        logger.warning("audit_write_failed", stage=entry.stage, path=str(path))
+        return None
+
     return path
 
 

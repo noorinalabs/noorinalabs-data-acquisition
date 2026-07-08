@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import structlog
 
 from src.pipeline.audit import (
     AuditEntry,
@@ -49,6 +50,46 @@ class TestWriteAndRead:
         entry = create_audit_entry("load", duration_seconds=1.0)
         write_audit_entry(data_dir, entry)
         assert (data_dir / "audit").is_dir()
+
+    def test_write_read_only_dir_is_best_effort(
+        self, data_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A read-only filesystem (e.g. the graph-ops container mount) must
+        not raise — the audit write is best-effort and must never fail an
+        already-completed pipeline stage (da#335)."""
+
+        def _raise_read_only(self: Path, *args: object, **kwargs: object) -> None:
+            raise OSError(30, "Read-only file system", str(self))
+
+        monkeypatch.setattr(Path, "mkdir", _raise_read_only)
+
+        entry = create_audit_entry("enrich", duration_seconds=1.0)
+        with structlog.testing.capture_logs() as logs:
+            result = write_audit_entry(data_dir, entry)
+
+        assert result is None
+        assert not (data_dir / "audit").exists()
+        assert any(
+            log["event"] == "audit_write_failed" and log["log_level"] == "warning" for log in logs
+        )
+
+    def test_write_failure_on_file_write_is_best_effort(
+        self, data_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same best-effort contract when the dir is writable but the file
+        write itself fails (e.g. disk full, permission denied on the file)."""
+
+        def _raise_permission(self: Path, *args: object, **kwargs: object) -> None:
+            raise OSError(13, "Permission denied", str(self))
+
+        monkeypatch.setattr(Path, "write_text", _raise_permission)
+
+        entry = create_audit_entry("enrich", duration_seconds=1.0)
+        with structlog.testing.capture_logs() as logs:
+            result = write_audit_entry(data_dir, entry)
+
+        assert result is None
+        assert any(log["event"] == "audit_write_failed" for log in logs)
 
     def test_list_recent_entries(self, data_dir: Path) -> None:
         for stage in ("sync", "load", "enrich"):
