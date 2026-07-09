@@ -314,7 +314,8 @@ def _cmd_load(
     for nr in summary.node_results:
         print(
             f"    {nr.node_type}: created={nr.created} merged={nr.merged} skipped={nr.skipped}"
-            f" malformed_ids={nr.malformed_ids}"
+            f" refused={nr.refused} (malformed_ids={nr.malformed_ids}"
+            f" invalid_source_ids={nr.invalid_source_ids})"
         )
     for er in summary.edge_results:
         print(
@@ -342,11 +343,13 @@ def _cmd_load(
     # statement. Validation reports on what landed; it cannot report on what was
     # never offered to it, which is why `collection_coverage` called a graph
     # missing 650,986 hadiths "all within threshold" (da#382).
-    malformed = summary.total_malformed_ids
-    if malformed:
+    refused = summary.total_refused
+    if refused:
+        malformed = summary.total_malformed_ids
         print(
-            f"\nMALFORMED IDS: {malformed} row(s)/edge(s) were quarantined because their "
-            "source_id violates the id grammar (src/parse/identity.py).\n"
+            f"\nREFUSED INPUT: {refused} row(s)/edge(s) were quarantined because their "
+            f"source_id was defective ({malformed} violate the id grammar, "
+            f"{refused - malformed} are absent/blank/non-string).\n"
             "The load ran to completion and committed what it accepted, but the graph is "
             "INCOMPLETE. This is a producer defect: re-run `parse` to regenerate the "
             f"staging artifact, then re-load. Exiting {EXIT_MALFORMED_IDS}.",

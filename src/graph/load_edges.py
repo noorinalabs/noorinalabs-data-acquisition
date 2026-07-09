@@ -48,6 +48,17 @@ class EdgeLoadResult:
     # Edges refused because an endpoint id violates the id grammar (da#359).
     malformed_ids: int = 0
 
+    @property
+    def refused(self) -> int:
+        """Edges declined because the input was defective, by any cause.
+
+        The edge loaders' only input-defect refusal is a malformed endpoint id;
+        a missing endpoint is counted separately as ``missing_endpoints``,
+        because a Hadith node that was never loaded is a *consequence* of a
+        refusal upstream rather than a defect in the edge row itself.
+        """
+        return self.malformed_ids
+
 
 # ---------------------------------------------------------------------------
 # Helpers

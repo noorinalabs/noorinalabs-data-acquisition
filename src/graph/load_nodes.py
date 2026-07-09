@@ -65,11 +65,29 @@ class LoadResult:
     merged: int
     skipped: int
     validation_errors: list[str] = field(default_factory=list)
-    # Rows refused because their ``source_id`` violates the id grammar (da#359).
-    # Kept OUT of ``skipped``, which already conflates null ``source_id``,
-    # non-canonical composition drops and cross-edition dedup. A quarantined row
-    # is a producer defect and has to be attributable to that cause alone.
-    malformed_ids: int = 0
+    # --- Refusals (da#359) -------------------------------------------------
+    # A REFUSAL is a row the loader declined because its input was defective.
+    # It is categorically different from a *deliberate* skip -- a non-canonical
+    # edition (da#191) or a cross-edition dedup drop (da#220) -- which is the
+    # loader doing its job. ``skipped`` counts both kinds and so cannot answer
+    # "did every loader accept every input row"; that is what ``refused`` is for.
+    #
+    # Each refusal class gets its own counter, because "attributable to a cause"
+    # is the whole point: ``skipped`` meant three things at once, which is how
+    # 650,986 absent hadiths hid behind it.
+    malformed_ids: int = 0  # source_id violates the id grammar
+    invalid_source_ids: int = 0  # source_id absent, blank, or not a string
+
+    @property
+    def refused(self) -> int:
+        """Rows declined because the input was defective, by any cause.
+
+        Keyed on the concept, not on today's instance: a fifth ``continue`` that
+        refuses a row for a new reason must be added here, and then every
+        consumer -- the exit code, the last-loaded manifest (da#374) -- follows
+        without being touched.
+        """
+        return self.malformed_ids + self.invalid_source_ids
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +341,7 @@ def _load_hadiths(
     total_skipped = 0
     total_deduped = 0
     total_malformed = 0
+    total_invalid_sid = 0
     all_errors: list[str] = []
     total_batch = 0
 
@@ -341,6 +360,7 @@ def _load_hadiths(
             if not sid or not isinstance(sid, str):
                 all_errors.append(f"{fp.name} row {i}: invalid source_id={sid!r}")
                 total_skipped += 1
+                total_invalid_sid += 1
                 continue
             source_corpus = _val(row, "source_corpus", "")
             # Canonical corpus composition (da#191): skip Hadith whose
@@ -413,11 +433,18 @@ def _load_hadiths(
         merged=merged,
         skipped=total_skipped,
         malformed_ids=total_malformed,
+        invalid_source_ids=total_invalid_sid,
         cross_edition_deduped=total_deduped,
         curated_identities=len(curated_identities),
     )
     return LoadResult(
-        "Hadith", total_created, merged, total_skipped, all_errors, malformed_ids=total_malformed
+        "Hadith",
+        total_created,
+        merged,
+        total_skipped,
+        all_errors,
+        malformed_ids=total_malformed,
+        invalid_source_ids=total_invalid_sid,
     )
 
 
@@ -667,6 +694,7 @@ def _load_gradings(
     errors: list[str] = []
     skipped = 0
     malformed = 0
+    invalid_sid = 0
 
     for fp in files:
         rows = _read_parquet_rows(fp)
@@ -678,6 +706,7 @@ def _load_gradings(
             if not sid:
                 errors.append(f"{fp.name} row {i}: grade present but no source_id")
                 skipped += 1
+                invalid_sid += 1
                 continue
             # da#355: quarantine a malformed id, never abort the load.
             try:
@@ -708,9 +737,22 @@ def _load_gradings(
     created = client.execute_write_batch(_GRADING_MERGE, batch) if batch else 0
     merged = len(batch) - created
     logger.info(
-        "gradings_loaded", created=created, merged=merged, skipped=skipped, malformed_ids=malformed
+        "gradings_loaded",
+        created=created,
+        merged=merged,
+        skipped=skipped,
+        malformed_ids=malformed,
+        invalid_source_ids=invalid_sid,
     )
-    return LoadResult("Grading", created, merged, skipped, errors, malformed_ids=malformed)
+    return LoadResult(
+        "Grading",
+        created,
+        merged,
+        skipped,
+        errors,
+        malformed_ids=malformed,
+        invalid_source_ids=invalid_sid,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -134,6 +134,84 @@ class TestLoaderCountsMalformedIdsSeparately:
         assert result.created == 1
 
 
+class TestRefusalIsKeyedOnTheConceptNotTheInstance:
+    """`refused` must cover every input-defect class, not just today's.
+
+    A malformed id and an absent/blank `source_id` are the same silent data loss
+    through different doors. Keying the exit (and da#374's manifest predicate) on
+    `malformed_ids` would re-arm the trap for the next refusal class.
+
+    `HADITH_SCHEMA` declares `source_id` as `string not null`, so a *null* cannot
+    reach the loader through a conformant parquet -- but the guard is
+    `not sid or not isinstance(sid, str)`, and the empty string IS permitted by
+    the schema. The path is reachable and currently unexercised: 0 of 853,218
+    staging rows are blank today. That is why it costs nothing to close now.
+    """
+
+    def test_blank_source_id_is_refused_but_not_malformed(self, tmp_path: Path) -> None:
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        write_hadiths(
+            staging,
+            [_sanadset_row("", "bukhari"), _sanadset_row(CONTROL_SOURCE_ID, "bukhari")],
+            suffix="sanadset",
+        )
+
+        result = _load_hadiths(MockNeo4jClient(), staging, strict=False)
+
+        assert result.invalid_source_ids == 1
+        assert result.malformed_ids == 0  # a different door
+        assert result.refused == 1
+        assert result.created == 1  # positive control: the good row still loaded
+
+    def test_refused_sums_both_classes(self, tmp_path: Path) -> None:
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        write_hadiths(
+            staging,
+            [
+                _sanadset_row("", "bukhari"),
+                _sanadset_row(REAL_DOUBLED_SOURCE_ID, "sanadset"),
+                _sanadset_row(CONTROL_SOURCE_ID, "bukhari"),
+            ],
+            suffix="sanadset",
+        )
+
+        result = _load_hadiths(MockNeo4jClient(), staging, strict=False)
+
+        assert result.malformed_ids == 1
+        assert result.invalid_source_ids == 1
+        assert result.refused == 2
+        # Deliberate skips are NOT refusals; here `skipped` happens to equal
+        # `refused` because no non-canonical row is present -- the separation is
+        # pinned by test_malformed_is_not_an_alias_of_skipped above.
+        assert result.created == 1
+
+    def test_deliberate_skips_are_not_refusals(self, tmp_path: Path) -> None:
+        """A non-canonical drop is the loader working, and must not exit non-zero."""
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        write_hadiths(
+            staging,
+            [
+                {
+                    "source_id": "fawaz:bukhari:1",
+                    "source_corpus": "fawaz",
+                    "collection_name": "bukhari",
+                    "matn_ar": "متن fawaz",
+                    "sect": "sunni",
+                },
+                _sanadset_row(CONTROL_SOURCE_ID, "bukhari"),
+            ],
+            suffix="sanadset",
+        )
+
+        result = _load_hadiths(MockNeo4jClient(), staging, strict=False)
+
+        assert result.skipped == 1
+        assert result.refused == 0  # nothing was refused; one row was deliberately dropped
+
+
 class TestEdgeLoadersReportMalformedOnTheEmptyBatchPath:
     """The all-malformed load takes an EARLY return, and it must carry the count.
 
@@ -205,6 +283,21 @@ class TestLoadSummaryAggregation:
             edge_results=[EdgeLoadResult("GRADED_BY", 5, 0, 0)],
         )
         assert summary.total_malformed_ids == 0
+        assert summary.total_refused == 0
+
+    def test_total_refused_counts_both_classes_and_both_result_kinds(self) -> None:
+        """`total_refused` is what da#374's manifest predicate keys on."""
+        summary = LoadSummary(
+            node_results=[LoadResult("Hadith", 0, 0, 9, malformed_ids=7, invalid_source_ids=2)],
+            edge_results=[EdgeLoadResult("GRADED_BY", 0, 3, 0, malformed_ids=3)],
+        )
+        assert summary.total_malformed_ids == 10  # 7 + 3
+        assert summary.total_refused == 12  # 7 + 2 + 3
+
+    def test_deliberate_skips_never_reach_total_refused(self) -> None:
+        """A load that only deduped rows is a clean load. It must exit 0."""
+        summary = LoadSummary(node_results=[LoadResult("Hadith", 5, 0, 600_000)])
+        assert summary.total_refused == 0
 
 
 class _StubClient:
@@ -289,6 +382,34 @@ class TestCmdLoadExitCode:
 
         with pytest.raises(SystemExit) as exc:
             cli._cmd_load(nodes_only=True)
+
+        assert exc.value.code == EXIT_MALFORMED_IDS
+
+    def test_blank_source_id_alone_exits_nonzero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The exit follows `refused`, not `malformed_ids`.
+
+        Zero malformed ids here. If `_cmd_load` keyed on `total_malformed_ids`
+        this load would exit 0 having silently dropped a row -- the same defect
+        this PR exists to close, through the other door.
+        """
+        staging = tmp_path / "real_staging"
+        staging.mkdir()
+        write_hadiths(
+            staging,
+            [_sanadset_row("", "bukhari"), _sanadset_row(CONTROL_SOURCE_ID, "bukhari")],
+            suffix="sanadset",
+        )
+        hadiths = _load_hadiths(MockNeo4jClient(), staging, strict=False)
+        assert hadiths.malformed_ids == 0, "fixture must isolate the non-malformed refusal"
+        assert hadiths.invalid_source_ids == 1, "fixture no longer produces the failing state"
+
+        summary = LoadSummary(node_results=[hadiths], total_nodes=hadiths.created)
+        _install_load_stubs(monkeypatch, tmp_path, summary)
+
+        with pytest.raises(SystemExit) as exc:
+            cli._cmd_load(skip_validation=True)
 
         assert exc.value.code == EXIT_MALFORMED_IDS
 

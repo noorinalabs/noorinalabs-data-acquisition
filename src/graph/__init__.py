@@ -73,6 +73,23 @@ class LoadSummary:
             r.malformed_ids for r in self.edge_results
         )
 
+    @property
+    def total_refused(self) -> int:
+        """Rows and edges the loaders declined because the input was defective.
+
+        The answer to "did every loader accept every input row" -- and therefore
+        the predicate both the exit code and the last-loaded manifest (da#374)
+        key on. It is deliberately keyed on the *concept* rather than on today's
+        instance (``total_malformed_ids``): a doubled id is one refusal class,
+        an absent/blank ``source_id`` is another, and a load that silently drops
+        rows for the second reason is the same silent data loss as the first.
+
+        ``skipped`` cannot serve here -- it also counts the loader's *deliberate*
+        drops (non-canonical editions, cross-edition dedup), which are the loader
+        working correctly.
+        """
+        return sum(r.refused for r in self.node_results) + sum(r.refused for r in self.edge_results)
+
 
 def load_all(
     client: Neo4jClient,
