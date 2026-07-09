@@ -63,6 +63,17 @@ _CONFIDENCE_THRESHOLD = 0.70
 _TEMPORAL_MIN_GAP = 15
 _TEMPORAL_MAX_GAP = 80
 
+# da#356 corroboration gate. A name-similarity score alone may not authorize
+# stamping a bio's metadata onto a narrator: absent chain evidence, the match must
+# be *near-identical* by name. 0.90 / distance 1 is where the measured corpus
+# separates OCR corruptions of one person (Ibn ʿAbbās `ابن عباس` ↔ the itqan
+# `ابن عبس`: ratio 0.933, distance 1) from genuinely different people
+# (al-Bāqir ↔ al-Kūfī: ratio 0.852, distance 4). These gate METADATA only —
+# identity is never at stake (see `_bio_corroborated`), so a false negative costs
+# a missing death year, not a chimeric node.
+_CORROBORATION_STRICT_SCORE = 0.90
+_CORROBORATION_STRICT_MAX_DIST = 1
+
 # Blocking: number of prefix characters to use for candidate grouping.
 _BLOCK_PREFIX_LEN = 2
 
@@ -291,6 +302,64 @@ def _temporal_filter(matches: list[Match], chain_context: ChainContext) -> list[
             filtered.append(m)
 
     return filtered
+
+
+# ---------------------------------------------------------------------------
+# Corroboration gate (da#356)
+# ---------------------------------------------------------------------------
+def _bio_corroborated(match: Match, mention_norm: str, adjacent_death_years: list[int]) -> bool:
+    """May the matched bio's metadata be stamped onto this mention's narrator?
+
+    This gate governs **metadata only**. Since da#356 the canonical id and display
+    name are a pure function of the mention (see :func:`run`), so a rejected match
+    costs a missing ``death_year_ah``, never a re-keyed or renamed node. It still
+    matters: an attached year enters ``death_year_index``, which feeds
+    :func:`_temporal_filter` for chain neighbours **and** the da#248 evidence in
+    :func:`refine_mononym_name` — so a wrong year propagates back into *identity*
+    via the mononym split. Bad metadata is not inert.
+
+    A match is corroborated when:
+
+    * it is an ``exact`` name match (the bio *is* this name — nothing to corroborate); or
+    * chain-neighbour death-year evidence exists and **agrees** (the positive signal); or
+    * no usable temporal evidence exists, and the name match is *near-identical* —
+      ``score >= _CORROBORATION_STRICT_SCORE`` and Levenshtein ≤
+      ``_CORROBORATION_STRICT_MAX_DIST``.
+
+    A match is **vetoed outright** when temporal evidence exists and contradicts,
+    however high the name score.
+
+    Why not "the mention's own form must itself be bio-registered": that criterion
+    is vacuous. Stage 1 (:func:`_exact_match_indexed`) returns early on any exact
+    bio hit, so no mention reaching the fuzzy or crossref stage can be
+    bio-registered — measured survival on the pre-fix corpus was 0 of 742,607
+    fuzzy and 0 of 937,539 crossref matches. Requiring it would silently delete
+    both stages.
+
+    Why not "chain-neighbour agreement" alone: only 26.2% of the 140,174 bio
+    candidates carry a ``death_year_ah`` at all, so requiring positive temporal
+    agreement rejects the majority on grounds of *missing data* rather than
+    evidence of wrongness. Hence the near-identity fallback.
+    """
+    if match.stage == "exact":
+        return True
+
+    death_year = match.candidate.death_year_ah
+    if adjacent_death_years and death_year is not None:
+        # Positive evidence available — it decides, in both directions.
+        return any(
+            _TEMPORAL_MIN_GAP <= abs(death_year - adj) <= _TEMPORAL_MAX_GAP
+            for adj in adjacent_death_years
+        )
+
+    # No usable temporal evidence: fall back to near-identity of the names.
+    cand_norm = match.candidate.name_ar_normalized or ""
+    if not cand_norm or not mention_norm:
+        return False
+    return (
+        match.score >= _CORROBORATION_STRICT_SCORE
+        and Levenshtein.distance(mention_norm, cand_norm) <= _CORROBORATION_STRICT_MAX_DIST
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -677,11 +746,17 @@ def _disambiguate_mention(
             return best, all_matches
 
     # Stage 5: Cross-reference match
+    # da#356: crossref is the LOOSER stage (ratio >= 60, no Levenshtein bound) and
+    # produced 92% of the pre-fix chimeric nodes, yet it alone skipped the temporal
+    # and geographic filters. It is now filtered exactly as the fuzzy stage is.
     crossref = _crossref_match(name, candidates)
     if crossref:
+        crossref = _temporal_filter(crossref, chain_ctx)
+        crossref = _geographic_filter(crossref, chain_ctx)
         all_matches.extend(crossref)
-        best = max(crossref, key=lambda m: m.score)
-        return best, all_matches
+        if crossref:
+            best = max(crossref, key=lambda m: m.score)
+            return best, all_matches
 
     return None, all_matches
 
@@ -745,12 +820,16 @@ def _disambiguate_mention_indexed(
             best = max(fuzzy, key=lambda m: m.score)
             return best, all_matches
 
-    # Stage 5: Cross-reference match (blocked)
+    # Stage 5: Cross-reference match (blocked) — filtered as of da#356; see the
+    # twin in `_disambiguate_mention` for why.
     crossref = _crossref_match_blocked(name, index)
     if crossref:
+        crossref = _temporal_filter(crossref, chain_ctx)
+        crossref = _geographic_filter(crossref, chain_ctx)
         all_matches.extend(crossref)
-        best = max(crossref, key=lambda m: m.score)
-        return best, all_matches
+        if crossref:
+            best = max(crossref, key=lambda m: m.score)
+            return best, all_matches
 
     return None, all_matches
 
@@ -866,6 +945,7 @@ def _upsert_canonical(
     alias: str | None,
     candidate: Candidate | None,
     corpus: str | None = None,
+    bio_alias: str | None = None,
 ) -> None:
     """Create or merge the canonical narrator record for *canonical_id*.
 
@@ -878,6 +958,14 @@ def _upsert_canonical(
     still-empty biographical field, so resolution order never loses bio metadata
     (a bio-less mention seen first leaves a minimal record that a later
     bio-matched mention of the same name upgrades in place).
+
+    da#356 — **the candidate may enrich, but it may never rename.** ``name_ar`` /
+    ``name_en`` / ``name_ar_normalized`` are taken from the caller's mention-derived
+    arguments and are never back-filled from ``candidate``: doing so is exactly how
+    a mention ``عائشة`` came to be displayed as the OCR-corrupt bio spelling
+    ``عائذة``. A caller that has established true name-identity (the exact stage)
+    passes the bio's ``name_en`` explicitly. The bio's own spelling is preserved as
+    a searchable ``bio_alias`` rather than as the record's name.
     """
     rec = canonical_map.get(canonical_id)
     if rec is None:
@@ -911,11 +999,14 @@ def _upsert_canonical(
     raw_count = rec.get("mention_count")
     rec["mention_count"] = (int(raw_count) if isinstance(raw_count, int | str) else 0) + 1
 
+    # Display names come from the mention (or from the caller's name-identical bio),
+    # never from `candidate` — see the da#356 note above.
+    if not rec.get("name_ar") and name_ar:
+        rec["name_ar"] = name_ar
+    if not rec.get("name_en") and name_en:
+        rec["name_en"] = name_en
+
     if candidate is not None:
-        if not rec.get("name_ar") and candidate.name_ar:
-            rec["name_ar"] = candidate.name_ar
-        if not rec.get("name_en") and candidate.name_en:
-            rec["name_en"] = candidate.name_en
         for field_name, value in (
             ("birth_year_ah", candidate.birth_year_ah),
             ("death_year_ah", candidate.death_year_ah),
@@ -930,10 +1021,14 @@ def _upsert_canonical(
         if isinstance(src_ids, list) and candidate.bio_id and candidate.bio_id not in src_ids:
             src_ids.append(candidate.bio_id)
 
-    if alias and alias != norm_name:
-        aliases = rec.get("aliases")
-        if isinstance(aliases, list) and alias not in aliases:
-            aliases.append(alias)
+    # The mention's own surface, and (da#356) the matched bio's spelling, both stay
+    # searchable as aliases. Pre-fix the *correct* spelling was demoted to an alias
+    # of a corrupt-bio-named node; now the corrupt spelling is the alias.
+    for candidate_alias in (alias, bio_alias):
+        if candidate_alias and candidate_alias != norm_name:
+            aliases = rec.get("aliases")
+            if isinstance(aliases, list) and candidate_alias not in aliases:
+                aliases.append(candidate_alias)
 
 
 # ---------------------------------------------------------------------------
@@ -1088,6 +1183,9 @@ def run(
     source_total: dict[str, int] = {}
 
     processed = 0
+    # Confident-by-score bio matches the da#356 corroboration gate withheld metadata
+    # from. Observability only — not checkpointed, so it counts the current segment.
+    gate_rejected = 0
 
     # --- Crash-resume (da#268): fingerprint the input and try to restore state.
     cadence = resolve_cadence(
@@ -1196,48 +1294,66 @@ def run(
             hadith_id = str(mention.get("hadith_id", ""))
             position = int(mention.get("position_in_chain") or 0)
 
-            if best and best.score >= _CONFIDENCE_THRESHOLD:
-                # Resolved to a biographical candidate.
-                source_resolved[corpus] = source_resolved.get(corpus, 0) + 1
-                c = best.candidate
-                norm_name = c.name_ar_normalized or normalize_arabic(c.name_ar or "")
-                name_ar = c.name_ar
-                name_en = c.name_en
-                candidate: Candidate | None = c
+            # da#356 — ONE identity source. The canonical id and the display name
+            # are a pure function of the MENTION's normalized form; a bio candidate
+            # may only enrich. `normalize_arabic` is applied here rather than trusting
+            # the stored `name_normalized` so the id keys on the very surface the
+            # matcher compared, and so a non-idempotent stored form (bidi marks that
+            # `normalize_arabic` strips) cannot mint two ids for one name.
+            mention_norm = normalize_arabic(mention_text)
+            adjacent = _adjacent_death_years(death_year_index, hadith_id, position)
 
+            # A confident match may attach metadata only if it is also corroborated.
+            attached: Candidate | None = None
+            if best and best.score >= _CONFIDENCE_THRESHOLD:
+                if _bio_corroborated(best, mention_norm, adjacent):
+                    attached = best.candidate
+                else:
+                    gate_rejected += 1
+
+            if mention_norm:
                 # da#248: split an over-merged bare mononym (e.g. سفيان) into the
-                # specific person the chain neighbours' generations select. Abstains
-                # (leaves norm_name unchanged) for every non-registered name and for
-                # ambiguous/absent evidence, so no single-person node is fragmented.
-                # On a split we drop the ambiguous mononym bio (candidate/name_en) so
-                # its dates/external_id are not stamped onto the specific person.
-                person = refine_mononym_name(
-                    norm_name, _adjacent_death_years(death_year_index, hadith_id, position)
-                )
+                # specific person the chain neighbours' generations select. This is the
+                # ONE legitimate re-key away from the mention's surface — it is driven
+                # by chain evidence, never by a bio name. It abstains for every
+                # non-registered name and for ambiguous/absent evidence, so no
+                # single-person node is fragmented. Note it now keys on the mention's
+                # form: pre-fix it was handed the *bio's* name (which the resolved
+                # branch had already substituted), so the registry lookup missed.
+                person = refine_mononym_name(mention_norm, adjacent)
                 if person is not None:
+                    # The refined person is not the matched bio, so the bio's dates /
+                    # external_id must not be stamped onto them.
                     norm_name = person.norm_name
-                    name_ar = person.name_ar
-                    name_en = None
-                    candidate = None
+                    name_ar: str | None = person.name_ar
+                    name_en: str | None = None
+                    attached = None
+                else:
+                    norm_name = mention_norm
+                    name_ar = str(mention.get("name_raw") or "") or mention_text
+                    # An English name may be borrowed only from a bio whose normalized
+                    # name IS this name — otherwise it renames the node in translation.
+                    name_en = (
+                        attached.name_en
+                        if attached is not None and attached.name_ar_normalized == norm_name
+                        else None
+                    )
 
                 canonical_id = _make_canonical_id(norm_name)
 
                 # Update death-year + location indexes for chain context (da#266).
-                # On a mononym split the chain-context slot must carry the REFINED
-                # person's real death year, not the ambiguous pre-split mononym bio's
-                # (`c`) — else an immediately chain-adjacent registered mononym reads a
-                # stale year and can mis-select among genuinely-distinct persons. The
-                # split already drops `c` (candidate/name_en set None above); the soft
-                # signals must follow. The registry carries no per-person location, and
-                # `c`'s location belongs to whichever person the merged bio represented
-                # (possibly the wrong one post-split), so it is suppressed on a split —
-                # the neighbour simply contributes no geographic signal, same as an
-                # absent-location neighbour.
+                # On a mononym split the slot must carry the REFINED person's real
+                # death year, not the ambiguous pre-split mononym bio's — else a
+                # chain-adjacent registered mononym reads a stale year and can
+                # mis-select among genuinely-distinct persons. The registry carries no
+                # per-person location, so a split contributes no geographic signal.
+                # An UNCORROBORATED bio contributes neither (da#356): its year would
+                # poison the temporal filter and the da#248 evidence downstream.
                 if person is not None:
                     death_year_index[f"{hadith_id}:{position}"] = person.death_year_ah
-                else:
-                    death_year_index[f"{hadith_id}:{position}"] = c.death_year_ah
-                    cand_location = c.death_location or c.birth_location
+                elif attached is not None:
+                    death_year_index[f"{hadith_id}:{position}"] = attached.death_year_ah
+                    cand_location = attached.death_location or attached.birth_location
                     if cand_location:
                         location_index[f"{hadith_id}:{position}"] = cand_location
 
@@ -1248,64 +1364,32 @@ def run(
                     name_ar=name_ar,
                     name_en=name_en,
                     alias=mention_text,
-                    candidate=candidate,
+                    candidate=attached,
                     corpus=corpus,
+                    bio_alias=attached.name_ar if attached is not None else None,
                 )
                 naive_identity_pairs.add((corpus, canonical_id))
-                resolved_map[mention_id] = (canonical_id, float(best.score))
 
-                # Merge log entry.
-                merge_log_rows.append(
-                    {
-                        "canonical_id": canonical_id,
-                        "mention_id": mention_id,
-                        "mention_text": mention_text,
-                        "merge_stage": best.stage,
-                        "score": best.score,
-                    }
-                )
-            else:
-                # No confident biographical match. Cross-source identity
-                # resolution (da#99) still canonicalizes the mention by its OWN
-                # normalized name, so the same narrator appearing across sources
-                # collapses to a single Narrator node even without a rijal bio —
-                # the canonical id is a pure function of the normalized name.
-                # Exact-name only (high precision); fuzzy mention-to-mention
-                # clustering of spelling variants is deferred (see #109 / future).
-                fallback_name = str(mention.get("name_normalized") or "") or normalize_arabic(
-                    str(mention.get("name_raw") or "")
-                )
-                if fallback_name:
-                    fallback_name_ar = str(mention.get("name_raw") or "") or None
-                    # da#248: same mononym split on the self-canonicalized path — a
-                    # bare over-merged mononym with no bio match still resolves to the
-                    # specific person the chain neighbours select (or abstains).
-                    person = refine_mononym_name(
-                        fallback_name,
-                        _adjacent_death_years(death_year_index, hadith_id, position),
+                if attached is not None and best is not None:
+                    source_resolved[corpus] = source_resolved.get(corpus, 0) + 1
+                    resolved_map[mention_id] = (canonical_id, float(best.score))
+                    merge_log_rows.append(
+                        {
+                            "canonical_id": canonical_id,
+                            "mention_id": mention_id,
+                            "mention_text": mention_text,
+                            "merge_stage": best.stage,
+                            "score": best.score,
+                        }
                     )
-                    if person is not None:
-                        fallback_name = person.norm_name
-                        fallback_name_ar = person.name_ar
-                    fallback_id = _make_canonical_id(fallback_name)
-                    _upsert_canonical(
-                        canonical_map,
-                        fallback_id,
-                        norm_name=fallback_name,
-                        name_ar=fallback_name_ar,
-                        name_en=None,
-                        alias=None,
-                        candidate=None,
-                        corpus=corpus,
-                    )
-                    naive_identity_pairs.add((corpus, fallback_id))
-                    # Self-canonicalized by exact name only (no bio corroboration),
-                    # so confidence is left unknown (None); the canonical id is
-                    # what wires the NARRATED edge / Chain (#109).
-                    resolved_map[mention_id] = (fallback_id, None)
+                else:
+                    # Self-canonicalized: the node exists and wires the NARRATED edge /
+                    # Chain (#109), but no bio corroborated it, so confidence is unknown.
+                    resolved_map[mention_id] = (canonical_id, None)
 
+            if attached is None:
                 # Record the top-3 bio candidates for the ambiguous-audit report
-                # (a fallback canonical node was still created above when named).
+                # (a self-canonicalized node was still created above when named).
                 top3 = sorted(all_matches, key=lambda m: m.score, reverse=True)[:3]
                 row: dict[str, str | float | None] = {
                     "mention_id": mention_id,
@@ -1339,6 +1423,7 @@ def run(
                     pct=round(processed / total_mentions * 100, 1),
                     resolved=sum(source_resolved.values()),
                     canonical=len(canonical_map),
+                    gate_rejected=gate_rejected,
                 )
 
         # Checkpoint on batch boundaries (da#268). ``processed`` is batch-aligned
