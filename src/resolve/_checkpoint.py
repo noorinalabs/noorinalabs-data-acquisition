@@ -41,17 +41,19 @@ from typing import Any, NoReturn
 
 import pyarrow.parquet as pq
 
+from src.exit_codes import EXIT_STOPPED_AT_LIMIT as EXIT_STOPPED_AT_LIMIT
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
 _STATE_FILENAME = "state.json"
 
-# Process exit status when a stage stopped cleanly at its ``--stop-after`` budget
-# (da#276). Distinct from 0 (completed), 2 (argparse/validation error), and 1 (an
-# uncaught crash) so a script/runbook can tell a bounded probe apart from a real
-# completion or failure.
-EXIT_STOPPED_AT_LIMIT = 3
+# ``EXIT_STOPPED_AT_LIMIT`` (da#276) is re-exported here for the call sites that
+# have always imported it from this module. It is DECLARED in src.exit_codes,
+# which owns the whole exit-code space (da#384): a module that declares its own
+# constant re-opens the space, and a second claim on the value then becomes a
+# silent IntEnum alias instead of a ValueError. The re-export is an import, not
+# an assignment, which is what keeps the sole-declarer scan green here.
 
 # ASCII unit / record separators keep the streamed field/row hashing
 # unambiguous — a value that happens to contain the delimiter cannot forge a

@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import sys
 
+from src.exit_codes import ExitCode
+
 
 def _mask_password(value: str) -> str:
     """Replace all but first and last character with asterisks."""
@@ -29,8 +31,9 @@ def _check_neo4j() -> None:
         driver.verify_connectivity()
         driver.close()
     except Exception as exc:
+        # The load did not happen: nothing was written (da#384 §4).
         print(f"ERROR: Cannot connect to Neo4j at {settings.neo4j.uri}: {exc}")
-        sys.exit(1)
+        sys.exit(ExitCode.LOAD_FAILED)
     print("  Neo4j is reachable.")
 
 
@@ -731,8 +734,12 @@ def main() -> None:
             output_json=output_json,
         )
         if not report.passed and strictness == Strictness.STRICT:
+            # FINDINGS, not a failure to run: `validate-staging` reads the staging
+            # parquets and writes nothing. It exited a bare 1 while `validate`
+            # reports findings with its own code -- da#354's conflation, one
+            # subcommand over (da#384 §4).
             print("\nValidation FAILED in strict mode. Pipeline halted.")
-            sys.exit(1)
+            sys.exit(ExitCode.VALIDATION_FINDINGS)
     elif args.command == "migrate-transmitted-hadith-ids":
         _cmd_migrate_transmitted_hadith_ids(batch_size=args.batch_size)
     elif args.command == "audit":
