@@ -206,6 +206,11 @@ def promote_bios_to_canonical(
             # (8,302 mentions), starving them of the very enrichment this module
             # exists to deliver: the same harm, sign-flipped.
             #
+            # Keyed on `cid`, never on the normalized string: da#376 folds Arabic
+            # inflection inside make_canonical_id, so the residue `ابو نهشل` and the
+            # attested `ابي نهشل` are one narrator under two surfaces. A string-keyed
+            # guard sees two and refuses nothing.
+            #
             # Scoped to targets that carry mentions: those are narrators attested in
             # an isnad, and corrupting them is the defect. A truncated residue landing
             # on a zero-mention catalog node merges two catalog entries under a

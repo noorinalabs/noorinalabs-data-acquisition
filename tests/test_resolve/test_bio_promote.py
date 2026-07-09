@@ -712,3 +712,54 @@ def test_cleaner_removed_content_tracks_the_cleaners_own_tokenization() -> None:
         cleaned = clean_narrator_name(normalized)
         assert cleaned is not None, raw
         assert cleaner_removed_content(normalized, cleaned), f"truncation not detected: {raw}"
+
+
+# Verbatim from data/staging/narrators_bio_itqan.parquet (bio_id itqan:12058). The
+# residue `ابو نهشل` is NOT string-equal to the attested `ابي نهشل`, but da#376's
+# inflection fold inside make_canonical_id gives them the same canonical id.
+_ITQAN_12058_TRUNCATION = "أبو نهشل ، عن أبي وائل"
+
+
+def test_truncated_residue_blocked_via_canonical_fold_not_string_equality(tmp_path: Path) -> None:
+    """da#379 × da#376: the guard must key through `make_canonical_id`, not the raw string.
+
+    `ابو نهشل ، عن ابي واءل` truncates at the isnad connective to `ابو نهشل`. The
+    attested narrator is stored as `ابي نهشل` — a DIFFERENT string. Before da#376's
+    fold these were two nodes and the guard had nothing to refuse; after it they are
+    one, and the truncated residue would claim him. A guard that compared normalized
+    names instead of canonical ids would silently pass this through.
+    """
+    from src.parse.identity import make_canonical_id as _mcid
+
+    normalized = normalize_arabic(_ITQAN_12058_TRUNCATION)
+    cleaned = clean_narrator_name(normalized)
+    assert cleaned == "ابو نهشل"
+    assert cleaner_removed_content(normalized, cleaned)
+    # The discriminator: different strings, same identity.
+    assert "ابو نهشل" != "ابي نهشل"
+    assert _mcid("ابو نهشل") == _mcid("ابي نهشل"), "da#376 fold no longer collapses these"
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+    # The attested narrator is registered under the OTHER surface form.
+    attested_id = _write_attested_narrator(out_dir, "ابي نهشل", mentions=8)
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:12058",
+                "source": "itqan",
+                "name_ar": _ITQAN_12058_TRUNCATION,
+                "name_ar_normalized": normalized,
+                "trustworthiness": "thiqa",
+            }
+        ],
+    )
+    rows = pq.read_table(promote_bios_to_canonical(staging, out_dir)).to_pylist()  # type: ignore[arg-type]
+    attested = next(r for r in rows if r["canonical_id"] == attested_id)
+    assert attested["source_ids"] == ["sanadset:1"], "truncated residue claimed him via the fold"
+    assert attested["trustworthiness"] is None
+    assert len(rows) == 1
