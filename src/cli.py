@@ -168,6 +168,7 @@ def _cmd_load(
 ) -> None:
     """Run the Phase 3 graph loading pipeline."""
     import time
+    import traceback
     from pathlib import Path
 
     from src.config import get_settings
@@ -226,18 +227,29 @@ def _cmd_load(
         else _DEFAULT_VALIDATION_TIMEOUT_SECONDS
     )
 
-    with Neo4jClient() as client:
-        summary = load_all(
-            client,
-            staging_dir,
-            curated_dir,
-            queries_dir,
-            strict=False,
-            skip_validation=skip_validation,
-            nodes_only=nodes_only,
-            skip_files=skipped_files if incremental else None,
-            validation_timeout_seconds=timeout_seconds,
+    try:
+        with Neo4jClient() as client:
+            summary = load_all(
+                client,
+                staging_dir,
+                curated_dir,
+                queries_dir,
+                strict=False,
+                skip_validation=skip_validation,
+                nodes_only=nodes_only,
+                skip_files=skipped_files if incremental else None,
+                validation_timeout_seconds=timeout_seconds,
+            )
+    except Exception:
+        # A genuine load failure (da#354). Exits LOAD_FAILED, distinct from the
+        # code used for validation findings, and reaches neither the manifest
+        # write nor the audit entry below -- a load that raised did not happen.
+        traceback.print_exc()
+        print(
+            "\nLOAD FAILED: the graph was not fully written. See traceback above.",
+            file=sys.stderr,
         )
+        sys.exit(ExitCode.LOAD_FAILED)
 
     duration = time.monotonic() - start
 
@@ -277,12 +289,19 @@ def _cmd_load(
             print(f"  [{vr.status}] {vr.query_name}: {vr.details}")
         warned = [vr for vr in summary.validation_results if vr.warning]
         if not summary.validation_passed:
-            # NOT routed here on purpose (da#384 Amendment I). `_cmd_load`'s exit
-            # codes are da#372's diff and its reviewers' verdicts hang on it.
-            # This is a findings condition mis-emitting 1, and da#372 moves it to
-            # ExitCode.VALIDATION_FINDINGS.
-            print("\nWARNING: Some validation checks failed.")
-            sys.exit(1)
+            fatal = [vr for vr in summary.validation_results if vr.is_fatal]
+            # The load is already committed to the graph. Findings are a report
+            # ABOUT that graph, not evidence the write failed -- so they get an
+            # exit code of their own (da#354). main#723 read this rc as a data
+            # defect when the load had succeeded.
+            print(
+                f"\nLOAD SUCCEEDED ({summary.total_nodes} nodes, {summary.total_edges} edges "
+                "written). Validation reported "
+                f"{len(fatal)} finding(s): {', '.join(vr.query_name for vr in fatal)}.\n"
+                f"The load did not fail. Exiting {ExitCode.VALIDATION_FINDINGS.value} "
+                f"(validation findings), not {ExitCode.LOAD_FAILED.value} (load failure)."
+            )
+            sys.exit(ExitCode.VALIDATION_FINDINGS)
         elif warned:
             # Non-fatal: the load succeeded and no check hard-failed; one or more
             # checks were downgraded (e.g. timed out). da#259.
@@ -325,9 +344,14 @@ def _cmd_validate(*, validation_timeout: float | None = None) -> None:
             warned += 1
 
     if any_fatal:
+        fatal_names = ", ".join(vr.query_name for vr in results if vr.is_fatal)
         # `validate` only reads the graph. A finding describes the data; it is
-        # not a failure to run (da#384 §4 / Amendment G).
-        print("\nWARNING: Some validation checks failed.")
+        # not a failure to run (da#384 §4 / Amendment G, da#354).
+        print(
+            f"\nVALIDATION FINDINGS: {fatal_names}.\n"
+            f"This is a report about the graph as it stands, not a load failure — "
+            f"`validate` writes nothing. Exiting {ExitCode.VALIDATION_FINDINGS.value}."
+        )
         sys.exit(ExitCode.VALIDATION_FINDINGS)
     elif warned:
         # Timed-out/downgraded checks are non-fatal (da#259).

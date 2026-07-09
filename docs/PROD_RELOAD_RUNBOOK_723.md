@@ -120,10 +120,20 @@ prod, builds the loader image on the prod host, runs the loader **detached** on
 the `noorinalabs_backend` network, and short-polls to completion (~1 hr, the
 `PARALLEL_OF` edge phase dominates).
 
-**Expected `rc=1` false alarm:** the script reports `LOAD FAILED (rc=1)` because
-the post-load *validation step* returns non-zero on 4 known-benign flags — the
-LOAD itself succeeds. Confirm via the Load Summary line: `total_nodes≈1,665,760`,
-`total_errors=0`. The 4 flags and why they're benign:
+**Historical `rc=1` false alarm — fixed by da#354.** `load` used to exit `1`
+both when the load genuinely failed and when the load succeeded but post-load
+validation reported findings, so `rc=1` was indistinguishable from a real
+failure. The exit codes are now separate:
+
+| rc | meaning |
+|----|---------|
+| `0` | load succeeded, validation clean (warnings allowed) |
+| `1` | **the load failed** — the graph was not fully written |
+| `4` | **the load succeeded**, validation reported findings |
+
+An `rc=4` prints `LOAD SUCCEEDED (… nodes, … edges written)` first. Below is
+the historical reading of the old conflated `rc=1`; confirm via the Load Summary
+line: `total_nodes≈1,665,760`, `total_errors=0`. The 4 flags and why they're benign:
 - `chain_integrity: 100 cycle(s)` — pre-existing, tracked da#248.
 - `graph_integrity_deferred_inventory` / `sanadset_orphan_inventory: query
   execution failed` — validation harness runs multi-statement `.cypher` as one
