@@ -76,7 +76,20 @@ class LoadResult:
     # is the whole point: ``skipped`` meant three things at once, which is how
     # 650,986 absent hadiths hid behind it.
     malformed_ids: int = 0  # source_id violates the id grammar
-    invalid_source_ids: int = 0  # source_id absent, blank, or not a string
+    # In production this counts a BLANK ``source_id``, and only that. The guard
+    # is ``not sid or not isinstance(sid, str)``, but ``HADITH_SCHEMA`` declares
+    # ``source_id`` as ``string not null``, so through a conformant parquet the
+    # column yields only ``str`` -- the ``None`` and non-``str`` arms cannot fire.
+    # They stay as defence against a non-conformant file. Do not go looking for a
+    # null the schema already forbids.
+    #
+    # Note for future fixtures: ``pa.table(..., schema=...)`` ACCEPTS a null into
+    # a non-nullable field, and ``table.validate(full=True)`` passes it. Only
+    # ``pq.write_table`` and ``Table.cast`` reject it. A test that builds a table
+    # in memory and hands it straight to a loader would therefore exercise a
+    # branch production cannot reach -- a green test for an unreachable state,
+    # the mirror image of an assertion that can never go red.
+    invalid_source_ids: int = 0  # source_id blank (or, defensively, absent/non-str)
 
     @property
     def refused(self) -> int:

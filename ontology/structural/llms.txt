@@ -458,24 +458,24 @@ imports: __future__, collections.abc, dataclasses, pathlib, typing, pyarrow.parq
 Neo4j node loading for all graph node types.
 imports: __future__, dataclasses, pathlib, typing, pyarrow.parquet, yaml, src.parse.composition, src.parse.identity, src.utils.arabic, src.utils.grade, src.utils.logging, src.utils.neo4j_client
 - class LoadResult @60
-  - method refused(self) @82
-- func _parquet_files(directory, prefix) @98
-- func _read_parquet_rows(path) @103
-- func _read_parquet_columns(path, columns) @110
-- func _val(row, key, default) @122
-- func _effective_matn_ar(row) @128
-- func _build_curated_identity_index(files) @147
-- func _narrator_name_en(row) @172
-- func _load_narrators(client, staging_dir, curated_dir, strict, skip_files) @222
-- func _load_hadiths(client, staging_dir, strict, skip_files) @324
-- func _load_collections(client, staging_dir, strict, skip_files) @469
-- func _load_chains(client, staging_dir, curated_dir, strict, skip_files) @555
-- func _load_gradings(client, staging_dir, strict, skip_files) @672
-- func _load_historical_events(client, curated_dir, strict) @779
-- func _load_locations(client, curated_dir, strict) @851
-- func _should_skip_file(path, staging_dir, skip_files) @901
-- func _filter_parquet_files(files, staging_dir, skip_files) @913
-- func load_all_nodes(client, staging_dir, curated_dir, strict, skip_files) @922
+  - method refused(self) @95
+- func _parquet_files(directory, prefix) @111
+- func _read_parquet_rows(path) @116
+- func _read_parquet_columns(path, columns) @123
+- func _val(row, key, default) @135
+- func _effective_matn_ar(row) @141
+- func _build_curated_identity_index(files) @160
+- func _narrator_name_en(row) @185
+- func _load_narrators(client, staging_dir, curated_dir, strict, skip_files) @235
+- func _load_hadiths(client, staging_dir, strict, skip_files) @337
+- func _load_collections(client, staging_dir, strict, skip_files) @482
+- func _load_chains(client, staging_dir, curated_dir, strict, skip_files) @568
+- func _load_gradings(client, staging_dir, strict, skip_files) @685
+- func _load_historical_events(client, curated_dir, strict) @792
+- func _load_locations(client, curated_dir, strict) @864
+- func _should_skip_file(path, staging_dir, skip_files) @914
+- func _filter_parquet_files(files, staging_dir, skip_files) @926
+- func load_all_nodes(client, staging_dir, curated_dir, strict, skip_files) @935
 
 ## src/graph/migrate.py [python]
 In-place remediation of ``TRANSMITTED_TO.hadith_id`` → canonical ids (da#325).
