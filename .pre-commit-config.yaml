@@ -154,7 +154,12 @@ repos:
         entry: python3 scripts/structural_ontology.py check
         language: system
         pass_filenames: false
-        files: ^(src/.*\.py|scripts/structural_ontology\.py|ontology/structural/.*)$
+        # Must match EVERY path the generator indexes, not just src/. It indexes
+        # tests/ (127 sections), src/ (98), scripts/ (10), queries/ (7) and
+        # .claude/ (6) — .py and .cypher. A narrower filter skips the hook locally
+        # on a tests-only commit while CI's whole-tree check still fails: a
+        # local⇄CI parity hole (noorinalabs-main#684). Observed on PR #362.
+        files: ^((src|tests|scripts|queries|\.claude)/.*\.(py|cypher)|ontology/structural/.*)$
         stages: [pre-commit]
 
   # --- Heavier checks run at pre-push (mirror CI's Type Check + Test jobs).
