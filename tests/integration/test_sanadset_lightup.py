@@ -38,19 +38,23 @@ from src.resolve import disambiguate, ner
 
 # A NAR-tagged sanadset CSV. The narrator names below are mirrored exactly in the
 # bio CSV so disambiguation resolves them via the deterministic exact-match stage.
+_BOOK_BUKHARI = "صحيح البخاري"
+_BOOK_MUSLIM = "صحيح مسلم"
 _SANADSET_CSV = (
-    "hadith_id,book_id,hadith,grade\n"
-    '1,1,"<SANAD><NAR>مالك بن أنس</NAR> عن <NAR>أبو هريرة</NAR></SANAD>'
-    '<MATN>إنما الأعمال بالنيات</MATN>",Sahih\n'
-    '2,1,"<SANAD><NAR>مالك بن أنس</NAR> عن <NAR>أنس بن مالك</NAR></SANAD>'
-    '<MATN>لا ضرر ولا ضرار</MATN>",Hasan\n'
-    '3,2,"<SANAD>No SANAD</SANAD><MATN>بعض المتن هنا</MATN>",\n'
+    "Hadith,Book,Num_hadith,grade\n"
+    '"<SANAD><NAR>مالك بن أنس</NAR> عن <NAR>أبو هريرة</NAR></SANAD>'
+    f'<MATN>إنما الأعمال بالنيات</MATN>",{_BOOK_BUKHARI},1,Sahih\n'
+    '"<SANAD><NAR>مالك بن أنس</NAR> عن <NAR>أنس بن مالك</NAR></SANAD>'
+    f'<MATN>لا ضرر ولا ضرار</MATN>",{_BOOK_BUKHARI},2,Hasan\n'
+    f'"<SANAD>No SANAD</SANAD><MATN>بعض المتن هنا</MATN>",{_BOOK_MUSLIM},1,\n'
 )
 
 # Bios whose names match the NAR mentions above (exact-match → resolved narrator).
 _BIOS_CSV = "name,death_year\nمالك بن أنس,179\nأبو هريرة,59\nأنس بن مالك,93\n"
 
 _EXPECTED_HADITHS = 3
+# One Collection per distinct ``Book`` name: البخاري (rows 1-2) and مسلم (row 3).
+_EXPECTED_COLLECTIONS = 2
 
 
 @pytest.fixture
@@ -134,13 +138,19 @@ class TestSanadsetLightupLive:
         assert all(h["id"].startswith("hdt:sanadset:") for h in hadiths)
         assert not any(h["id"].startswith("hdt:sanadset:sanadset:") for h in hadiths)
 
-        # 3. Collection node + APPEARS_IN edges landed with correct tagging.
+        # 3. Collection nodes + APPEARS_IN edges landed with correct tagging.
+        # ONE Collection PER BOOK (da#353): the join key is each hadith row's own
+        # ``Book`` name-digest, so البخاري and مسلم are distinct collections. This
+        # previously asserted a single Collection — but only because the fixture
+        # carried no ``Book`` column, so every row fell back to the CSV stem
+        # ("bukhari") and collapsed into one. The old assertion was passing
+        # through the fallback, not through the name join it claimed to exercise.
         collections = neo4j_client.execute_read(
             "MATCH (c:Collection) RETURN c.sect AS sect, c.source_corpus AS source_corpus"
         )
-        assert len(collections) == 1
-        assert collections[0]["sect"] == "sunni"
-        assert collections[0]["source_corpus"] == "sanadset"
+        assert len(collections) == _EXPECTED_COLLECTIONS
+        assert all(c["sect"] == "sunni" for c in collections)
+        assert all(c["source_corpus"] == "sanadset" for c in collections)
 
         appears_in = neo4j_client.execute_read(
             "MATCH (:Hadith)-[r:APPEARS_IN]->(:Collection) RETURN count(r) AS n"

@@ -281,34 +281,41 @@ def sample_lk_csv(tmp_raw_dir: Path) -> Path:
 
 @pytest.fixture
 def sample_sanadset_csv(tmp_raw_dir: Path) -> Path:
-    """Write a mock Sanadset CSV with NAR tags, return the file path."""
+    """Write a mock Sanadset CSV with NAR tags, return the file path.
+
+    Header and filename mirror production exactly: ``sanadset.csv`` with
+    ``Hadith,Book,Num_hadith`` — ``Book`` is the book's Arabic NAME (the
+    collection join key) and ``Num_hadith`` an in-book ordinal that repeats
+    across books. The former synthetic ``hadith_id,book_id,hadith`` header
+    exists in no edition of the corpus (da#353).
+    """
     sanadset_dir = tmp_raw_dir / "sanadset"
     sanadset_dir.mkdir(parents=True, exist_ok=True)
 
-    header = "hadith_id,book_id,hadith,grade"
+    header = "Hadith,Book,Num_hadith,grade"
     rows = [
         (
-            "1",
-            "1",
             "<SANAD><NAR>محمد</NAR> عن <NAR>علي</NAR></SANAD><MATN>متن</MATN>",
+            "صحيح البخاري",
+            "1",
             "Sahih",
         ),
         (
-            "2",
-            "1",
             "<SANAD><NAR>أنس</NAR> عن <NAR>مالك</NAR></SANAD><MATN>متن ثاني</MATN>",
+            "صحيح البخاري",
+            "2",
             "Hasan",
         ),
         (
-            "3",
-            "2",
             "<SANAD>No SANAD</SANAD><MATN>متن ثالث</MATN>",
+            "صحيح مسلم",
+            "1",
             "",
         ),
     ]
     lines = [header]
     for r in rows:
-        lines.append(f'{r[0]},{r[1]},"{r[2]}",{r[3]}')
-    csv_path = sanadset_dir / "hadiths.csv"
+        lines.append(f'"{r[0]}",{r[1]},{r[2]},{r[3]}')
+    csv_path = sanadset_dir / "sanadset.csv"
     csv_path.write_text("\n".join(lines), encoding="utf-8")
     return csv_path

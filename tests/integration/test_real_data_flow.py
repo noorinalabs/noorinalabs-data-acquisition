@@ -59,17 +59,23 @@ def _create_sample_lk_csv(directory: Path) -> Path:
 
 
 def _create_sample_sanadset_csv(directory: Path) -> Path:
-    """Create a minimal Sanadset-format CSV for testing."""
+    """Create a minimal Sanadset-format CSV for testing.
+
+    Real production header — ``Hadith,Book,Num_hadith`` — where ``Book`` is the
+    book's Arabic NAME (the collection join key), not an int id. The former
+    ``hadith_id,book_id,hadith`` header exists in no edition of the corpus
+    (da#353), and carried no ``Book`` column at all.
+    """
     sanadset_dir = directory / "sanadset"
     sanadset_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = sanadset_dir / "sample_collection.csv"
+    csv_path = sanadset_dir / "sanadset.csv"
     csv_path.write_text(
-        "hadith_id,book_id,hadith,grade\n"
-        '1,1,"<SANAD>حدثنا <NAR>عبد الله بن يوسف</NAR> عن <NAR>مالك</NAR></SANAD>'
-        '<MATN>أن رسول الله صلى الله عليه وسلم قال</MATN>",صحيح\n'
-        '2,1,"<SANAD>حدثنا <NAR>أحمد بن حنبل</NAR> عن <NAR>سفيان</NAR></SANAD>'
-        '<MATN>قال رسول الله صلى الله عليه وسلم</MATN>",حسن\n'
-        '3,1,"<SANAD>No SANAD</SANAD><MATN>قال النبي</MATN>",ضعيف\n',
+        "Hadith,Book,Num_hadith,grade\n"
+        '"<SANAD>حدثنا <NAR>عبد الله بن يوسف</NAR> عن <NAR>مالك</NAR></SANAD>'
+        '<MATN>أن رسول الله صلى الله عليه وسلم قال</MATN>",صحيح البخاري,1,صحيح\n'
+        '"<SANAD>حدثنا <NAR>أحمد بن حنبل</NAR> عن <NAR>سفيان</NAR></SANAD>'
+        '<MATN>قال رسول الله صلى الله عليه وسلم</MATN>",صحيح البخاري,2,حسن\n'
+        '"<SANAD>No SANAD</SANAD><MATN>قال النبي</MATN>",صحيح مسلم,1,ضعيف\n',
         encoding="utf-8",
     )
     return csv_path

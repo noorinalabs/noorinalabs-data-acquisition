@@ -1393,19 +1393,19 @@ Real data flow integration tests.
 imports: __future__, pathlib, pyarrow.parquet, pytest, src.parse, src.parse.schemas, src.parse.validate
 - func _create_sample_lk_csv(directory) @22
 - func _create_sample_sanadset_csv(directory) @61
-- class TestRealDataFlow @79
-  - method test_parse_sample_lk_data(self, tmp_path) @82
-  - method test_parse_sample_sanadset_data(self, tmp_path) @104
-  - method test_staging_validation_on_parsed_data(self, tmp_path) @126
-  - method test_full_pipeline_sample(self, tmp_path, neo4j_client) @145
+- class TestRealDataFlow @85
+  - method test_parse_sample_lk_data(self, tmp_path) @88
+  - method test_parse_sample_sanadset_data(self, tmp_path) @110
+  - method test_staging_validation_on_parsed_data(self, tmp_path) @132
+  - method test_full_pipeline_sample(self, tmp_path, neo4j_client) @151
 
 ## tests/integration/test_sanadset_lightup.py [python]
 Live-Neo4j end-to-end light-up for the sanadset narrator keystone (da#89).
 imports: __future__, shutil, pathlib, pyarrow.parquet, pytest, src.graph.load_edges, src.graph.load_nodes, src.parse, src.resolve
-- func sources(tmp_path) @57
-- func _mkdir(p) @72
-- class TestSanadsetLightupLive @78
-  - method test_sanadset_narrators_and_hadiths_land_in_graph(self, neo4j_client, sources) @79
+- func sources(tmp_path) @61
+- func _mkdir(p) @76
+- class TestSanadsetLightupLive @82
+  - method test_sanadset_narrators_and_hadiths_land_in_graph(self, neo4j_client, sources) @83
 
 ## tests/integration/test_source_id_collision.py [python]
 Live-Neo4j collision-safety proof for the canonical source_id scheme (da#82).
