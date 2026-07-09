@@ -8,12 +8,18 @@ from unittest.mock import patch
 
 import pyarrow.parquet as pq
 
-from src.parse.identity import collection_node_id
-from src.parse.sanadset import parse_sanadset
+from src.parse.identity import collection_node_id, is_double_prefixed
+from src.parse.sanadset import _book_key, parse_sanadset
 from src.parse.schemas import COLLECTION_SCHEMA, HADITH_SCHEMA, NARRATOR_MENTION_SCHEMA
 
-# books.csv mapping the two book_ids used by ``_make_sanadset_csv`` to collections.
-_BOOKS_CSV = "book_id,name,author\n1,صحيح البخاري,البخاري\n2,صحيح مسلم,مسلم\n"
+# Book names shared by the mock hadith rows and ``_BOOKS_CSV`` so the name→book_key
+# join resolves — mirrors the real corpus, where books.csv and the hadith CSV both
+# cite a book by its Arabic NAME, not an id (da#353).
+_BOOK_BUKHARI = "صحيح البخاري"
+_BOOK_MUSLIM = "صحيح مسلم"
+
+# books.csv is a NAME-ONLY list in production (a single ``Book`` column, no id).
+_BOOKS_CSV = f"Book\n{_BOOK_BUKHARI}\n{_BOOK_MUSLIM}\n"
 
 
 def _appears_in_collection_id(hadith_row: dict[str, object]) -> str:
@@ -29,34 +35,40 @@ def _appears_in_collection_id(hadith_row: dict[str, object]) -> str:
 
 
 def _make_sanadset_csv(path: Path) -> Path:
-    """Write a mock Sanadset CSV with NAR-tagged rows and a 'No SANAD' row."""
-    header = "hadith_id,book_id,hadith,grade"
+    """Write a mock Sanadset CSV mirroring the real header (da#353).
+
+    Real header: ``Hadith,Book,Num_hadith,Matn,Sanad,Sanad_Length`` — ``Book`` is
+    the book's Arabic NAME (not an int id) and ``Num_hadith`` the in-book citation
+    ordinal. A ``grade`` column is appended for the grade path. Rows 1-2 share the
+    البخاري book, row 3 (No SANAD) is in مسلم.
+    """
+    header = "Hadith,Book,Num_hadith,grade"
     rows = [
         (
-            "1",
-            "1",
             "<SANAD><NAR>محمد بن عبدالله</NAR> عن <NAR>علي بن أبي طالب</NAR></SANAD>"
             "<MATN>إنما الأعمال بالنيات</MATN>",
+            _BOOK_BUKHARI,
+            "1",
             "Sahih",
         ),
         (
-            "2",
-            "1",
             "<SANAD><NAR>أبو هريرة</NAR> عن <NAR>أنس بن مالك</NAR> عن "
             "<NAR>مالك بن أنس</NAR></SANAD><MATN>لا ضرر ولا ضرار</MATN>",
+            _BOOK_BUKHARI,
+            "2",
             "Hasan",
         ),
         (
-            "3",
-            "2",
             "<SANAD>No SANAD</SANAD><MATN>بعض المتن هنا</MATN>",
+            _BOOK_MUSLIM,
+            "3",
             "",
         ),
     ]
     lines = [header]
     for r in rows:
-        # Quote the hadith field to handle embedded commas
-        lines.append(f'{r[0]},{r[1]},"{r[2]}",{r[3]}')
+        # Quote the hadith field to handle embedded commas.
+        lines.append(f'"{r[0]}",{r[1]},{r[2]},{r[3]}')
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
 
@@ -234,7 +246,7 @@ class TestSanadsetCollections:
         assert row["total_hadiths"] == 3
 
     def test_collections_from_books_csv(self, tmp_path: Path) -> None:
-        """books.csv present → one Collection per book_id, named from books.csv."""
+        """books.csv present → one Collection per book NAME (da#353 name-keyed join)."""
         raw_dir = tmp_path / "raw" / "sanadset"
         raw_dir.mkdir(parents=True)
         staging_dir = tmp_path / "staging"
@@ -246,18 +258,21 @@ class TestSanadsetCollections:
         # books.csv must NOT be parsed as hadiths — still exactly 3 hadiths.
         hadiths = pq.read_table(staging_dir / "hadiths_sanadset.parquet").to_pylist()
         assert len(hadiths) == 3
-        # collection_name is now the book_id (per-book breadth), not the CSV stem.
-        assert sorted(h["collection_name"] for h in hadiths) == ["1", "1", "2"]
+        # collection_name is now the book NAME digest (per-book breadth), not the
+        # CSV stem and not a positional book_id.
+        key_b, key_m = _book_key(_BOOK_BUKHARI), _book_key(_BOOK_MUSLIM)
+        assert sorted(h["collection_name"] for h in hadiths) == sorted([key_b, key_b, key_m])
 
         assert "collections" in outputs
         collections = pq.read_table(staging_dir / "collections_sanadset.parquet").to_pylist()
         by_id = {c["collection_id"]: c for c in collections}
-        assert set(by_id) == {"sanadset:1", "sanadset:2"}
-        # Book metadata flows from books.csv onto the Collection node.
-        assert by_id["sanadset:1"]["name_ar"] == "صحيح البخاري"
-        assert by_id["sanadset:1"]["compiler_name"] == "البخاري"
-        assert by_id["sanadset:1"]["total_hadiths"] == 2  # book_id 1 has 2 hadiths
-        assert by_id["sanadset:2"]["total_hadiths"] == 1
+        assert set(by_id) == {f"sanadset:{key_b}", f"sanadset:{key_m}"}
+        # The Arabic book name flows from books.csv onto the Collection node.
+        assert by_id[f"sanadset:{key_b}"]["name_ar"] == _BOOK_BUKHARI
+        assert by_id[f"sanadset:{key_m}"]["name_ar"] == _BOOK_MUSLIM
+        # total_hadiths reflects what was parsed (البخاري has 2 rows, مسلم has 1).
+        assert by_id[f"sanadset:{key_b}"]["total_hadiths"] == 2
+        assert by_id[f"sanadset:{key_m}"]["total_hadiths"] == 1
         assert all(c["sect"] == "sunni" and c["source_corpus"] == "sanadset" for c in collections)
 
     def test_emitted_collections_cover_every_appears_in_endpoint(self, tmp_path: Path) -> None:
@@ -473,3 +488,106 @@ class TestMatnMarkupStrip:
         assert _strip_structural_tags(None) is None
         # An all-markup string collapses to None (mirrors _extract_tag's empty rule).
         assert _strip_structural_tags("<MATN></MATN>") is None
+
+
+class TestSanadsetColumnMapping:
+    """da#353: name-keyed books join, populated hadith_number, stable content id.
+
+    The Sanadset parser previously looked for ``hadith_id``/``book_id`` columns that
+    do not exist in the real CSV (whose header is ``Hadith,Book,Num_hadith,Matn,
+    Sanad,Sanad_Length``), nulling ``hadith_number`` and collapsing all 650,986 rows
+    into one collection with a positional, re-acquisition-unstable source_id.
+    """
+
+    def _parse(self, tmp_path: Path) -> Path:
+        raw_dir = tmp_path / "raw" / "sanadset"
+        raw_dir.mkdir(parents=True)
+        staging_dir = tmp_path / "staging"
+        _make_sanadset_csv(raw_dir / "sanadset.csv")
+        (raw_dir / "books.csv").write_text(_BOOKS_CSV, encoding="utf-8")
+        parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
+        return staging_dir
+
+    def test_name_keyed_join_one_collection_per_distinct_book(self, tmp_path: Path) -> None:
+        """N distinct book names → N Collection nodes (the da#219 breadth, now real)."""
+        raw_dir = tmp_path / "raw" / "sanadset"
+        raw_dir.mkdir(parents=True)
+        staging_dir = tmp_path / "staging"
+        names = ["كتاب الأول", "كتاب الثاني", "كتاب الثالث", "كتاب الرابع", "كتاب الخامس"]
+        lines = ["Hadith,Book,Num_hadith"]
+        for i, nm in enumerate(names, start=1):
+            lines.append(f'"<SANAD><NAR>راوي {i}</NAR></SANAD><MATN>متن {i}</MATN>",{nm},{i}')
+        (raw_dir / "sanadset.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        (raw_dir / "books.csv").write_text("Book\n" + "\n".join(names) + "\n", encoding="utf-8")
+
+        parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
+
+        collections = pq.read_table(staging_dir / "collections_sanadset.parquet").to_pylist()
+        assert len(collections) == len(names)
+        by_id = {c["collection_id"]: c for c in collections}
+        assert set(by_id) == {f"sanadset:{_book_key(nm)}" for nm in names}
+        assert {c["name_ar"] for c in collections} == set(names)
+
+    def test_hadith_number_populated(self, tmp_path: Path) -> None:
+        table = pq.read_table(self._parse(tmp_path) / "hadiths_sanadset.parquet")
+        hnums = table.column("hadith_number").to_pylist()
+        # Every row carries its Num_hadith — none null (the 76%-null defect gone).
+        assert hnums == [1, 2, 3]
+        assert all(n is not None for n in hnums)
+
+    def test_no_double_corpus_source_ids(self, tmp_path: Path) -> None:
+        sids = (
+            pq.read_table(self._parse(tmp_path) / "hadiths_sanadset.parquet")
+            .column("source_id")
+            .to_pylist()
+        )
+        for sid in sids:
+            # The collection segment is a name-digest, never "sanadset", so nothing
+            # looks double-prefixed and _collapse_double_corpus never fires.
+            assert not sid.startswith("sanadset:sanadset:"), sid
+            assert not is_double_prefixed(sid), sid
+
+    def _sid_for(self, tmp_path: Path, hadith_csv: str, book_name: str, num: int) -> str:
+        raw_dir = tmp_path / "raw" / "sanadset"
+        raw_dir.mkdir(parents=True)
+        staging_dir = tmp_path / "staging"
+        (raw_dir / "sanadset.csv").write_text(hadith_csv, encoding="utf-8")
+        (raw_dir / "books.csv").write_text(_BOOKS_CSV, encoding="utf-8")
+        parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
+        rows = pq.read_table(staging_dir / "hadiths_sanadset.parquet").to_pylist()
+        (row,) = [
+            r
+            for r in rows
+            if r["collection_name"] == _book_key(book_name) and r["hadith_number"] == num
+        ]
+        return str(row["source_id"])
+
+    def test_source_id_stable_under_row_insertion(self, tmp_path: Path) -> None:
+        """A fixed (Book, Num_hadith) keeps a byte-identical source_id when an
+        unrelated row is inserted ahead of it — the determinism contract da#353
+        restores (the old row-offset id re-keyed every following hadith)."""
+        header = "Hadith,Book,Num_hadith"
+        target = f'"<SANAD><NAR>مالك</NAR></SANAD><MATN>متن الهدف</MATN>",{_BOOK_MUSLIM},7'
+        inserted = f'"<SANAD><NAR>أنس</NAR></SANAD><MATN>متن مقحم</MATN>",{_BOOK_BUKHARI},99'
+        csv_a = header + "\n" + target + "\n"
+        csv_b = header + "\n" + inserted + "\n" + target + "\n"
+
+        sid_a = self._sid_for(tmp_path / "a", csv_a, _BOOK_MUSLIM, 7)
+        sid_b = self._sid_for(tmp_path / "b", csv_b, _BOOK_MUSLIM, 7)
+        assert sid_a == sid_b
+        assert sid_a == f"sanadset:{_book_key(_BOOK_MUSLIM)}:7"
+
+    def test_present_but_unmappable_books_raises(self, tmp_path: Path) -> None:
+        """A present books.csv with no resolvable name column raises (da#353 item 4):
+        a dead join key must fail loudly, not silently disable per-book breadth."""
+        import pytest
+
+        raw_dir = tmp_path / "raw" / "sanadset"
+        raw_dir.mkdir(parents=True)
+        staging_dir = tmp_path / "staging"
+        _make_sanadset_csv(raw_dir / "sanadset.csv")
+        # An id-only books.csv — no name column at all.
+        (raw_dir / "books.csv").write_text("serial\n1\n2\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="book-name column"):
+            parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
