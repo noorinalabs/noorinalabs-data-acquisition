@@ -1,32 +1,41 @@
-// da#248 — TRANSMITTED_TO cycle offenders, ranked by anchor canonical node.
+// da#248/da#250 — over-merge offenders, ranked by reciprocal-partner count.
 //
 // DIAGNOSTIC, not a validation gate. This file lives under queries/analysis/ (NOT
 // queries/validation/) on purpose: src.graph.validate.run_validation globs only
-// queries/validation/*.cypher and classifies any non-empty result as a FAILING
-// check. A ranking query is *expected* to return rows, so it must stay out of that
-// directory — it never degrades the shipped chain_integrity.cypher guard, it only
-// quantifies what that guard caps at LIMIT 100.
+// queries/validation/*.cypher. A ranking query is *expected* to return rows.
 //
 // READ-ONLY: a single MATCH/WITH/RETURN — no writes, deletes, or fabrication.
 //
-// What it answers (da#248 acceptance item 1):
-//   * Uncapped cycle total — sum(cycle_count) over all returned rows is the TRUE
-//     cycle count that chain_integrity.cypher truncates at 100.
-//   * Worst offenders — cycles grouped by the canonical Narrator node that anchors
-//     them (the n where n = m closes the loop), ranked descending. A common,
-//     under-disambiguated mononym (e.g. سفيان "Sufyan", which merges Sufyān
-//     al-Thawrī and Sufyān ibn ʿUyayna into one node) surfaces at the top because
-//     its single over-merged node back-edges into itself across generations.
+// TERMINATION — the point of the rewrite:
+//   The previous form was `MATCH path = (n:Narrator)-[:TRANSMITTED_TO*1..20]->(n)`
+//   with no LIMIT, and it does not terminate on this graph. Not at *1..20, and not
+//   even at *1..2, which was killed at 150s having emitted no rows at all. It was
+//   therefore unrunnable, and the "uncapped cycle total" its header promised was
+//   never obtainable from it. Replaced below by a degree-bounded formulation over
+//   reciprocal (length-2) cycles, which completes in ~110s at full stg scale.
 //
-// Cost note: bounded variable-length cycle detection (*1..20) over the full
-// narrator graph is expensive. Run it as an offline diagnostic against a loaded
-// graph (staging/prod reload), not on a hot path. The *1..20 bound mirrors the
-// shipped chain_integrity.cypher so the two count the same population.
-MATCH path = (n:Narrator)-[:TRANSMITTED_TO*1..20]->(n)
-WITH n, count(path) AS cycle_count
+// WHAT IT ANSWERS:
+//   Which canonical Narrator nodes sit in the most reciprocal pairs — i.e. which
+//   identities were collapsed hardest. "A taught B and B taught A" is historically
+//   impossible, so a high `reciprocal_partners` marks one node standing in for
+//   several distinct men. Bare mononyms dominate: measured on stg 2026-07-09 the
+//   head was عبد الله (829), سفيان (422), محمد (419), شعبة (360). The single سفيان
+//   node merges Sufyān al-Thawrī (d. 161 AH, Kufa) with Sufyān ibn ʿUyayna
+//   (d. 198 AH, Mecca) — two men a generation apart. See src/resolve/mononym_split.py
+//   and da#356.
+//
+// The LIMIT below is a RANKING HEAD, not a population count: it caps how many
+// offenders are displayed, and no total is derived from it. For the population use
+// queries/validation/chain_integrity.cypher, which counts exactly and without a
+// LIMIT (23,139 reciprocal pairs over 5,803 narrators as of 2026-07-09).
+MATCH (n:Narrator)-[:TRANSMITTED_TO]->(m:Narrator)
+WHERE n.id <> m.id AND EXISTS { MATCH (m)-[:TRANSMITTED_TO]->(n) }
+WITH n, count(DISTINCT m.id) AS reciprocal_partners
 RETURN n.id                 AS canonical_id,
        n.name_ar            AS name_ar,
        n.name_ar_normalized AS name_ar_normalized,
        n.generation         AS generation,
-       cycle_count
-ORDER BY cycle_count DESC, canonical_id ASC
+       n.mention_count      AS mention_count,
+       reciprocal_partners
+ORDER BY reciprocal_partners DESC, canonical_id ASC
+LIMIT 200
