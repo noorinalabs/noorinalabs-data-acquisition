@@ -47,7 +47,7 @@ from src.resolve.sect_affiliation import (
     normalize_corpus,
     primary_corpus,
 )
-from src.utils.arabic import normalize_arabic
+from src.utils.arabic import canonical_surface, normalize_arabic
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -464,7 +464,11 @@ def _load_candidates(staging_dir: Path) -> list[Candidate]:
             name_ar = safe_str(table.column("name_ar")[i].as_py())
             name_ar_norm = safe_str(table.column("name_ar_normalized")[i].as_py())
             if not name_ar_norm and name_ar:
-                name_ar_norm = normalize_arabic(name_ar)
+                name_ar_norm = name_ar
+            # da#376: the bio's key must live in the SAME identity surface the mention
+            # key does, or Stage 1 can never exact-match across an inflection (and the
+            # da#371 provenance drift leaves un-normalized bio keys nothing can match).
+            name_ar_norm = canonical_surface(name_ar_norm) if name_ar_norm else None
 
             candidates.append(
                 Candidate(
@@ -894,6 +898,9 @@ def _build_canonical_table(
             [r.get("source_ids") or [] for r in rows], type=pa.list_(pa.string())
         ),
         "external_id": pa.array([r.get("external_id") for r in rows], type=pa.string()),
+        "death_year_provenance": pa.array(
+            [r.get("death_year_provenance") for r in rows], type=pa.string()
+        ),
         "mention_count": pa.array([r.get("mention_count", 0) for r in rows], type=pa.int32()),
         # Sect/corpus provenance finalized from the accumulated corpora set (da#103).
         "source_corpus": pa.array([primary_corpus(_corpora(r)) for r in rows], type=pa.string()),
@@ -946,6 +953,7 @@ def _upsert_canonical(
     candidate: Candidate | None,
     corpus: str | None = None,
     bio_alias: str | None = None,
+    death_year_provenance: str | None = None,
 ) -> None:
     """Create or merge the canonical narrator record for *canonical_id*.
 
@@ -982,6 +990,7 @@ def _upsert_canonical(
             "trustworthiness": None,
             "source_ids": [],
             "external_id": None,
+            "death_year_provenance": None,
             "mention_count": 0,
             # Corpora this canonical narrator has been observed in (da#103). The
             # scalar ``source_corpus`` + derived ``sect_affiliation`` are finalized
@@ -1017,6 +1026,11 @@ def _upsert_canonical(
         ):
             if rec.get(field_name) is None and value is not None:
                 rec[field_name] = value
+        # Provenance travels with the year it describes: set it exactly when this call
+        # is the one that fills `death_year_ah`, never retroactively over another bio's.
+        if rec.get("death_year_provenance") is None and rec.get("death_year_ah") is not None:
+            rec["death_year_provenance"] = death_year_provenance
+
         src_ids = rec.get("source_ids")
         if isinstance(src_ids, list) and candidate.bio_id and candidate.bio_id not in src_ids:
             src_ids.append(candidate.bio_id)
@@ -1294,21 +1308,37 @@ def run(
             hadith_id = str(mention.get("hadith_id", ""))
             position = int(mention.get("position_in_chain") or 0)
 
-            # da#356 — ONE identity source. The canonical id and the display name
-            # are a pure function of the MENTION's normalized form; a bio candidate
-            # may only enrich. `normalize_arabic` is applied here rather than trusting
-            # the stored `name_normalized` so the id keys on the very surface the
-            # matcher compared, and so a non-idempotent stored form (bidi marks that
-            # `normalize_arabic` strips) cannot mint two ids for one name.
-            mention_norm = normalize_arabic(mention_text)
+            # da#356 — ONE identity source. The canonical id and the display name are a
+            # pure function of the MENTION's surface; a bio candidate may only enrich.
+            #
+            # da#376 — that surface is `canonical_surface`, not bare `normalize_arabic`.
+            # It is re-derived here rather than trusting the stored `name_normalized`
+            # (which da#371 shows is written by a *different* function), so the id keys
+            # on the very surface the matcher compared. And it folds the Arabic case
+            # endings that `normalize_arabic` leaves alone: without it, de-keying from
+            # the bio mints `ابي هريره` / `ابا هريره` / `ابو هريره` as three Abū
+            # Hurayras, and `fuzzy_cluster` cannot repair a name with fewer than two
+            # significant tokens — it generates no blocking key and is never scored.
+            mention_norm = canonical_surface(mention_text)
             adjacent = _adjacent_death_years(death_year_index, hadith_id, position)
 
-            # A confident match may attach metadata only if it is also corroborated.
+            # da#356/da#376 — corroboration gates the IDENTITY FEEDBACK LOOP, not the
+            # data. A confidently-matched bio's metadata is persisted either way, tagged
+            # with its provenance; only a *corroborated* year is allowed to re-enter
+            # `death_year_index`, which feeds `_temporal_filter` for chain neighbours and
+            # `refine_mononym_name`'s da#248 evidence.
+            #
+            # Dropping the year outright (the first cut of this gate) was worse than
+            # keeping it: `fuzzy_cluster._death_years_conflict` returns False when EITHER
+            # year is None, so a missing year makes a merge *permitted*. Withholding the
+            # year therefore disarmed the very precision guard the clustering pass we now
+            # depend on uses to keep two different men apart.
             attached: Candidate | None = None
+            corroborated = False
             if best and best.score >= _CONFIDENCE_THRESHOLD:
-                if _bio_corroborated(best, mention_norm, adjacent):
-                    attached = best.candidate
-                else:
+                attached = best.candidate
+                corroborated = _bio_corroborated(best, mention_norm, adjacent)
+                if not corroborated:
                     gate_rejected += 1
 
             if mention_norm:
@@ -1328,6 +1358,7 @@ def run(
                     name_ar: str | None = person.name_ar
                     name_en: str | None = None
                     attached = None
+                    corroborated = False
                 else:
                     norm_name = mention_norm
                     name_ar = str(mention.get("name_raw") or "") or mention_text
@@ -1348,10 +1379,12 @@ def run(
                 # mis-select among genuinely-distinct persons. The registry carries no
                 # per-person location, so a split contributes no geographic signal.
                 # An UNCORROBORATED bio contributes neither (da#356): its year would
-                # poison the temporal filter and the da#248 evidence downstream.
+                # poison the temporal filter and the da#248 evidence downstream. The year
+                # is still PERSISTED on the record, tagged `uncorroborated` — it just may
+                # not steer the chain context that decides other narrators' identities.
                 if person is not None:
                     death_year_index[f"{hadith_id}:{position}"] = person.death_year_ah
-                elif attached is not None:
+                elif attached is not None and corroborated:
                     death_year_index[f"{hadith_id}:{position}"] = attached.death_year_ah
                     cand_location = attached.death_location or attached.birth_location
                     if cand_location:
@@ -1363,10 +1396,20 @@ def run(
                     norm_name=norm_name,
                     name_ar=name_ar,
                     name_en=name_en,
-                    alias=mention_text,
+                    alias=canonical_surface(mention_text),
                     candidate=attached,
                     corpus=corpus,
-                    bio_alias=attached.name_ar if attached is not None else None,
+                    # da#376: `aliases` is consumed by `fuzzy_cluster._match_keys` as a
+                    # NORMALIZED key space (it feeds `_significant_tokens` and
+                    # `token_set_ratio` alongside `name_ar_normalized`). Passing the bio's
+                    # raw `name_ar` injected an un-normalized string into it — diacritics,
+                    # hamza variants and all — which scores against nothing.
+                    bio_alias=(canonical_surface(attached.name_ar or "") if attached else None),
+                    death_year_provenance=(
+                        None
+                        if attached is None or attached.death_year_ah is None
+                        else ("corroborated" if corroborated else "uncorroborated")
+                    ),
                 )
                 naive_identity_pairs.add((corpus, canonical_id))
 

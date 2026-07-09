@@ -36,11 +36,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from src.parse.identity import make_canonical_id
-from src.resolve import disambiguate
+from src.parse.identity import make_canonical_id, make_discriminated_canonical_id
+from src.resolve import disambiguate, fuzzy_cluster
 from src.resolve.mononym_split import MONONYM_REGISTRY, _temporally_plausible
 from src.resolve.schemas import NARRATOR_MENTIONS_RESOLVED_SCHEMA
-from src.utils.arabic import normalize_arabic
+from src.utils.arabic import canonical_surface, normalize_arabic
 
 # --- Real corpus spellings -------------------------------------------------
 # The attested, correct mention spellings.
@@ -338,12 +338,15 @@ class TestCorroborationGate:
         assert node["name_en"] == "Aisha bint Abi Bakr"
         assert node["source_ids"] == ["bio:m:1"]
 
-    def test_weak_fuzzy_match_does_not_attach_bio_metadata(self, tmp_path: Path) -> None:
+    def test_weak_fuzzy_match_persists_year_tagged_uncorroborated(self, tmp_path: Path) -> None:
         """ʿĀʾisha↔ʿĀʾidha scores 0.80 — below the strict bar, no chain evidence.
 
-        Identity is already safe; the gate additionally withholds the bio's dates
-        so they cannot poison ``death_year_index`` (which feeds ``_temporal_filter``
-        for chain neighbours *and* ``refine_mononym_name``'s da#248 evidence).
+        da#376: the year is **persisted with provenance**, not dropped. Dropping it was
+        worse than keeping it: ``fuzzy_cluster._death_years_conflict`` returns ``False``
+        when *either* year is ``None``, so a missing year makes a merge **permitted** —
+        withholding the year disarmed the precision guard on the very clustering pass
+        this fix depends on. What the gate withholds is entry into ``death_year_index``,
+        the identity feedback loop (``_temporal_filter`` + da#248 evidence).
         """
         staging, output = _dirs(tmp_path, "weak")
         pq.write_table(
@@ -366,8 +369,85 @@ class TestCorroborationGate:
         disambiguate.run(staging, output, batch_size=8)
 
         node = _canonical(output)[make_canonical_id(normalize_arabic(AISHA))]
-        assert node["death_year_ah"] is None, "uncorroborated bio metadata must not attach"
-        assert node["external_id"] is None
+        assert node["death_year_ah"] == 58, "the year must be persisted, not dropped"
+        assert node["death_year_provenance"] == "uncorroborated"
+        # Identity is untouched regardless: the bio may not rename or re-key.
+        assert node["name_ar_normalized"] == canonical_surface(AISHA)
+
+    def test_uncorroborated_year_does_not_enter_the_chain_context(self, tmp_path: Path) -> None:
+        """The gate's real job: an uncorroborated year may not steer another narrator.
+
+        ``death_year_index`` feeds ``_temporal_filter`` for chain neighbours and
+        ``refine_mononym_name``'s da#248 evidence. A mention of the registered mononym
+        ``سفيان`` sits next to a mention whose only bio match is uncorroborated. If that
+        bio's year leaked into the chain context it would select a Sufyān; the split must
+        instead abstain, leaving the bare mononym node.
+        """
+        persons = MONONYM_REGISTRY[canonical_surface(SUFYAN)]
+        # A year that WOULD uniquely select one Sufyan if it reached the chain context.
+        years = [
+            y
+            for y in range(60, 280)
+            if len([p for p in persons if _temporally_plausible(p, [y])]) == 1
+        ]
+        assert years
+        leaking_year = years[0]
+
+        staging, output = _dirs(tmp_path, "noleak")
+        pq.write_table(
+            _bio_table(
+                [
+                    {
+                        # Fuzzy-matches AISHA at 0.80 -> confident but NOT corroborated.
+                        "bio_id": "bio:itqan:1",
+                        "name_ar": AISHA_CORRUPT,
+                        "name_ar_normalized": normalize_arabic(AISHA_CORRUPT),
+                        "death_year_ah": leaking_year,
+                        "external_id": "itqan-9001",
+                        "source": "itqan",
+                    }
+                ]
+            ),
+            staging / "narrators_bio_itqan.parquet",
+        )
+        _write_mentions(
+            output,
+            [
+                _mention("m:1", "hdt:sunnah:1", 0, AISHA),
+                _mention("m:2", "hdt:sunnah:1", 1, SUFYAN),
+            ],
+        )
+        disambiguate.run(staging, output, batch_size=8)
+
+        canon = _canonical(output)
+        bare = make_canonical_id(canonical_surface(SUFYAN))
+        assert bare in canon, "da#248 must abstain — the uncorroborated year must not select"
+        for person in persons:
+            assert make_canonical_id(person.norm_name) not in canon
+
+    def test_corroborated_year_is_tagged_and_steers_the_chain(self, tmp_path: Path) -> None:
+        """The positive control for the provenance tag."""
+        staging, output = _dirs(tmp_path, "corrob")
+        pq.write_table(
+            _bio_table(
+                [
+                    {
+                        "bio_id": "bio:m:1",
+                        "name_ar": AISHA,
+                        "name_ar_normalized": normalize_arabic(AISHA),
+                        "death_year_ah": 58,
+                        "source": "muhaddithat",
+                    }
+                ]
+            ),
+            staging / "narrators_bio_muhaddithat.parquet",
+        )
+        _write_mentions(output, [_mention("m:1", "hdt:sunnah:1", 0, AISHA)])
+        disambiguate.run(staging, output, batch_size=8)
+
+        node = _canonical(output)[make_canonical_id(canonical_surface(AISHA))]
+        assert node["death_year_ah"] == 58
+        assert node["death_year_provenance"] == "corroborated"
 
     def test_strict_near_exact_fuzzy_match_attaches_bio_metadata(self, tmp_path: Path) -> None:
         """Ibn ʿAbbās↔Ibn ʿAbs scores 0.933 at lev 1 — the corrupt bio IS his bio."""
@@ -621,3 +701,83 @@ class TestBioCorroboratedUnit:
 def test_canonical_id_is_uuid5_of_the_mention_form(mention: str, bio: str) -> None:
     """The identity contract, stated directly: id keys on the mention, never the bio."""
     assert make_canonical_id(normalize_arabic(mention)) != make_canonical_id(normalize_arabic(bio))
+
+
+# ---------------------------------------------------------------------------
+# da#376 — inflection folding. Without it, de-keying from the bio trades an
+# over-merge for an under-merge on the most-cited narrator in the corpus.
+# ---------------------------------------------------------------------------
+# Production surfaces and their mention counts on the pre-fix corpus.
+ABU_HURAYRA_FORMS = ("ابي هريره", "ابا هريره", "ابو هريره")  # 46,563 / 5,691 / 2,179
+JABIR_SPACED = "جابر بن عبد الله"  # 9,375
+JABIR_GLUED = "جابر بن عبدالله"  # 3
+
+
+class TestInflectionFolding:
+    def test_abu_hurayra_three_case_forms_mint_one_id(self) -> None:
+        """All three Arabic case forms of the kunya are ONE narrator.
+
+        `fuzzy_cluster` cannot repair this after the fact: `ابو هريره` has a single
+        significant token (`ابو` is a connector), so it generates no
+        `combinations(tokens, 2)` blocking key, joins no block, and is never scored at
+        any threshold. The fold must therefore happen before the id is minted.
+        """
+        ids = {make_canonical_id(f) for f in ABU_HURAYRA_FORMS}
+        assert len(ids) == 1, f"three Abu Hurayras: {dict(zip(ABU_HURAYRA_FORMS, sorted(ids)))}"
+
+    def test_glued_abd_allah_matches_spaced(self) -> None:
+        assert make_canonical_id(JABIR_GLUED) == make_canonical_id(JABIR_SPACED)
+
+    @pytest.mark.parametrize(
+        ("a", "b", "why"),
+        [
+            ("زكريا", "زكري", "Zakariyya is not the accusative of a name 'Zakari'"),
+            ("عمرا", "عمر", "'Amr (عمرو) accusative is not 'Umar (عمر) — different men"),
+            ("عبدان", "عبد ان", "'Abdan is a name, not عبد + a second token"),
+            ("عبدوس", "عبد وس", "'Abdus is a name"),
+        ],
+    )
+    def test_hazards_are_not_folded(self, a: str, b: str, why: str) -> None:
+        """The fold is a lexicon, never a productive orthographic rule.
+
+        Every one of these would be corrupted by a naive "strip a trailing alif" or
+        "split a leading عبد" rule. `زكريا` alone carries 9,207 mentions.
+        """
+        assert make_canonical_id(a) != make_canonical_id(b), why
+
+    def test_fold_is_idempotent(self) -> None:
+        for form in (*ABU_HURAYRA_FORMS, JABIR_GLUED, "زكريا", "عليا", "عبدان"):
+            once = canonical_surface(form)
+            assert canonical_surface(once) == once, form
+
+    def test_every_id_producer_agrees(self) -> None:
+        """The fold lives inside `make_canonical_id`, so all eight minting sites agree.
+
+        A fold applied only in `disambiguate` would leave `bio_promote`,
+        `narrator_split`, `date_reconcile`, `muhaddithat_links`, `fuzzy_cluster` and
+        `load_edges` minting unfolded ids — reintroducing duplicates by another door.
+        """
+        assert make_discriminated_canonical_id("ابي هريره", "") == make_canonical_id("ابو هريره")
+        assert make_discriminated_canonical_id("ابي هريره", "d") == make_discriminated_canonical_id(
+            "ابو هريره", "d"
+        )
+
+
+class TestUnblockableRecordsAreCounted:
+    def test_a_record_that_is_never_scored_is_reported(self) -> None:
+        """A merge refused and a merge never attempted must not look the same (da#309).
+
+        `ابو هريره` has one significant token, so it produces no blocking key. Before
+        this change that fact was invisible: no merge, no log, no counter — identical to
+        `_can_merge` returning False.
+        """
+        records: list[dict[str, object]] = [
+            {"canonical_id": "nar:1", "name_ar_normalized": "ابو هريره", "aliases": []},
+            {"canonical_id": "nar:2", "name_ar_normalized": "محمد بن اسماعيل", "aliases": []},
+        ]
+        assert fuzzy_cluster.count_unblockable(records) == 1
+
+    def test_metrics_surface_the_count(self) -> None:
+        metrics = fuzzy_cluster.ClusterMetrics(2, 2, 0, 0, 0, unblockable_records=1)
+        assert "never scored" in metrics.summary()
+        assert fuzzy_cluster.ClusterMetrics(2, 2, 0, 0, 0).unblockable_records == 0
