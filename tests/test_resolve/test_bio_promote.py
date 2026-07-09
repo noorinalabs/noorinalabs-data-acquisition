@@ -10,7 +10,11 @@ import pyarrow.parquet as pq
 
 from src.models.enums import DatePrecision
 from src.parse.identity import make_canonical_id
-from src.parse.name_quality import clean_narrator_name
+from src.parse.name_quality import (
+    asserted_name_tokens,
+    clean_narrator_name,
+    cleaner_removed_content,
+)
 from src.parse.schemas import NARRATOR_ALIAS_SCHEMA, NARRATOR_BIO_SCHEMA
 from src.resolve.bio_promote import promote_bios_to_canonical
 from src.utils.arabic import normalize_arabic
@@ -591,3 +595,120 @@ def test_truncated_prose_bio_still_mints_when_target_unattested(tmp_path: Path) 
     rows = pq.read_table(promote_bios_to_canonical(staging, out_dir)).to_pylist()  # type: ignore[arg-type]
     merged = next(r for r in rows if r["canonical_id"] == make_canonical_id("عبيده"))
     assert merged["trustworthiness"] == "thiqa"  # unchanged behaviour
+
+
+# Verbatim from data/staging/narrators_bio_itqan.parquet (bio_id itqan:25339). An
+# itqan bracketed catalog entry number, NOT prose. `عبد الله بن موسى` is an attested
+# narrator (2,712 mentions on the pre-PR#363 canonical table). da#379 review.
+_ITQAN_25339_ENTRY_NUMBER = "( 4875 ) عبد الله بن موسى"
+_ITQAN_25339_NAME = "عبد الله بن موسى"
+
+
+def test_entry_number_prefix_is_not_a_truncation(tmp_path: Path) -> None:
+    """da#379 review: a bracketed catalog entry number is an affix, not a tail.
+
+    The cleaner strips `( 4875 )` and the residue is the *complete* name the source
+    asserted. Refusing the merge here starves an attested narrator of his bio
+    enrichment — the same harm the guard exists to prevent, with the sign flipped.
+    """
+    normalized = normalize_arabic(_ITQAN_25339_ENTRY_NUMBER)
+    cleaned = clean_narrator_name(normalized)
+    assert cleaned == _ITQAN_25339_NAME, f"fixture no longer strips the entry number: {cleaned!r}"
+    assert not cleaner_removed_content(normalized, cleaned)
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+    attested_id = _write_attested_narrator(out_dir, _ITQAN_25339_NAME, mentions=2712)
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:25339",
+                "source": "itqan",
+                "name_ar": _ITQAN_25339_ENTRY_NUMBER,
+                "name_ar_normalized": normalized,
+                "trustworthiness": "daif",
+                "external_id": "25339",
+            }
+        ],
+    )
+    rows = pq.read_table(promote_bios_to_canonical(staging, out_dir)).to_pylist()  # type: ignore[arg-type]
+    attested = next(r for r in rows if r["canonical_id"] == attested_id)
+    # The merge proceeds and the back-fill lands: the bio enriches its own narrator.
+    assert attested["source_ids"] == ["sanadset:1", "itqan:25339"]
+    assert attested["trustworthiness"] == "daif"
+    assert attested["external_id"] == "25339"
+
+
+def test_honorific_suffix_is_not_a_truncation(tmp_path: Path) -> None:
+    """A clean nasab carrying a benediction must still merge onto its attested node.
+
+    No staging row exercises this today, which is exactly why it is pinned: the
+    honorific strip is a normalization, and da#247 added the bio-side cleaner call
+    *so that* "a benediction-suffixed bio merges onto the clean mention-derived node
+    instead of forking it". A predicate that re-tokenizes the raw input sees the
+    benediction as removed content and silently undoes that.
+    """
+    raw = "مالك بن انس رضي الله عنه"
+    normalized = normalize_arabic(raw)
+    cleaned = clean_narrator_name(normalized)
+    assert cleaned == "مالك بن انس"
+    assert not cleaner_removed_content(normalized, cleaned)
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+    attested_id = _write_attested_narrator(out_dir, "مالك بن انس", mentions=4000)
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:9001",
+                "source": "itqan",
+                "name_ar": raw,
+                "name_ar_normalized": normalized,
+                "trustworthiness": "thiqa",
+            }
+        ],
+    )
+    rows = pq.read_table(promote_bios_to_canonical(staging, out_dir)).to_pylist()  # type: ignore[arg-type]
+    attested = next(r for r in rows if r["canonical_id"] == attested_id)
+    assert attested["trustworthiness"] == "thiqa"
+
+
+def test_cleaner_removed_content_tracks_the_cleaners_own_tokenization() -> None:
+    """The predicate must be computed against tokens the cleaner actually produces.
+
+    This is the property, not the symptom: every transformation `clean_narrator_name`
+    applies BEFORE it starts cutting (markup, honorific, editorial connective,
+    leading ordinal) leaves the asserted name intact and must not read as removed
+    content. A re-tokenization of the raw input fails every row below.
+    """
+    normalizations = [
+        "( 4875 ) عبد الله بن موسى",  # bracketed entry number
+        "[ 969 ] احمد بن يوسف الثعلبي",  # square-bracket entry number
+        "مالك يعني بن انس",  # editorial connective
+        "مالك بن انس رضي الله عنه",  # honorific suffix
+    ]
+    for raw in normalizations:
+        normalized = normalize_arabic(raw)
+        cleaned = clean_narrator_name(normalized)
+        assert cleaned is not None, raw
+        assert not cleaner_removed_content(normalized, cleaned), f"normalization read as cut: {raw}"
+        assert tuple(cleaned.split()) == asserted_name_tokens(normalized)
+
+    truncations = [
+        "عبيده مولى رسول الله ذكره بن شاهين واستدركه ابو موسى",
+        "سفيان يقال نفير بن مجيب الثمالي",
+        "ابو هريره عن مكحول وعنه ابو المليح الرقي",
+    ]
+    for raw in truncations:
+        normalized = normalize_arabic(raw)
+        cleaned = clean_narrator_name(normalized)
+        assert cleaned is not None, raw
+        assert cleaner_removed_content(normalized, cleaned), f"truncation not detected: {raw}"

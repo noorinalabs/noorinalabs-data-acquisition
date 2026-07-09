@@ -189,14 +189,22 @@ def promote_bios_to_canonical(
             bio_id = safe_str(row.get("bio_id"))
             cid = make_canonical_id(norm)
 
-            # When the cleaner had to remove tokens, the residue is not a name the
-            # source asserted — it is whatever survived a truncation, and it is
-            # routinely a bare ism (da#379). Such a residue may not claim an
-            # *attested* narrator: `عبيدة مولى رسول الله ذكره بن شاهين …` cleans to
-            # `عبيده` and would otherwise merge onto ʿAbīda al-Salmānī (1,695
-            # mentions), back-filling an obscure client's jarḥ grade and death year
-            # onto him via _BACKFILL_FIELDS. A bare ism is not a person. Refusing the
-            # merge is always safe; asserting it is not.
+            # When the cleaner CUT INTO the name the source asserted, the residue is
+            # not a name — it is whatever survived a truncation, and it is routinely
+            # a bare ism (da#379). Such a residue may not claim an *attested*
+            # narrator: `عبيدة مولى رسول الله ذكره بن شاهين …` cleans to `عبيده` and
+            # would otherwise merge onto ʿAbīda al-Salmānī (1,695 mentions),
+            # back-filling an obscure client's jarḥ grade and death year onto him via
+            # _BACKFILL_FIELDS. A bare ism is not a person. Refusing the merge is
+            # always safe; asserting it is not.
+            #
+            # `cleaner_removed_content` compares against the cleaner's OWN
+            # pre-truncation tokens, not a re-tokenization of `norm`. A bracketed
+            # catalog entry number, an editorial connective and an honorific are
+            # affixes the cleaner unwraps — the residue is still the full asserted
+            # name. Treating those as cuts refused 42 merges onto attested narrators
+            # (8,302 mentions), starving them of the very enrichment this module
+            # exists to deliver: the same harm, sign-flipped.
             #
             # Scoped to targets that carry mentions: those are narrators attested in
             # an isnad, and corrupting them is the defect. A truncated residue landing
