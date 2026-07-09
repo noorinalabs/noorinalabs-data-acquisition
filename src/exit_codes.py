@@ -52,12 +52,12 @@ import enum
 
 __all__ = [
     "EXIT_LOAD_FAILED",
-    "EXIT_MALFORMED_IDS",
     "EXIT_MISSING_DEPENDENCY",
+    "EXIT_REFUSED_ROWS",
     "EXIT_STOPPED_AT_LIMIT",
     "EXIT_VALIDATION_FINDINGS",
-    "RESERVED_BY_RUNTIME",
     "ExitCode",
+    "RESERVED_BY_RUNTIME",
 ]
 
 # Values this process does not get to assign: 0 is success (the absence of an
@@ -98,8 +98,16 @@ class ExitCode(enum.IntEnum):
     VALIDATION_FINDINGS = 5
     """The load succeeded and is committed; post-load validation has findings (da#354)."""
 
-    MALFORMED_IDS = 6
-    """The load ran to completion having REFUSED input; the graph is incomplete (da#355/da#359)."""
+    REFUSED_ROWS = 6
+    """The load ran to completion having REFUSED input; the graph is incomplete (da#355/da#359).
+
+    Named for the CONCEPT, not for today's instance. The loaders refuse a row for
+    more than one reason -- a doubled corpus prefix and a blank ``source_id`` are
+    the same silent data loss through different doors -- and the predicate that
+    raises this code is ``LoadSummary.total_refused``. Naming it after the
+    malformed-id class alone would re-arm the trap for the next refusal class,
+    the same mistake as ``total_skipped`` blending refusals with deliberate skips.
+    """
 
 
 # Module-level aliases. Consumers may import either the enum or these names; the
@@ -110,4 +118,4 @@ EXIT_LOAD_FAILED = ExitCode.LOAD_FAILED
 EXIT_STOPPED_AT_LIMIT = ExitCode.STOPPED_AT_LIMIT
 EXIT_MISSING_DEPENDENCY = ExitCode.MISSING_DEPENDENCY
 EXIT_VALIDATION_FINDINGS = ExitCode.VALIDATION_FINDINGS
-EXIT_MALFORMED_IDS = ExitCode.MALFORMED_IDS
+EXIT_REFUSED_ROWS = ExitCode.REFUSED_ROWS

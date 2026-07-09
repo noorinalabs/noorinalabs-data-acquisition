@@ -158,7 +158,7 @@ class TestReservedSetIsEnumerated:
             "STOPPED_AT_LIMIT": 3,
             "MISSING_DEPENDENCY": 4,
             "VALIDATION_FINDINGS": 5,
-            "MALFORMED_IDS": 6,
+            "REFUSED_ROWS": 6,
         }
 
     def test_the_ruling_table_is_pinned(self) -> None:
@@ -169,7 +169,7 @@ class TestReservedSetIsEnumerated:
         """
         assert ExitCode.MISSING_DEPENDENCY == 4  # da#309, two approvals, unchanged
         assert ExitCode.VALIDATION_FINDINGS == 5  # da#354 moves 4 -> 5
-        assert ExitCode.MALFORMED_IDS == 6  # da#359 moves 5 -> 6
+        assert ExitCode.REFUSED_ROWS == 6  # da#359 moves 5 -> 6
 
 
 # ---------------------------------------------------------------------------
