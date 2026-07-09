@@ -62,6 +62,7 @@ from __future__ import annotations
 import uuid
 
 from src.models.enums import SourceCorpus
+from src.utils.arabic import canonical_surface
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -214,16 +215,28 @@ def narrator_node_id(canonical_id: str) -> str:
 def make_canonical_id(name_normalized: str) -> str:
     """Deterministic canonical Narrator id from a *normalized* name.
 
-    Returns ``nar:<uuid5(CANONICAL_NAMESPACE, name_normalized)>``. THE one rule
-    for minting a canonical narrator id — both the mention-driven disambiguator
-    (``src/resolve/disambiguate.py``) and the bio-direct promoter
-    (``src/resolve/bio_promote.py``) route through it so the same normalized name
-    always maps to the same Narrator node (and the ``nar:`` prefix the graph
-    loader ``load_nodes._load_narrators`` validates on import). The input must be
-    pre-normalized (see ``src.utils.arabic.normalize_arabic``) so equivalent
-    spellings collapse to one id.
+    Returns ``nar:<uuid5(CANONICAL_NAMESPACE, canonical_surface(name)))>``. THE one
+    rule for minting a canonical narrator id — the mention-driven disambiguator
+    (``src/resolve/disambiguate.py``), the bio-direct promoter
+    (``src/resolve/bio_promote.py``), the da#337 splitter, the date reconciler, the
+    muhaddithat linker, ``fuzzy_cluster`` and the graph edge loader all route through
+    it, so the same name always maps to the same Narrator node (and the ``nar:``
+    prefix the graph loader ``load_nodes._load_narrators`` validates on import).
+
+    da#376 — the input is folded through :func:`src.utils.arabic.canonical_surface`
+    **here**, rather than at each call site. ``normalize_arabic`` alone is neither
+    case- nor spacing-invariant, so `ابي هريره` / `ابا هريره` / `ابو هريره` minted
+    three Abū Hurayras once da#356 made identity a pure function of the mention.
+    Folding inside this function is what keeps all eight minting sites in agreement:
+    a fold applied only in ``disambiguate`` would leave the other seven minting
+    unfolded ids and reintroduce duplicates by another door.
+
+    Idempotent in the surface: ``canonical_surface`` is a fixed point, so passing an
+    already-folded name is a no-op.
     """
-    return narrator_node_id(str(uuid.uuid5(CANONICAL_NAMESPACE, name_normalized)))
+    return narrator_node_id(
+        str(uuid.uuid5(CANONICAL_NAMESPACE, canonical_surface(name_normalized)))
+    )
 
 
 def make_discriminated_canonical_id(name_normalized: str, discriminator: str = "") -> str:
@@ -253,7 +266,9 @@ def make_discriminated_canonical_id(name_normalized: str, discriminator: str = "
     """
     if not discriminator:
         return make_canonical_id(name_normalized)
-    key = name_normalized + _DISCRIMINATOR_SEP + discriminator
+    # da#376: fold the NAME half through the same identity surface make_canonical_id
+    # uses, so a discriminated split of `ابي هريره` and of `ابو هريره` land on one id.
+    key = canonical_surface(name_normalized) + _DISCRIMINATOR_SEP + discriminator
     return narrator_node_id(str(uuid.uuid5(CANONICAL_NAMESPACE, key)))
 
 

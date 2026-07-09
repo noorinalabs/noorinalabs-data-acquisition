@@ -67,6 +67,7 @@ class TestSampleData:
             "trustworthiness": pa.array(["thiqa"], type=pa.string()),
             "source_ids": pa.array([["bio-1"]], type=pa.list_(pa.string())),
             "external_id": pa.array([None], type=pa.string()),
+            "death_year_provenance": pa.array(["corroborated"], type=pa.string()),
             "mention_count": pa.array([5], type=pa.int32()),
             "source_corpus": pa.array(["sunnah"], type=pa.string()),
             "source_corpora": pa.array([["sunnah", "thaqalayn"]], type=pa.list_(pa.string())),

@@ -74,6 +74,12 @@ NARRATORS_CANONICAL_SCHEMA = pa.schema(
         pa.field("trustworthiness", pa.string(), nullable=True),
         pa.field("source_ids", pa.list_(pa.string()), nullable=True),
         pa.field("external_id", pa.string(), nullable=True),
+        # da#376: whether `death_year_ah` was corroborated by chain-neighbour temporal
+        # agreement (or a near-identical bio name) at disambiguation time, or attached
+        # from a bio the corroboration gate did not clear. Persisted rather than dropped
+        # so `fuzzy_cluster._death_years_conflict` keeps a year to guard on — a NULL year
+        # makes that guard *permit* a merge. One of {corroborated, uncorroborated, NULL}.
+        pa.field("death_year_provenance", pa.string(), nullable=True),
         pa.field("mention_count", pa.int32(), nullable=True),
         # Sect/corpus provenance on the canonical narrator (da#103, epic #81).
         # ``source_corpus`` is the scalar primary corpus (mirrors the Hadith /

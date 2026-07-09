@@ -275,14 +275,22 @@ class ClusterMetrics:
     multi_member_clusters: int
     cross_source_clusters: int
     mentions_remapped: int = 0
+    # da#376: records that produced no blocking key and were therefore never offered to
+    # `_can_merge`. Reported so "did not merge" can be told apart from "was never scored".
+    unblockable_records: int = 0
 
     def summary(self) -> str:
         """One-line human-readable summary."""
+        unblockable = (
+            f"; {self.unblockable_records} never scored (no blocking key)"
+            if self.unblockable_records
+            else ""
+        )
         return (
             f"fuzzy-cluster: {self.input_records} → {self.output_records} canonical "
             f"({self.merged_records} merged into {self.multi_member_clusters} clusters, "
             f"{self.cross_source_clusters} cross-source); "
-            f"{self.mentions_remapped} mentions remapped"
+            f"{self.mentions_remapped} mentions remapped{unblockable}"
         )
 
 
@@ -320,6 +328,17 @@ def _significant_tokens(keys: list[str]) -> set[str]:
             if len(tok) >= 2 and tok not in _CONNECTOR_TOKENS:
                 tokens.add(tok)
     return tokens
+
+
+def count_unblockable(records: list[dict[str, Any]]) -> int:
+    """Records that produce no blocking key and are therefore never scored (da#376).
+
+    Blocking keys are ``combinations(significant_tokens, 2)``, so a record with fewer
+    than :data:`_MIN_SHARED_TOKENS` significant tokens joins no block and is never
+    offered to :func:`_can_merge` — at any threshold. Exposed so callers can report the
+    count instead of inferring "no merge" from silence.
+    """
+    return sum(1 for r in records if len(_significant_tokens(_match_keys(r))) < _MIN_SHARED_TOKENS)
 
 
 def _significant_token_sequence(key: str) -> list[str]:
@@ -729,6 +748,28 @@ def cluster_records(
     # _significant_tokens calls dominated; caching turns them into O(n) prep.
     keys_cache: list[list[str]] = [_match_keys(rec) for rec in records]
     tok_cache: list[set[str]] = [_significant_tokens(keys_cache[i]) for i in range(n)]
+
+    # da#376 — a record that is never SCORED must not look like a record that was
+    # scored and refused. Blocking below keys on `combinations(tokens, 2)`, so a record
+    # with fewer than two significant tokens contributes no key, joins no block, and is
+    # never offered to `_can_merge` — at any threshold. Today that outcome (no merge, no
+    # log, no counter) is observationally identical to a guard rejection: the same
+    # success-shaped silence as da#309. Count it and say so.
+    _unblockable = [i for i in range(n) if len(tok_cache[i]) < _MIN_SHARED_TOKENS]
+    if _unblockable:
+        _unblockable_mentions = sum(int(records[i].get("mention_count") or 0) for i in _unblockable)
+        logger.warning(
+            "cluster_records_unblockable",
+            records=len(_unblockable),
+            pct_of_records=round(len(_unblockable) / n * 100, 1),
+            mentions_held=_unblockable_mentions,
+            min_shared_tokens=_MIN_SHARED_TOKENS,
+            examples=[safe_str(records[i].get("name_ar_normalized")) for i in _unblockable[:5]],
+            detail=(
+                "fewer than _MIN_SHARED_TOKENS significant tokens -> no blocking key -> "
+                "never scored by _can_merge at any threshold (structural, not statistical)"
+            ),
+        )
 
     # Inverted index: unordered significant-token PAIR -> record indices whose
     # name/alias tokens include both members of the pair (composite blocking).
@@ -1273,6 +1314,7 @@ def cluster_canonical_narrators(
         multi_member_clusters=multi_member,
         cross_source_clusters=cross_source,
         mentions_remapped=remapped,
+        unblockable_records=count_unblockable(records),
     )
     logger.info("cluster_canonical_complete", summary=metrics.summary())
     return metrics

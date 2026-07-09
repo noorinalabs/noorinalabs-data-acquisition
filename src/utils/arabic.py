@@ -19,6 +19,7 @@ __all__ = [
     "is_arabic",
     "extract_transmission_phrases",
     "contains_transmission_marker",
+    "canonical_surface",
     "transliterate",
 ]
 
@@ -518,3 +519,108 @@ def contains_transmission_marker(text: str) -> bool:
     """
     normalized = normalize_arabic(text)
     return any(pattern.search(normalized) for pattern in _NORM_MARKER_PATTERNS)
+
+
+# ---------------------------------------------------------------------------
+# Identity surface — inflection folding for canonical-id minting (da#376)
+# ---------------------------------------------------------------------------
+# ``normalize_arabic`` is orthographic: it folds hamza/alif/taa-marbuta and strips
+# diacritics, but it is neither case- nor spacing-invariant. That was harmless while
+# ``disambiguate`` keyed canonical identity on the matched *bio's* spelling, because
+# the bio key incidentally absorbed inflection. Once identity became a pure function
+# of the mention (da#356), Arabic case endings started minting one node per case:
+#
+#     ابي هريره  46,563   ابا هريره  5,691   ابو هريره  2,179    -> three Abu Hurayras
+#
+# and ``fuzzy_cluster`` cannot repair it: a name with fewer than two *significant*
+# tokens produces no ``combinations(tokens, 2)`` blocking key, joins no block, and is
+# never scored at any threshold. Structural, not statistical. The fold below is
+# therefore the only place these can converge, and it must run *before* the id is
+# minted — see :func:`src.parse.identity.make_canonical_id`, which applies it.
+#
+# PRECISION-FIRST, like the da#248 mononym registry: every rule is a closed set or a
+# lexicon, never a productive orthographic pattern. Measured on the production corpus,
+# a naive "strip a trailing alif from any token of length >= 4" rule would fold
+# ``زكريا`` (Zakariyya, 9,207 mentions) to ``زكري``, and ``عمرا`` (accusative of عمرو,
+# 'Amr) to ``عمر`` ('Umar) — two different men. No orthographic rule separates
+# ``عليا``/``علي`` from ``زكريا``/``زكري``; only a lexicon does. So we abstain by default.
+
+# Accusative / genitive of the kunya ``ابو`` ("father of"). Folding these is
+# unconditionally safe: no two narrators are distinguished by the case of their kunya.
+_KUNYA_VARIANTS: frozenset[str] = frozenset({"ابا", "ابي", "ابى"})
+_KUNYA_CANONICAL = "ابو"
+
+# ``عبدالله`` -> ``عبد الله``. The trigger is the *definite article*, not a bare
+# ``عبد`` prefix: ``عبدان`` (3,974 mentions), ``عبدوس`` and ``عبدويه`` are names in
+# their own right and must not be split.
+_ABD_GLUED_PREFIX = "عبدال"
+
+# Given names whose accusative is stem + alif. Hand-curated from the production
+# corpus, then FROZEN — a corpus-derived list would not be a pure function and would
+# drift between runs. Deliberately EXCLUDED, with reasons:
+#   عمر    - ``عمرا`` is the accusative of عمرو ('Amr), a different man from عمر ('Umar)
+#   زكري   - ``زكريا`` is Zakariyya's nominative; its "stem" is not a name
+#   جميع   - ``جميعا`` is the adverb "altogether"
+#   ابن    - ``ابنا`` is a genealogical connector, not a name
+#   البن, عليهم - artefacts / pronouns
+_ACCUSATIVE_STEMS: frozenset[str] = frozenset(
+    {
+        "علي",
+        "انس",
+        "جابر",
+        "مالك",
+        "نافع",
+        "سعد",
+        "بلال",
+        "سالم",
+        "مكحول",
+        "ثابت",
+        "معاذ",
+        "جندب",
+        "مطرف",
+        "خباب",
+        "زيد",
+        "محمد",
+        "حميد",
+        "سعيد",
+        "عمار",
+        "صهيب",
+        "معمر",
+        "عامر",
+        "سهل",
+        "كعب",
+        "تميم",
+    }
+)
+
+
+def _fold_token(token: str) -> list[str]:
+    """Fold one token into its identity surface. May emit two tokens (``عبدال`` split)."""
+    if token in _KUNYA_VARIANTS:
+        return [_KUNYA_CANONICAL]
+    if token.startswith(_ABD_GLUED_PREFIX) and len(token) > len(_ABD_GLUED_PREFIX):
+        return ["عبد", token[3:]]
+    if token.endswith("ا") and token[:-1] in _ACCUSATIVE_STEMS:
+        return [token[:-1]]
+    return [token]
+
+
+def canonical_surface(name: str) -> str:
+    """The string a canonical narrator id is minted from.
+
+    ``normalize_arabic`` plus a precision-first fold of the inflections that would
+    otherwise mint one node per Arabic case ending (da#376). Idempotent:
+    ``canonical_surface(canonical_surface(x)) == canonical_surface(x)`` — the fold
+    targets are all closed sets whose outputs are not themselves fold triggers.
+
+    This is the *identity* surface, not a display name. Callers keep the mention's
+    own raw spelling for ``name_ar``; only the key and ``name_ar_normalized`` are
+    folded.
+    """
+    normalized = normalize_arabic(name)
+    if not normalized:
+        return ""
+    folded: list[str] = []
+    for token in normalized.split():
+        folded.extend(_fold_token(token))
+    return " ".join(folded)
