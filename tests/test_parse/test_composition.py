@@ -12,6 +12,7 @@ from src.parse.composition import (
     is_canonical_hadith_id,
     is_cross_edition_dedup_source,
 )
+from src.parse.identity import DoubledCorpusPrefixError
 
 
 class TestIsCanonicalHadith:
@@ -107,10 +108,14 @@ class TestIsCanonicalHadithId:
         assert not is_canonical_hadith_id("hdt:fawaz:bukhari:1")
         assert is_canonical_hadith_id("hdt:lk:bukhari:1")
 
-    def test_double_prefixed_id_is_collapsed(self) -> None:
-        # main#139 double-corpus ids collapse before the gate reads the corpus.
-        assert is_canonical_hadith_id("sanadset:sanadset:0:0:1")
-        assert not is_canonical_hadith_id("fawaz:fawaz:bukhari:1")
+    def test_double_prefixed_id_raises(self) -> None:
+        # da#355: the gate no longer collapses a doubled corpus before reading it.
+        # Collapsing guessed which segment was the corpus; a wrong guess silently
+        # routed a hadith through the wrong composition rule. Now it fails loudly.
+        with pytest.raises(DoubledCorpusPrefixError):
+            is_canonical_hadith_id("sanadset:sanadset:0:0:1")
+        with pytest.raises(DoubledCorpusPrefixError):
+            is_canonical_hadith_id("fawaz:fawaz:bukhari:1")
 
     def test_unknown_or_bare_corpus_defers_to_default_keep(self) -> None:
         # An id with no collection segment (toy ids in older tests, or a bare

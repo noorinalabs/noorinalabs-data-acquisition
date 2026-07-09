@@ -90,7 +90,38 @@ from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-__all__ = ["parse_sanadset"]
+__all__ = [
+    "parse_sanadset",
+    "SanadsetSchemaError",
+    "MissingBookColumnError",
+    "BlankBookCellError",
+    "BooksCsvSchemaError",
+]
+
+
+class SanadsetSchemaError(ValueError):
+    """The Sanadset raw input violates the schema the parser contracts on.
+
+    Named (rather than a bare :exc:`ValueError`) because ``src/acquire/sanadset.py``
+    skips the Mendeley download whenever ``dest.glob("*.csv")`` is non-empty, so a
+    stray or partially-downloaded CSV in ``data/raw/sanadset/`` is exactly the state
+    a failed download leaves behind — and it now hard-fails the parse. An operator
+    catching this type knows to clear the raw dir and re-acquire, not to debug the
+    parser (da#358). Subclasses :exc:`ValueError` so existing broad handlers work.
+    """
+
+
+class MissingBookColumnError(SanadsetSchemaError):
+    """A hadith CSV has no ``Book`` column — the collection join key is absent."""
+
+
+class BlankBookCellError(SanadsetSchemaError):
+    """A hadith row has a present-but-blank ``Book`` cell — no resolvable collection."""
+
+
+class BooksCsvSchemaError(SanadsetSchemaError):
+    """``books.csv`` is present but yields no usable book-name join key."""
+
 
 # ---------------------------------------------------------------------------
 # Compiled regexes for XML-style tag extraction
@@ -403,7 +434,7 @@ def _parse_books(raw_dir: Path) -> dict[str, dict[str, object]]:
             f"(looked for book/name_ar/book_name/name/title/arabic_name; found "
             f"{sorted(cols)}) — the book->collection join key cannot be built"
         )
-        raise ValueError(msg)
+        raise BooksCsvSchemaError(msg)
     name_en_col = pick("name_en", "english_name", "name_english", "title_en")
     compiler_col = pick("author", "compiler", "compiler_name", "writer", "musannif")
     count_col = pick(
@@ -431,7 +462,7 @@ def _parse_books(raw_dir: Path) -> dict[str, dict[str, object]]:
             f"{_BOOKS_FILENAME} is present with a {name_ar_col!r} column but yielded "
             f"no usable book rows — the book->collection join key cannot be built"
         )
-        raise ValueError(msg)
+        raise BooksCsvSchemaError(msg)
     logger.info("books_csv_parsed", books=len(books))
     return books
 
@@ -537,7 +568,16 @@ def _process_chunk(
         return None
 
     text_col = col("hadith", "text")
-    num_col = col("num_hadith", "hadith_number", "hadith_id")
+    # ``hadith_id`` is NOT a spelling of the in-book ordinal — it is a surrogate key
+    # (da#358). Since da#353 this value is both a component of ``source_id`` and the
+    # ``APPEARS_IN.hadith_number_in_book`` edge property, so accepting a surrogate
+    # here would key nodes on it and corrupt the edge (the da#77 / da#72 mistake:
+    # sunnah.com-style sources carry a collection-wide reference AND an in-book
+    # ordinal, and only the ordinal belongs on that edge). A corpus that genuinely
+    # names its ordinal ``hadith_id`` needs a per-corpus mapping — enumerating
+    # spellings in a shared guess-list is the root cause da#353 was filed for. A row
+    # with no recognized ordinal falls back to ``_content_digest``.
+    num_col = col("num_hadith", "hadith_number")
     book_col = col("book")
     grade_col = col("grade")
     chapter_col = col("chapter")
@@ -553,7 +593,7 @@ def _process_chunk(
             "Sanadset hadith CSV has no 'Book' column — the book->collection join "
             f"key cannot be built (columns seen: {sorted(colmap.values())!r})"
         )
-        raise ValueError(msg)
+        raise MissingBookColumnError(msg)
 
     for row in rows:
         full_text = safe_str(row.get(text_col)) if text_col else None
@@ -563,8 +603,26 @@ def _process_chunk(
         # ``Num_hadith`` is the in-book citation ordinal; ``Book`` is the book's
         # Arabic NAME (not an int id), digested to a stable collection key.
         hadith_num = safe_int(row.get(num_col)) if num_col else None
-        book_name = safe_str(row.get(book_col)) if book_col else None
-        book_key = _book_key(book_name) if book_name else None
+        book_name = safe_str(row.get(book_col))
+
+        # A present-but-BLANK ``Book`` cell is the missing-``Book``-column defect one
+        # cell narrower (da#358): with no book name there is no resolvable collection,
+        # and falling through to ``default_name`` re-keys the row onto
+        # ``{corpus}:{corpus}:{Num_hadith}`` — the doubled-prefix shape da#353 exists
+        # to eliminate, and a colliding one (``Num_hadith`` holds only 37,239 distinct
+        # values across 650,986 rows). ``_content_digest`` is the tail for a row that
+        # lacks a citation NUMBER, not one that lacks an IDENTITY; a row whose
+        # collection is unknowable cannot be placed in the graph at all. Reject it.
+        if book_name is None:
+            msg = (
+                f"Sanadset hadith row has a blank 'Book' cell (hadith_number="
+                f"{hadith_num!r}) — the book->collection join key cannot be built "
+                f"for this row, and falling back to the CSV stem would emit a "
+                f"doubled-corpus, colliding source_id"
+            )
+            raise BlankBookCellError(msg)
+
+        book_key = _book_key(book_name)
         row_collection = _resolve_collection_name(book_key, collection_name)
 
         # source_id is content-derived and STABLE under re-acquisition (da#353):
@@ -572,7 +630,7 @@ def _process_chunk(
         # never a row offset. (Book, Num_hadith) is a perfect unique key over the
         # corpus, so this stays collision-free; and the collection segment is a
         # digest that can never equal the corpus name, so no id ever looks
-        # double-prefixed and ``_collapse_double_corpus`` never fires. A row with
+        # double-prefixed and the da#355 doubled-corpus assertion never fires. A row with
         # no citation number (degraded input; the real corpus has none) falls back
         # to a content digest of its text — still content-derived, never positional.
         num_part = str(hadith_num) if hadith_num is not None else _content_digest(full_text)

@@ -17,7 +17,7 @@ from src.graph.load_edges import (
     _studied_under_endpoint,
     load_all_edges,
 )
-from src.parse.identity import make_canonical_id, narrator_node_id
+from src.parse.identity import DoubledCorpusPrefixError, make_canonical_id, narrator_node_id
 from src.parse.schemas import EDGE_RELATION_TRANSMITTED_TO, NETWORK_EDGE_SCHEMA
 from src.utils.arabic import normalize_arabic
 from tests.test_graph.conftest import (
@@ -72,8 +72,28 @@ class TestBuildChainPairs:
         }
 
     def test_hadith_id_is_canonicalized(self) -> None:
-        # da#325: the edge hadith_id must match Hadith.id — canonical (hdt: prefix,
-        # main#139 double-prefix collapsed), not the raw staging id.
+        # da#325: the edge hadith_id must match Hadith.id — canonical (hdt: prefix),
+        # not the raw staging id. Post-da#353 the sanadset id carries a book-name
+        # digest as its collection segment, never a doubled corpus.
+        mentions = [
+            {
+                "canonical_narrator_id": "nar:1",
+                "position_in_chain": 0,
+                "hadith_id": "sanadset:e10f73d3eede9edc:2326",
+            },
+            {
+                "canonical_narrator_id": "nar:2",
+                "position_in_chain": 1,
+                "hadith_id": "sanadset:e10f73d3eede9edc:2326",
+            },
+        ]
+        pairs = _build_chain_pairs(mentions)
+        assert len(pairs) == 1
+        assert pairs[0]["hadith_id"] == "hdt:sanadset:e10f73d3eede9edc:2326"
+
+    def test_double_prefixed_mention_hadith_id_raises(self) -> None:
+        # da#355: a doubled corpus on a mention row is a producer defect. The edge
+        # builder must not silently rewrite it onto a different hadith's id.
         mentions = [
             {
                 "canonical_narrator_id": "nar:1",
@@ -86,9 +106,8 @@ class TestBuildChainPairs:
                 "hadith_id": "sanadset:sanadset:0:0:2326",
             },
         ]
-        pairs = _build_chain_pairs(mentions)
-        assert len(pairs) == 1
-        assert pairs[0]["hadith_id"] == "hdt:sanadset:0:0:2326"
+        with pytest.raises(DoubledCorpusPrefixError):
+            _build_chain_pairs(mentions)
 
     def test_hadith_id_already_canonical_unchanged(self) -> None:
         # Idempotent: a canonical id passes through untouched (hadith_node_id no-op).

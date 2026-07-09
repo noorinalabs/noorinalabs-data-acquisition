@@ -14,11 +14,18 @@ re-load from parquet is not possible against a live box. This module migrates
 those edges **in place** (property rewrite only — no structure change, no
 delete/reload).
 
-Idempotent by construction: the canonical id is re-derived with
-:func:`~src.parse.identity.hadith_node_id`, which is itself idempotent
-(``hdt:``-prefix-safe and double-corpus-collapsing), and only the distinct values
-that actually change are written. A second run over an already-canonical graph
-finds nothing to rewrite and updates zero edges.
+Idempotent by construction: the canonical id is re-derived by
+:func:`canonicalize_legacy_hadith_id`, which is itself idempotent, and only the
+distinct values that actually change are written. A second run over an
+already-canonical graph finds nothing to rewrite and updates zero edges.
+
+**This module is the one place a doubled corpus is repaired** (da#355). The id
+constructors in :mod:`src.parse.identity` now *assert* against that shape rather
+than collapsing it, because ``<corpus>:<collection>`` is the defined grammar and
+a collapse cannot tell ``lk:lk:1`` (a collection named after its corpus) from a
+genuinely double-prefixed id — so on the hot path it silently dropped a valid
+segment. Here the intent is explicit, one-shot, and scoped to values that a
+*historical* loader already persisted: the repair is a migration, not a contract.
 """
 
 from __future__ import annotations
@@ -26,13 +33,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from src.parse.identity import hadith_node_id
+from src.parse.identity import (
+    HADITH_ID_PREFIX,
+    ID_DELIMITER,
+    SOURCE_CORPORA,
+    apply_prefix,
+)
 from src.utils.logging import get_logger
 from src.utils.neo4j_client import Neo4jClient
 
 logger = get_logger(__name__)
 
-__all__ = ["MigrationResult", "migrate_transmitted_hadith_ids", "compute_rewrites"]
+__all__ = [
+    "MigrationResult",
+    "migrate_transmitted_hadith_ids",
+    "compute_rewrites",
+    "canonicalize_legacy_hadith_id",
+]
 
 DEFAULT_BATCH_SIZE = 1000
 
@@ -64,19 +81,42 @@ class MigrationResult:
     edges_updated: int
 
 
+def canonicalize_legacy_hadith_id(raw: str) -> str:
+    """Canonical ``hdt:`` id for a *legacy* edge value, collapsing a doubled corpus.
+
+    The deliberate, one-shot counterpart to :func:`~src.parse.identity.bare_source_id`,
+    which now RAISES on this shape instead of repairing it (da#355). Only values a
+    historical loader already wrote into the graph reach here, and for those the
+    doubled corpus is known — not guessed — to be the main#139 defect: the loader
+    that produced them prefixed the corpus twice onto ids whose collection segment
+    was ``0`` (``sanadset:sanadset:0:0:2326``), never a corpus-named collection.
+
+    Idempotent: already-canonical ids and ids with no doubled corpus come back
+    unchanged, so a re-run over a migrated graph rewrites nothing.
+    """
+    body = raw[len(HADITH_ID_PREFIX) :] if raw.startswith(HADITH_ID_PREFIX) else raw
+    segments = body.split(ID_DELIMITER)
+    # Collapse only a *repeated leading known corpus*; a repeated segment deeper in
+    # the id, or a non-corpus lead, is left alone.
+    while len(segments) >= 2 and segments[0] in SOURCE_CORPORA and segments[0] == segments[1]:
+        segments.pop(0)
+    return apply_prefix(ID_DELIMITER.join(segments), HADITH_ID_PREFIX)
+
+
 def compute_rewrites(distinct_rows: list[dict[str, Any]]) -> list[dict[str, str]]:
     """Map each distinct raw ``hadith_id`` to its canonical form, dropping no-ops.
 
-    Skips empty/null ids and any value already canonical (``hadith_node_id`` is a
-    no-op on it) so the returned list holds only the ids that must change — this
-    is what makes a re-run idempotent (an already-migrated graph yields ``[]``).
+    Skips empty/null ids and any value already canonical
+    (:func:`canonicalize_legacy_hadith_id` is a no-op on it) so the returned list
+    holds only the ids that must change — this is what makes a re-run idempotent
+    (an already-migrated graph yields ``[]``).
     """
     rewrites: list[dict[str, str]] = []
     for row in distinct_rows:
         raw = row.get("hadith_id")
         if not raw or not isinstance(raw, str):
             continue
-        canon = hadith_node_id(raw)
+        canon = canonicalize_legacy_hadith_id(raw)
         if canon != raw:
             rewrites.append({"raw": raw, "canon": canon})
     return rewrites

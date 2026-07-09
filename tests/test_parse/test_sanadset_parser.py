@@ -10,7 +10,14 @@ import pyarrow.parquet as pq
 import pytest
 
 from src.parse.identity import collection_node_id, is_double_prefixed
-from src.parse.sanadset import _book_key, parse_sanadset
+from src.parse.sanadset import (
+    BlankBookCellError,
+    BooksCsvSchemaError,
+    MissingBookColumnError,
+    SanadsetSchemaError,
+    _book_key,
+    parse_sanadset,
+)
 from src.parse.schemas import COLLECTION_SCHEMA, HADITH_SCHEMA, NARRATOR_MENTION_SCHEMA
 
 # Book names shared by the mock hadith rows and ``_BOOKS_CSV`` so the name→book_key
@@ -555,7 +562,7 @@ class TestSanadsetColumnMapping:
         )
         for sid in sids:
             # The collection segment is a name-digest, never "sanadset", so nothing
-            # looks double-prefixed and _collapse_double_corpus never fires.
+            # looks double-prefixed and the da#355 doubled-corpus assertion never fires.
             assert not sid.startswith("sanadset:sanadset:"), sid
             assert not is_double_prefixed(sid), sid
 
@@ -601,8 +608,57 @@ class TestSanadsetColumnMapping:
             encoding="utf-8",
         )
 
-        with pytest.raises(ValueError, match="no 'Book' column"):
+        with pytest.raises(MissingBookColumnError, match="no 'Book' column"):
             parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
+
+    def test_blank_book_cell_raises_and_never_yields_doubled_id(self, tmp_path: Path) -> None:
+        """da#358(b): a present-but-BLANK ``Book`` cell must not reach ``default_name``.
+
+        Before the fix this row fell through to the CSV-stem collection and emitted
+        ``sanadset:sanadset:645817`` — the exact id shape da#353 exists to eliminate,
+        and one that collides (``Num_hadith`` has only 37,239 distinct values across
+        650,986 rows). The production filename + header are used deliberately: naming
+        the fixture ``bukhari.csv`` is what once rendered a doubled-prefix assertion
+        structurally inert.
+        """
+        raw_dir = tmp_path / "raw" / "sanadset"
+        raw_dir.mkdir(parents=True)
+        staging_dir = tmp_path / "staging"
+        (raw_dir / "sanadset.csv").write_text(
+            "Hadith,Book,Num_hadith\n"
+            f'"<SANAD><NAR>مالك</NAR></SANAD><MATN>متن</MATN>",{_BOOK_BUKHARI},1\n'
+            '"<SANAD><NAR>نافع</NAR></SANAD><MATN>متن</MATN>",,645817\n',
+            encoding="utf-8",
+        )
+
+        with pytest.raises(BlankBookCellError, match="blank 'Book' cell"):
+            parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
+
+    def test_surrogate_hadith_id_is_never_the_in_book_ordinal(self, tmp_path: Path) -> None:
+        """da#358(a): ``hadith_id`` is a surrogate, not the in-book ordinal.
+
+        A future edition shipping ``hadith_id`` without ``Num_hadith`` must NOT key
+        the ``source_id`` (or ``APPEARS_IN.hadith_number_in_book``) on the surrogate.
+        With the alias dropped, the row has no citation number and falls back to the
+        content digest — content-derived and stable, never a surrogate.
+        """
+        raw_dir = tmp_path / "raw" / "sanadset"
+        raw_dir.mkdir(parents=True)
+        staging_dir = tmp_path / "staging"
+        (raw_dir / "sanadset.csv").write_text(
+            "Hadith,Book,hadith_id\n"
+            f'"<SANAD><NAR>مالك</NAR></SANAD><MATN>متن</MATN>",{_BOOK_BUKHARI},999999\n',
+            encoding="utf-8",
+        )
+
+        outputs = parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
+        rows = pq.read_table(outputs["hadiths"]).to_pylist()
+        assert len(rows) == 1
+        row = rows[0]
+        # The surrogate must appear in NEITHER the id tail nor the ordinal column.
+        assert row["hadith_number"] is None
+        assert not row["source_id"].endswith(":999999")
+        assert row["source_id"].startswith(f"sanadset:{_book_key(_BOOK_BUKHARI)}:")
 
     def test_present_but_unmappable_books_raises(self, tmp_path: Path) -> None:
         """A present books.csv with no resolvable name column raises (da#353 item 4):
@@ -614,8 +670,17 @@ class TestSanadsetColumnMapping:
         # An id-only books.csv — no name column at all.
         (raw_dir / "books.csv").write_text("serial\n1\n2\n", encoding="utf-8")
 
-        with pytest.raises(ValueError, match="book-name column"):
+        with pytest.raises(BooksCsvSchemaError, match="book-name column"):
             parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
+
+    def test_schema_errors_are_named_and_are_valueerrors(self) -> None:
+        """da#358(c): a stray/partial CSV (what a failed Mendeley download leaves)
+        now hard-fails the parse, so the failure carries a NAMED type an operator can
+        catch — not a bare ``ValueError``. They stay ``ValueError`` subclasses so
+        existing broad handlers keep working."""
+        for exc in (MissingBookColumnError, BlankBookCellError, BooksCsvSchemaError):
+            assert issubclass(exc, SanadsetSchemaError)
+            assert issubclass(exc, ValueError)
 
 
 class TestBooksCsvAbsentIdentity:
@@ -676,7 +741,7 @@ class TestBooksCsvAbsentIdentity:
 
     def test_no_source_id_is_double_prefixed(self, tmp_path: Path) -> None:
         """No id carries the doubled corpus segment, so ``hadith_node_id``'s
-        ``_collapse_double_corpus`` never fires and never merges two hadiths."""
+        the da#355 doubled-corpus assertion never fires and never merges two hadiths."""
         rows = self._parse_without_books(tmp_path)
         for r in rows:
             sid = str(r["source_id"])

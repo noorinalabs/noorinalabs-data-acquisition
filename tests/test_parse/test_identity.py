@@ -15,6 +15,7 @@ from src.models.enums import SourceCorpus
 from src.parse.base import generate_source_id
 from src.parse.identity import (
     SOURCE_CORPORA,
+    DoubledCorpusPrefixError,
     bare_source_id,
     chain_node_id,
     collection_node_id,
@@ -64,45 +65,90 @@ class TestHadithNodeId:
         once = hadith_node_id("sunnah:bukhari:1:1:1")
         assert hadith_node_id(once) == once
 
-    def test_collapses_doubled_corpus_bare(self) -> None:
-        # The main#139 streaming-path shape, pre-``hdt:``.
-        assert hadith_node_id("sunnah:sunnah:bukhari:1:1:1") == "hdt:sunnah:bukhari:1:1:1"
+    def test_doubled_corpus_raises_bare(self) -> None:
+        # The main#139 streaming-path shape, pre-``hdt:``. No producer emits this
+        # any more (da#353), so its arrival is a producer defect -> raise (da#355).
+        with pytest.raises(DoubledCorpusPrefixError, match="doubled leading corpus"):
+            hadith_node_id("sunnah:sunnah:bukhari:1:1:1")
 
-    def test_collapses_doubled_corpus_with_prefix(self) -> None:
-        assert hadith_node_id("hdt:sunnah:sunnah:bukhari:1:1:1") == "hdt:sunnah:bukhari:1:1:1"
+    def test_doubled_corpus_raises_with_prefix(self) -> None:
+        with pytest.raises(DoubledCorpusPrefixError, match="doubled leading corpus"):
+            hadith_node_id("hdt:sunnah:sunnah:bukhari:1:1:1")
 
-    def test_collapses_triple_corpus(self) -> None:
-        assert hadith_node_id("sunnah:sunnah:sunnah:bukhari:1") == "hdt:sunnah:bukhari:1"
+    def test_triple_corpus_raises(self) -> None:
+        with pytest.raises(DoubledCorpusPrefixError):
+            hadith_node_id("sunnah:sunnah:sunnah:bukhari:1")
 
-    def test_does_not_collapse_legit_repeat_deeper(self) -> None:
+    def test_corpus_named_collection_is_not_rewritten(self) -> None:
+        """da#355: ``corpus:collection`` where collection == corpus is VALID grammar.
+
+        The old ``_collapse_double_corpus`` could not tell this apart from a
+        genuinely double-prefixed id and silently DROPPED the collection segment,
+        rewriting a valid identifier. It must now raise rather than guess — the
+        one thing it must never do is return ``hdt:lk:1``.
+        """
+        with pytest.raises(DoubledCorpusPrefixError):
+            hadith_node_id("lk:lk:1")
+
+    def test_chain_and_grading_ids_also_raise(self) -> None:
+        # Every hadith-derived id routes through ``bare_source_id``.
+        with pytest.raises(DoubledCorpusPrefixError):
+            chain_node_id("lk:lk:1")
+        with pytest.raises(DoubledCorpusPrefixError):
+            grading_node_id("lk:lk:1")
+
+    def test_error_is_a_valueerror(self) -> None:
+        # Subclasses ValueError so existing broad handlers/tests keep working.
+        assert issubclass(DoubledCorpusPrefixError, ValueError)
+
+    def test_does_not_flag_legit_repeat_deeper(self) -> None:
         # A repeated *non-leading* segment that is not a doubled corpus is kept.
         assert hadith_node_id("lk:bukhari:1:1") == "hdt:lk:bukhari:1:1"
 
-    def test_does_not_collapse_non_corpus_lead(self) -> None:
-        # If the leading segment is not a known corpus, never collapse.
+    def test_does_not_flag_non_corpus_lead(self) -> None:
+        # If the leading segment is not a known corpus, never flag.
         assert hadith_node_id("h-1:h-1:x") == "hdt:h-1:h-1:x"
 
 
 class TestBatchVsStreamingConverge:
-    """The keystone guarantee: the same hadith -> exactly one node id."""
+    """The keystone guarantee: the same hadith -> exactly one node id.
+
+    Both paths converge because both build the id through this module (ig#63 /
+    ig#72 fixed the streaming producer). The convergence is NOT achieved by
+    repairing a doubled corpus after the fact: since da#355 that shape RAISES, so
+    a producer that re-injects the corpus fails loudly instead of being silently
+    normalized onto the other path's id.
+    """
 
     def test_two_paths_same_id(self) -> None:
         source_id = generate_source_id("sunnah", "bukhari", 1, 1, 1)
-        # Batch loader shape: hdt: + source_id (corpus once).
+        # Both paths route through the ONE prefixing rule, from the same source_id.
         batch_id = hadith_node_id(source_id)
-        # Streaming/normalize bug shape: corpus re-injected before prefixing.
+        streaming_id = hadith_node_id(source_id)
+        assert batch_id == streaming_id == "hdt:sunnah:bukhari:1:1:1"
+        # Idempotent: re-canonicalizing an already-canonical id is a no-op, so a
+        # path that hands an already-prefixed id back in still converges.
+        assert hadith_node_id(batch_id) == batch_id
+
+    def test_streaming_double_prefix_bug_now_fails_loudly(self) -> None:
+        # The main#139 shape: corpus re-injected before prefixing. Previously this
+        # was silently collapsed onto the batch id; now it is a producer defect.
+        source_id = generate_source_id("sunnah", "bukhari", 1, 1, 1)
         streaming_buggy = f"{SourceCorpus.SUNNAH.value}:{source_id}"
-        streaming_id = hadith_node_id(streaming_buggy)
-        assert batch_id == streaming_id
+        with pytest.raises(DoubledCorpusPrefixError):
+            hadith_node_id(streaming_buggy)
 
     def test_naive_concat_would_diverge(self) -> None:
-        # Proves the helper is load-bearing: naive prefixing yields TWO ids.
+        # Proves the helper is load-bearing: naive prefixing yields TWO ids...
         source_id = "sunnah:bukhari:1:1:1"
         naive_batch = f"hdt:{source_id}"
         naive_streaming = f"hdt:{SourceCorpus.SUNNAH.value}:{source_id}"
         assert naive_batch != naive_streaming
-        # ...but routed through the canonical helper they converge.
-        assert hadith_node_id(naive_batch) == hadith_node_id(naive_streaming)
+        # ...and the canonical helper no longer papers over the divergence: it
+        # accepts the correct one and rejects the doubled one.
+        assert hadith_node_id(naive_batch) == naive_batch
+        with pytest.raises(DoubledCorpusPrefixError):
+            hadith_node_id(naive_streaming)
 
 
 class TestOtherNodeIds:
@@ -124,9 +170,16 @@ class TestOtherNodeIds:
         # Grading and Hadith id derive from the SAME bare source_id.
         assert grading_node_id("hdt:lk:bukhari:1:1") == "grd:lk:bukhari:1:1"
 
-    def test_bare_source_id(self) -> None:
+    def test_bare_source_id_strips_hdt_prefix(self) -> None:
+        # The ``hdt:`` strip is genuine, unambiguous prefix-stripping and stays
+        # idempotent (da#355 keeps this; only the lossy collapse is removed).
         assert bare_source_id("hdt:sunnah:bukhari:1") == "sunnah:bukhari:1"
-        assert bare_source_id("sunnah:sunnah:bukhari:1") == "sunnah:bukhari:1"
+        assert bare_source_id("sunnah:bukhari:1") == "sunnah:bukhari:1"
+        assert bare_source_id(bare_source_id("hdt:sunnah:bukhari:1")) == "sunnah:bukhari:1"
+
+    def test_bare_source_id_rejects_doubled_corpus(self) -> None:
+        with pytest.raises(DoubledCorpusPrefixError):
+            bare_source_id("sunnah:sunnah:bukhari:1")
 
 
 class TestCrossSourceCollisionSafety:
