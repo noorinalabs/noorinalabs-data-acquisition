@@ -436,22 +436,33 @@ def _parse_books(raw_dir: Path) -> dict[str, dict[str, object]]:
     return books
 
 
-def _resolve_collection_name(book_key: str | None, default_name: str, has_books: bool) -> str:
+def _resolve_collection_name(book_key: str | None, default_name: str) -> str:
     """Collection name (APPEARS_IN join key) for a hadith row (da#219 / da#353).
 
-    With ``books.csv`` present the hadith's book — identified by the
-    :func:`_book_key` content digest of its ``Book`` name — is the collection, so
-    the corpus keeps its per-book breadth (the reason Path B was chosen over a
-    purge). Without it (or when a row carries no book name) the pre-B1
-    per-CSV-stem ``default_name`` is kept.
+    The hadith's book — identified by the :func:`_book_key` content digest of its
+    own ``Book`` column — is the collection, so the corpus keeps its per-book
+    breadth (the reason Path B was chosen over a purge).
+
+    ``books.csv`` is deliberately **not** consulted here. It supplies Collection
+    *metadata* (Arabic name, compiler) only; the join key comes from the hadith
+    row itself. Gating this key on ``books.csv``'s presence — as the first cut of
+    da#353 did — made a missing 48 KB metadata file re-key all 650,986 hadiths
+    onto ``{corpus}:{corpus}:{Num_hadith}``, which ``hadith_node_id`` collapses to
+    ``{corpus}:{Num_hadith}``. ``Num_hadith`` is an in-book ordinal with only
+    37,239 distinct values corpus-wide, so 613,747 hadiths (94.3%) MERGEd away
+    into their namesakes. Metadata may degrade; identity may not.
+
+    ``default_name`` survives only for a row whose ``Book`` cell is blank — the
+    real corpus has none (verified: 0/650,986). A hadith CSV with no ``Book``
+    column at all is rejected outright by :func:`_process_chunk`.
     """
-    if has_books and book_key is not None:
+    if book_key is not None:
         return book_key
     return default_name
 
 
 def _collection_row(
-    collection_name: str, total_hadiths: int, books: dict[str, dict[str, object]], has_books: bool
+    collection_name: str, total_hadiths: int, books: dict[str, dict[str, object]]
 ) -> dict[str, object]:
     """Build one ``COLLECTION_SCHEMA`` row for a distinct ``collection_name``.
 
@@ -467,9 +478,12 @@ def _collection_row(
         compiler_name = meta["compiler_name"]
     else:
         name_ar = None
-        # A book_id with no books.csv row (has_books) gets a deterministic label;
-        # the per-CSV-stem fallback keeps the stem itself as a human name.
-        name_en = f"Sanadset book {collection_name}" if has_books else collection_name
+        # No books.csv row for this key — either books.csv is absent entirely or it
+        # lists no such book. Label it deterministically off the key. Keyed on
+        # ``meta is None`` rather than a books.csv-presence flag: the flag would
+        # hand a digest-keyed collection the raw digest as its human-readable
+        # ``name_en``.
+        name_en = f"Sanadset book {collection_name}"
         compiler_name = None
     return {
         "collection_id": generate_source_id(_SOURCE_CORPUS, collection_name),
@@ -486,8 +500,6 @@ def _collection_row(
 def _process_chunk(
     rows: list[dict[str, object]],
     collection_name: str,
-    *,
-    has_books: bool = False,
 ) -> tuple[list[dict[str, object]], list[dict[str, str | int | None]], int, int]:
     """Process a chunk of rows.
 
@@ -503,6 +515,9 @@ def _process_chunk(
     columns — nulling ``hadith_number`` and collapsing all 650,986 rows into one
     collection. Matching by lower-cased name, not by enumerating spellings, is what
     prevents a recurrence.
+
+    A hadith CSV with no ``Book`` column raises: that column is the collection join
+    key, and silently falling back to the CSV stem destroys corpus identity.
     """
     hadiths: list[dict[str, object]] = []
     mentions: list[dict[str, str | int | None]] = []
@@ -527,6 +542,19 @@ def _process_chunk(
     grade_col = col("grade")
     chapter_col = col("chapter")
 
+    # The ``Book`` column is the collection join key, so its absence is a broken
+    # corpus — the same standard ``_parse_books`` applies to an unmappable
+    # books.csv. Without it every row would fall back to ``default_name`` (the CSV
+    # stem), which for the production file ``sanadset.csv`` equals the corpus name
+    # and yields ids that collapse 650,986 hadiths onto 37,239. Fail loudly rather
+    # than silently destroy 94% of the corpus.
+    if book_col is None:
+        msg = (
+            "Sanadset hadith CSV has no 'Book' column — the book->collection join "
+            f"key cannot be built (columns seen: {sorted(colmap.values())!r})"
+        )
+        raise ValueError(msg)
+
     for row in rows:
         full_text = safe_str(row.get(text_col)) if text_col else None
         if full_text is None:
@@ -537,7 +565,7 @@ def _process_chunk(
         hadith_num = safe_int(row.get(num_col)) if num_col else None
         book_name = safe_str(row.get(book_col)) if book_col else None
         book_key = _book_key(book_name) if book_name else None
-        row_collection = _resolve_collection_name(book_key, collection_name, has_books)
+        row_collection = _resolve_collection_name(book_key, collection_name)
 
         # source_id is content-derived and STABLE under re-acquisition (da#353):
         # keyed on the book's name-digest and the ``Num_hadith`` citation ordinal,
@@ -775,7 +803,6 @@ def parse_sanadset(
             hadiths, mentions, malformed, raw_nar = _process_chunk(
                 chunk,
                 collection_name,
-                has_books=has_books,
             )
             all_hadiths.extend(hadiths)
             all_mentions.extend(mentions)
@@ -833,8 +860,7 @@ def parse_sanadset(
         collection_counts[cname] = collection_counts.get(cname, 0) + 1
 
     collection_rows = [
-        _collection_row(cname, count, books, has_books)
-        for cname, count in sorted(collection_counts.items())
+        _collection_row(cname, count, books) for cname, count in sorted(collection_counts.items())
     ]
     # Fill sourced name_ar + expected_count where curated (da#230).
     collection_rows = [apply_collection_metadata(r) for r in collection_rows]

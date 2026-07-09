@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pyarrow.parquet as pq
+import pytest
 
 from src.parse.identity import collection_node_id, is_double_prefixed
 from src.parse.sanadset import _book_key, parse_sanadset
@@ -179,8 +180,6 @@ class TestSanadsetParser:
         raw_dir.mkdir(parents=True)
         staging_dir = tmp_path / "staging"
 
-        import pytest
-
         with pytest.raises(FileNotFoundError):
             with patch("src.parse.sanadset.get_settings") as mock_settings:
                 mock_settings.return_value.data_raw_dir = tmp_path / "raw"
@@ -226,24 +225,37 @@ class TestSanadsetCollections:
     """Collection emission for APPEARS_IN linkage (da#219 / Path B-B1)."""
 
     def test_collections_emitted_without_books_csv(self, tmp_path: Path) -> None:
-        """Absent books.csv → one Collection per CSV stem (pre-B1 fallback)."""
+        """Absent books.csv → still one Collection per BOOK, keyed on the hadith
+        row's own ``Book`` digest. books.csv supplies metadata, never the join key.
+
+        The fixture is named ``sanadset.csv`` — the production filename — because
+        the collapse this guards against only reproduces when the CSV stem equals
+        the corpus name (see ``TestBooksCsvAbsentIdentity``).
+        """
         raw_dir = tmp_path / "raw" / "sanadset"
         raw_dir.mkdir(parents=True)
         staging_dir = tmp_path / "staging"
-        _make_sanadset_csv(raw_dir / "hadiths.csv")
+        _make_sanadset_csv(raw_dir / "sanadset.csv")
 
         outputs = parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
 
         assert "collections" in outputs
         table = pq.read_table(staging_dir / "collections_sanadset.parquet")
         assert table.schema == COLLECTION_SCHEMA
-        # All three hadiths fall under the single CSV-stem collection "hadiths".
-        assert table.num_rows == 1
-        row = table.to_pylist()[0]
-        assert row["collection_id"] == "sanadset:hadiths"
-        assert row["source_corpus"] == "sanadset"
-        assert row["sect"] == "sunni"
-        assert row["total_hadiths"] == 3
+        key_b, key_m = _book_key(_BOOK_BUKHARI), _book_key(_BOOK_MUSLIM)
+        assert table.num_rows == 2
+        by_id = {c["collection_id"]: c for c in table.to_pylist()}
+        assert set(by_id) == {f"sanadset:{key_b}", f"sanadset:{key_m}"}
+        # No books.csv → no Arabic name, but a deterministic human label keyed on
+        # the digest — never the bare digest as name_en.
+        assert by_id[f"sanadset:{key_b}"]["name_ar"] is None
+        assert by_id[f"sanadset:{key_b}"]["name_en"] == f"Sanadset book {key_b}"
+        assert by_id[f"sanadset:{key_m}"]["name_en"] == f"Sanadset book {key_m}"
+        assert by_id[f"sanadset:{key_b}"]["total_hadiths"] == 2
+        assert by_id[f"sanadset:{key_m}"]["total_hadiths"] == 1
+        assert all(
+            c["source_corpus"] == "sanadset" and c["sect"] == "sunni" for c in by_id.values()
+        )
 
     def test_collections_from_books_csv(self, tmp_path: Path) -> None:
         """books.csv present → one Collection per book NAME (da#353 name-keyed join)."""
@@ -378,13 +390,13 @@ class TestNarratorResegmentation:
         # Two genuine narrators, interleaved with a transmission verb, an
         # honorific, an English fragment, and a Latin transliteration — all <NAR>.
         polluted = (
-            "hadith_id,book_id,hadith,grade\n"
-            '1,1,"<SANAD><NAR>مالك بن أنس</NAR> عن <NAR>قال</NAR> '
+            "Hadith,Book,Num_hadith,grade\n"
+            '"<SANAD><NAR>مالك بن أنس</NAR> عن <NAR>قال</NAR> '
             "<NAR>رضي الله عنه</NAR> <NAR>He said</NAR> "
             "<NAR>Malik ibn Anas</NAR> عن <NAR>أبو هريرة</NAR></SANAD>"
-            '<MATN>متن</MATN>",Sahih\n'
+            f'<MATN>متن</MATN>",{_BOOK_BUKHARI},1,Sahih\n'
         )
-        (raw_dir / "hadiths.csv").write_text(polluted, encoding="utf-8")
+        (raw_dir / "sanadset.csv").write_text(polluted, encoding="utf-8")
 
         parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
 
@@ -426,8 +438,8 @@ class TestMatnMarkupStrip:
         raw_dir = tmp_path / "raw" / "sanadset"
         raw_dir.mkdir(parents=True)
         staging_dir = tmp_path / "staging"
-        csv = f'hadith_id,book_id,hadith,grade\n1,1,"{hadith_field}",Sahih\n'
-        (raw_dir / "hadiths.csv").write_text(csv, encoding="utf-8")
+        csv = f'Hadith,Book,Num_hadith,grade\n"{hadith_field}",{_BOOK_BUKHARI},1,Sahih\n'
+        (raw_dir / "sanadset.csv").write_text(csv, encoding="utf-8")
 
         parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
 
@@ -577,11 +589,24 @@ class TestSanadsetColumnMapping:
         assert sid_a == sid_b
         assert sid_a == f"sanadset:{_book_key(_BOOK_MUSLIM)}:7"
 
+    def test_no_book_column_raises(self, tmp_path: Path) -> None:
+        """A hadith CSV with no ``Book`` column raises. That column is the collection
+        join key; falling back to the CSV stem would re-key every row onto
+        ``{corpus}:{corpus}:{Num_hadith}`` and collapse the corpus."""
+        raw_dir = tmp_path / "raw" / "sanadset"
+        raw_dir.mkdir(parents=True)
+        staging_dir = tmp_path / "staging"
+        (raw_dir / "sanadset.csv").write_text(
+            'Hadith,Num_hadith\n"<SANAD><NAR>مالك</NAR></SANAD><MATN>متن</MATN>",1\n',
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match="no 'Book' column"):
+            parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
+
     def test_present_but_unmappable_books_raises(self, tmp_path: Path) -> None:
         """A present books.csv with no resolvable name column raises (da#353 item 4):
         a dead join key must fail loudly, not silently disable per-book breadth."""
-        import pytest
-
         raw_dir = tmp_path / "raw" / "sanadset"
         raw_dir.mkdir(parents=True)
         staging_dir = tmp_path / "staging"
@@ -591,3 +616,84 @@ class TestSanadsetColumnMapping:
 
         with pytest.raises(ValueError, match="book-name column"):
             parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
+
+
+class TestBooksCsvAbsentIdentity:
+    """A missing books.csv must degrade METADATA, never IDENTITY.
+
+    ``src/acquire/sanadset.py`` skips the whole Mendeley download when the raw dir
+    already holds any ``*.csv`` and never checks that ``books.csv`` landed, and
+    ``_download_mendeley`` has no rollback. A transient failure fetching the 48 KB
+    books.csv *after* the 1.4 GB sanadset.csv is written poisons every later run —
+    so ``books.csv``-absent is a reachable, sticky production state, not a
+    hypothetical.
+
+    Two properties must hold in that state, and both are load-bearing:
+
+    * **Row-name realism.** The hadith CSV is named ``sanadset.csv``, exactly as
+      production has it, so its stem equals ``_SOURCE_CORPUS``. Any fixture named
+      otherwise (the old ``hadiths.csv``) makes ``default_name != corpus`` and is
+      structurally incapable of reproducing the doubled-prefix collapse.
+    * **Ordinal reuse.** The two books share ``Num_hadith`` 1 and 2. ``Num_hadith``
+      is an in-book ordinal (37,239 distinct values across 650,986 real rows), so a
+      fixture with globally unique ordinals would keep ids distinct even under the
+      collapsing code and prove nothing.
+    """
+
+    _CSV = (
+        "Hadith,Book,Num_hadith\n"
+        f'"<SANAD><NAR>مالك</NAR></SANAD><MATN>متن أ</MATN>",{_BOOK_BUKHARI},1\n'
+        f'"<SANAD><NAR>أنس</NAR></SANAD><MATN>متن ب</MATN>",{_BOOK_BUKHARI},2\n'
+        f'"<SANAD><NAR>شعبة</NAR></SANAD><MATN>متن ج</MATN>",{_BOOK_MUSLIM},1\n'
+        f'"<SANAD><NAR>قتادة</NAR></SANAD><MATN>متن د</MATN>",{_BOOK_MUSLIM},2\n'
+    )
+    _ROW_COUNT = 4
+
+    def _parse_without_books(self, tmp_path: Path) -> list[dict[str, object]]:
+        raw_dir = tmp_path / "raw" / "sanadset"
+        raw_dir.mkdir(parents=True)
+        staging_dir = tmp_path / "staging"
+        (raw_dir / "sanadset.csv").write_text(self._CSV, encoding="utf-8")
+        assert not (raw_dir / "books.csv").exists()
+
+        parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
+        rows: list[dict[str, object]] = pq.read_table(
+            staging_dir / "hadiths_sanadset.parquet"
+        ).to_pylist()
+        return rows
+
+    def test_every_hadith_keeps_a_distinct_source_id(self, tmp_path: Path) -> None:
+        """650,986 rows → 650,986 ids. Keyed on Num_hadith alone they would collapse
+        to 37,239, silently destroying 613,747 hadiths (94.3%) at MERGE time."""
+        rows = self._parse_without_books(tmp_path)
+        assert len(rows) == self._ROW_COUNT
+
+        source_ids = [str(r["source_id"]) for r in rows]
+        assert len(set(source_ids)) == self._ROW_COUNT, (
+            f"source_id collision without books.csv: {self._ROW_COUNT} rows -> "
+            f"{len(set(source_ids))} distinct ids ({sorted(source_ids)})"
+        )
+
+    def test_no_source_id_is_double_prefixed(self, tmp_path: Path) -> None:
+        """No id carries the doubled corpus segment, so ``hadith_node_id``'s
+        ``_collapse_double_corpus`` never fires and never merges two hadiths."""
+        rows = self._parse_without_books(tmp_path)
+        for r in rows:
+            sid = str(r["source_id"])
+            assert not sid.startswith("sanadset:sanadset:"), sid
+            assert not is_double_prefixed(sid), sid
+
+    def test_collection_key_is_the_book_not_the_csv_stem(self, tmp_path: Path) -> None:
+        """The join key comes from the row's own ``Book``, so per-book breadth
+        survives a missing books.csv — degraded metadata, intact identity."""
+        rows = self._parse_without_books(tmp_path)
+        key_b, key_m = _book_key(_BOOK_BUKHARI), _book_key(_BOOK_MUSLIM)
+        assert {str(r["collection_name"]) for r in rows} == {key_b, key_m}
+        assert sorted(str(r["source_id"]) for r in rows) == sorted(
+            [
+                f"sanadset:{key_b}:1",
+                f"sanadset:{key_b}:2",
+                f"sanadset:{key_m}:1",
+                f"sanadset:{key_m}:2",
+            ]
+        )

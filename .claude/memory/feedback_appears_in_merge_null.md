@@ -1,11 +1,22 @@
 ---
 name: feedback_appears_in_merge_null
-description: data-acquisition graph loader _APPEARS_IN_QUERY MERGEs the relationship with hadith_number_in_book inside the MERGE pattern → Neo4j rejects null property → real load aborts on every scraped (null hadith_number) hadith; mock suite masks it.
+description: "HISTORICAL (fixed da#77): _APPEARS_IN_QUERY once MERGEd hadith_number_in_book inside the MERGE pattern → Neo4j rejected the null property → real load aborted on every scraped hadith; mock suite masked it. At HEAD the query is the coalesce-after-MERGE form and is null-safe — this memory explains WHY that shape exists, it does NOT describe a live defect."
 metadata: 
   node_type: memory
   type: feedback
   originSessionId: 080813cd-f3b8-434d-974c-badf58620c96
 ---
+
+> **STALE-AT-HEAD as of 2026-07-09 (verified during da#353 / PR #357).** The
+> defect described below is **fixed** and has been since da#77. `src/graph/
+> load_edges.py:440-448` at HEAD is the null-safe coalesce-after-MERGE form:
+> `MERGE (h)-[r:APPEARS_IN]->(c)` with **no properties in the pattern**, then
+> `SET r.hadith_number_in_book = coalesce(row.hadith_number, r.hadith_number_in_book)`.
+> Do **not** read this memory as a live constraint — in particular, **emitting a
+> null `book_number` or `hadith_number` from a parser is safe**. This file is
+> retained because the historical failure is real and records *why* the current
+> shape exists; the reasoning below (MERGE-key vs SET attribute, coalesce-preserve
+> vs plain SET) is still binding. Re-verify against `load_edges.py` before citing.
 
 `src/graph/load_edges.py _APPEARS_IN_QUERY` builds the APPEARS_IN relationship
 with `MERGE (h)-[:APPEARS_IN {book_number, chapter_number, hadith_number_in_book:
@@ -43,3 +54,11 @@ during the main#139↔da#73 contract align by reading Nikolaos's processor. Coor
 a NON-null sample is unaffected), Nikolaos (ig#62/main#139 MERGE-shape harness),
 Alejandra (da#72, orthogonal). The `AppearsIn` model is untouched.
 Found 2026-06-10 da#73/PR#76, fixed 2026-06-11 da#77 (Kwesi).
+
+**2026-07-09 (da#353/PR#357):** re-verified at HEAD by two reviewers + the TPM —
+`load_edges.py:440-448` carries the coalesce-after-MERGE form; the pattern holds
+no properties. The stale present-tense summary on this memory nearly deterred a
+correct parser change that emits a null `book_number`. Lesson beyond the Cypher:
+**a memory that records a fixed bug must say so in its `description`,** because
+the description is what `MEMORY.md` and recall surface — a body-buried "FIXED"
+line does not reach the reader in time. See [[feedback_full_read_over_tail]].
