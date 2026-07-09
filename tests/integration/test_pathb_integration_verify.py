@@ -65,21 +65,29 @@ _SHARED_MATN = "إنما الأعمال بالنيات"
 #           with the full pollution menagerie B3 must drop: a bare transmission
 #           verb (قال), a whole honorific phrase (رضي الله عنه), an English
 #           fragment (He said), and a Latin transliteration (Malik ibn Anas).
+# The header is the REAL production one — ``Hadith,Book,Num_hadith`` — where
+# ``Book`` is the book's Arabic NAME (not an int id) and ``Num_hadith`` an in-book
+# ordinal that REPEATS across books (rows 1 and 3 are both number 1). The former
+# fixture used a synthetic ``hadith_id,book_id,hadith`` header that exists in no
+# edition of the corpus, which is what let the books.csv-absent identity collapse
+# (da#353 review) hide behind a green suite.
+_BOOK_BUKHARI = "صحيح البخاري"
+_BOOK_MUSLIM = "صحيح مسلم"
 _SANADSET_CSV = (
-    "hadith_id,book_id,hadith,grade\n"
-    '1,1,"<SANAD><NAR>مالك بن أنس</NAR> عن <NAR>أبو هريرة</NAR></SANAD>'
-    f'<MATN>{_SHARED_MATN}</MATN>",Sahih\n'
-    '2,1,"<SANAD><NAR>أنس بن مالك</NAR> عن <NAR>مالك بن أنس</NAR></SANAD>'
-    '<MATN>لا ضرر ولا ضرار</MATN>",Hasan\n'
-    '3,2,"<SANAD><NAR>مالك بن أنس</NAR> عن <NAR>قال</NAR> <NAR>رضي الله عنه</NAR> '
+    "Hadith,Book,Num_hadith,grade\n"
+    '"<SANAD><NAR>مالك بن أنس</NAR> عن <NAR>أبو هريرة</NAR></SANAD>'
+    f'<MATN>{_SHARED_MATN}</MATN>",{_BOOK_BUKHARI},1,Sahih\n'
+    '"<SANAD><NAR>أنس بن مالك</NAR> عن <NAR>مالك بن أنس</NAR></SANAD>'
+    f'<MATN>لا ضرر ولا ضرار</MATN>",{_BOOK_BUKHARI},2,Hasan\n'
+    '"<SANAD><NAR>مالك بن أنس</NAR> عن <NAR>قال</NAR> <NAR>رضي الله عنه</NAR> '
     "<NAR>He said</NAR> <NAR>Malik ibn Anas</NAR> عن <NAR>أبو هريرة</NAR></SANAD>"
-    '<MATN>هذا متن آخر مختلف</MATN>",Sahih\n'
+    f'<MATN>هذا متن آخر مختلف</MATN>",{_BOOK_MUSLIM},1,Sahih\n'
 )
 
-# books.csv (B1): maps each hadith's book_id to its collection so per-book
-# Collection nodes are emitted (sanadset keeps its collection breadth — the reason
-# Path B was chosen over a per-source purge).
-_BOOKS_CSV = "book_id,name,author\n1,صحيح البخاري,البخاري\n2,صحيح مسلم,مسلم\n"
+# books.csv (B1): supplies Collection METADATA keyed on the book NAME digest — the
+# same key the hadith row's own ``Book`` column yields. It never supplies the join
+# key itself, so its absence degrades metadata, not identity (da#353 review).
+_BOOKS_CSV = f"book_id,name,author\n1,{_BOOK_BUKHARI},البخاري\n2,{_BOOK_MUSLIM},مسلم\n"
 
 # Pollution that MUST NOT survive B3 re-segmentation into narrator mentions.
 _POLLUTION = ("قال", "رضي الله عنه", "He said", "Malik ibn Anas")
@@ -91,7 +99,7 @@ def _lay_out_sanadset(tmp_path: Path) -> Path:
     """Write the representative raw sanadset corpus (hadith CSV + books.csv)."""
     raw_dir = tmp_path / "sanadset"
     raw_dir.mkdir(parents=True)
-    (raw_dir / "hadiths.csv").write_text(_SANADSET_CSV, encoding="utf-8")
+    (raw_dir / "sanadset.csv").write_text(_SANADSET_CSV, encoding="utf-8")
     (raw_dir / "books.csv").write_text(_BOOKS_CSV, encoding="utf-8")
     return raw_dir
 

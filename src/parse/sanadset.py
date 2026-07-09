@@ -20,10 +20,13 @@ silently dropped every sanadset ``APPEARS_IN`` edge (the headline orphan defect,
 ADR-003). B1 reads the already-acquired ``books.csv`` and emits one ``Collection``
 per book so each hadith links to its book's collection. The APPEARS_IN endpoint is
 keyed ``col:<corpus>:<collection_name>`` (``load_edges._load_appears_in``), so the
-join key is the hadith's ``collection_name``: when ``books.csv`` is present it is
-the ``book_id`` (per-book breadth — the reason Path B was chosen over a purge);
-otherwise it falls back to the per-CSV-stem name (pre-B1 behavior). Cross-edition
-dedup (B2 / da#220) is deliberately out of scope here.
+join key is the hadith's ``collection_name``: when ``books.csv`` is present it is a
+stable content digest of the book's Arabic name (:func:`_book_key`; per-book
+breadth — the reason Path B was chosen over a purge); otherwise it falls back to
+the per-CSV-stem name (pre-B1 behavior). The Sanadset ``books.csv`` is a name-only
+list and its hadith CSV cites a book by *name*, not id — keying on the name-digest
+(never books.csv row order) keeps both the id and the join stable under
+re-acquisition (da#353). Cross-edition dedup (B2 / da#220) is out of scope here.
 
 Narrator re-segmentation (da#221, Path B / B3)
 ----------------------------------------------
@@ -50,6 +53,7 @@ firehose — the ``narrator_mentions_sanadset`` baseline in
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -322,16 +326,60 @@ def _extract_narrator_mentions(
     return mentions
 
 
-def _parse_books(raw_dir: Path) -> dict[str, dict[str, object]]:
-    """Read ``books.csv`` into a ``{book_id: collection-metadata}`` mapping (da#219).
+def _book_key(name_ar: str) -> str:
+    """Stable, content-derived collection key for a Sanadset book *name* (da#353).
 
-    ``books.csv`` (Mendeley 5xth87zwb5) is the book→collection table acquired
-    alongside ``sanadset.csv``. Columns are matched case-insensitively and
-    flexibly because the upstream header spelling is not contractually fixed; an
-    absent / id-less / unreadable file yields an empty mapping, in which case the
-    parser falls back to the per-CSV-stem collection name (pre-B1 behavior). The
-    keys are the stringified integer ``book_id`` so they JOIN to the hadith's
-    ``collection_name`` (also the ``book_id``) for APPEARS_IN.
+    Sanadset identifies a hadith's book by its Arabic **name** — both ``books.csv``
+    and the hadith CSV's ``Book`` column carry names, not ids. The key is a short
+    BLAKE2b digest of the :func:`~src.utils.arabic.normalize_arabic`-normalized
+    name, so it is:
+
+    * **content-derived** — invariant under ``books.csv`` row order (a positional
+      book index would reintroduce exactly the re-key-on-re-acquisition instability
+      da#353 fixes, one level up), and
+    * **join-stable** — the hadith side and the ``books.csv`` side digest the SAME
+      normalized name through this SAME function, so a hadith's ``Book`` and its
+      matching ``books.csv`` row converge on one key. Mirrors the
+      uuid5-from-normalized-name precedent in :func:`identity.make_canonical_id`;
+      BLAKE2b keeps the key short and it can never contain the ``:`` id delimiter.
+    """
+    normalized = normalize_arabic(name_ar)
+    return hashlib.blake2b(normalized.encode("utf-8"), digest_size=8).hexdigest()
+
+
+def _content_digest(text: str) -> str:
+    """Stable content digest for a hadith that carries no citation number (da#353).
+
+    The Sanadset corpus always has ``Num_hadith``, so this is only reached for
+    degraded / non-standard input. Keying the ``source_id`` tail on a digest of the
+    hadith text keeps the id content-derived and stable under re-acquisition rather
+    than positional — a row offset is never used (da#353).
+    """
+    return hashlib.blake2b(text.encode("utf-8"), digest_size=8).hexdigest()
+
+
+def _parse_books(raw_dir: Path) -> dict[str, dict[str, object]]:
+    """Read ``books.csv`` into a ``{book_key: collection-metadata}`` mapping (da#219 / da#353).
+
+    ``books.csv`` (Mendeley 5xth87zwb5) is the book table acquired alongside
+    ``sanadset.csv``. The production file is a **name-only** list — a single
+    ``Book`` column of 956 Arabic book names, with no id column — so the join key
+    is the book **name**, digested to a stable content key by :func:`_book_key`
+    (never the ``books.csv`` row order, which is positional and unstable under
+    re-acquisition). Columns are matched case-insensitively because the upstream
+    header spelling is not contractually fixed.
+
+    Fail-loud contract (da#353): a genuinely **absent** file is a legitimate
+    fallback — the parser then uses the per-CSV-stem collection name (pre-B1
+    behaviour). But a **present** file that resolves no book-name column, or yields
+    no usable rows, is a broken join key for a 650k-row corpus, so it RAISES rather
+    than silently returning ``{}`` and disabling per-book breadth (the
+    ``books_csv_no_id_column`` foot-gun that shipped dead for months — this issue's
+    root cause).
+
+    The keys are the :func:`_book_key` digest of each name, so they JOIN to the
+    hadith's ``collection_name`` (also ``_book_key`` of its ``Book`` name) for
+    APPEARS_IN.
     """
     books_path = raw_dir / _BOOKS_FILENAME
     if not books_path.exists():
@@ -345,11 +393,17 @@ def _parse_books(raw_dir: Path) -> dict[str, dict[str, object]]:
                 return cols[cand]
         return None
 
-    id_col = pick("book_id", "id", "bookid")
-    if id_col is None:
-        logger.warning("books_csv_no_id_column", available=sorted(cols))
-        return {}
-    name_ar_col = pick("name_ar", "book_name", "name", "title", "arabic_name", "book")
+    # The book NAME is the join key (the real file has no id column). A future
+    # edition's ``id``/``book_id`` column, if one ever ships, is ignored: the
+    # name-digest is the stable key both the books and hadith sides share.
+    name_ar_col = pick("book", "name_ar", "book_name", "name", "title", "arabic_name")
+    if name_ar_col is None:
+        msg = (
+            f"{_BOOKS_FILENAME} is present but resolves no book-name column "
+            f"(looked for book/name_ar/book_name/name/title/arabic_name; found "
+            f"{sorted(cols)}) — the book->collection join key cannot be built"
+        )
+        raise ValueError(msg)
     name_en_col = pick("name_en", "english_name", "name_english", "title_en")
     compiler_col = pick("author", "compiler", "compiler_name", "writer", "musannif")
     count_col = pick(
@@ -359,11 +413,10 @@ def _parse_books(raw_dir: Path) -> dict[str, dict[str, object]]:
     books: dict[str, dict[str, object]] = {}
     for i in range(table.num_rows):
         row = {c: table.column(c)[i].as_py() for c in table.column_names}
-        book_id = safe_int(row.get(id_col))
-        if book_id is None:
+        name_ar = safe_str(row.get(name_ar_col))
+        if name_ar is None:
             continue
-        key = str(book_id)
-        name_ar = safe_str(row.get(name_ar_col)) if name_ar_col else None
+        key = _book_key(name_ar)
         name_en = safe_str(row.get(name_en_col)) if name_en_col else None
         books[key] = {
             "name_ar": name_ar,
@@ -373,24 +426,43 @@ def _parse_books(raw_dir: Path) -> dict[str, dict[str, object]]:
             "compiler_name": safe_str(row.get(compiler_col)) if compiler_col else None,
             "total_hadiths": safe_int(row.get(count_col)) if count_col else None,
         }
+    if not books:
+        msg = (
+            f"{_BOOKS_FILENAME} is present with a {name_ar_col!r} column but yielded "
+            f"no usable book rows — the book->collection join key cannot be built"
+        )
+        raise ValueError(msg)
     logger.info("books_csv_parsed", books=len(books))
     return books
 
 
-def _resolve_collection_name(book_num: int | None, default_name: str, has_books: bool) -> str:
-    """Collection name (APPEARS_IN join key) for a hadith row (da#219).
+def _resolve_collection_name(book_key: str | None, default_name: str) -> str:
+    """Collection name (APPEARS_IN join key) for a hadith row (da#219 / da#353).
 
-    With ``books.csv`` present the per-book ``book_id`` is the collection (so the
-    corpus keeps its collection breadth — the reason Path B was chosen over a
-    purge); without it, the pre-B1 per-CSV-stem ``default_name`` is kept.
+    The hadith's book — identified by the :func:`_book_key` content digest of its
+    own ``Book`` column — is the collection, so the corpus keeps its per-book
+    breadth (the reason Path B was chosen over a purge).
+
+    ``books.csv`` is deliberately **not** consulted here. It supplies Collection
+    *metadata* (Arabic name, compiler) only; the join key comes from the hadith
+    row itself. Gating this key on ``books.csv``'s presence — as the first cut of
+    da#353 did — made a missing 48 KB metadata file re-key all 650,986 hadiths
+    onto ``{corpus}:{corpus}:{Num_hadith}``, which ``hadith_node_id`` collapses to
+    ``{corpus}:{Num_hadith}``. ``Num_hadith`` is an in-book ordinal with only
+    37,239 distinct values corpus-wide, so 613,747 hadiths (94.3%) MERGEd away
+    into their namesakes. Metadata may degrade; identity may not.
+
+    ``default_name`` survives only for a row whose ``Book`` cell is blank — the
+    real corpus has none (verified: 0/650,986). A hadith CSV with no ``Book``
+    column at all is rejected outright by :func:`_process_chunk`.
     """
-    if has_books and book_num is not None:
-        return str(book_num)
+    if book_key is not None:
+        return book_key
     return default_name
 
 
 def _collection_row(
-    collection_name: str, total_hadiths: int, books: dict[str, dict[str, object]], has_books: bool
+    collection_name: str, total_hadiths: int, books: dict[str, dict[str, object]]
 ) -> dict[str, object]:
     """Build one ``COLLECTION_SCHEMA`` row for a distinct ``collection_name``.
 
@@ -406,9 +478,12 @@ def _collection_row(
         compiler_name = meta["compiler_name"]
     else:
         name_ar = None
-        # A book_id with no books.csv row (has_books) gets a deterministic label;
-        # the per-CSV-stem fallback keeps the stem itself as a human name.
-        name_en = f"Sanadset book {collection_name}" if has_books else collection_name
+        # No books.csv row for this key — either books.csv is absent entirely or it
+        # lists no such book. Label it deterministically off the key. Keyed on
+        # ``meta is None`` rather than a books.csv-presence flag: the flag would
+        # hand a digest-keyed collection the raw digest as its human-readable
+        # ``name_en``.
+        name_en = f"Sanadset book {collection_name}"
         compiler_name = None
     return {
         "collection_id": generate_source_id(_SOURCE_CORPUS, collection_name),
@@ -425,9 +500,6 @@ def _collection_row(
 def _process_chunk(
     rows: list[dict[str, object]],
     collection_name: str,
-    row_offset: int = 0,
-    *,
-    has_books: bool = False,
 ) -> tuple[list[dict[str, object]], list[dict[str, str | int | None]], int, int]:
     """Process a chunk of rows.
 
@@ -435,28 +507,76 @@ def _process_chunk(
     is the number of raw ``<NAR>`` tags seen before B3 re-segmentation / filtering;
     comparing it to ``len(mentions)`` quantifies how much coarse-tag pollution the
     B3 filter removed (da#221).
+
+    Source columns are resolved case-insensitively (da#353): the production
+    Sanadset header is ``Hadith,Book,Num_hadith,Matn,Sanad,Sanad_Length``, and the
+    previous fixed-spelling lookups (``hadith_id``/``id`` for the number,
+    ``book_id``/``book`` for an int book id) matched none of the real citation
+    columns — nulling ``hadith_number`` and collapsing all 650,986 rows into one
+    collection. Matching by lower-cased name, not by enumerating spellings, is what
+    prevents a recurrence.
+
+    A hadith CSV with no ``Book`` column raises: that column is the collection join
+    key, and silently falling back to the CSV stem destroys corpus identity.
     """
     hadiths: list[dict[str, object]] = []
     mentions: list[dict[str, str | int | None]] = []
     malformed_count = 0
     raw_nar_count = 0
+    if not rows:
+        return hadiths, mentions, malformed_count, raw_nar_count
 
-    for idx, row in enumerate(rows):
-        full_text = safe_str(row.get("hadith") or row.get("text") or row.get("Hadith"))
+    # Resolve the source columns ONCE per chunk (all rows share one header).
+    colmap: dict[str, str] = {str(k).lower(): k for k in rows[0]}
+
+    def col(*candidates: str) -> str | None:
+        for cand in candidates:
+            actual = colmap.get(cand)
+            if actual is not None:
+                return actual
+        return None
+
+    text_col = col("hadith", "text")
+    num_col = col("num_hadith", "hadith_number", "hadith_id")
+    book_col = col("book")
+    grade_col = col("grade")
+    chapter_col = col("chapter")
+
+    # The ``Book`` column is the collection join key, so its absence is a broken
+    # corpus — the same standard ``_parse_books`` applies to an unmappable
+    # books.csv. Without it every row would fall back to ``default_name`` (the CSV
+    # stem), which for the production file ``sanadset.csv`` equals the corpus name
+    # and yields ids that collapse 650,986 hadiths onto 37,239. Fail loudly rather
+    # than silently destroy 94% of the corpus.
+    if book_col is None:
+        msg = (
+            "Sanadset hadith CSV has no 'Book' column — the book->collection join "
+            f"key cannot be built (columns seen: {sorted(colmap.values())!r})"
+        )
+        raise ValueError(msg)
+
+    for row in rows:
+        full_text = safe_str(row.get(text_col)) if text_col else None
         if full_text is None:
             continue
 
-        hadith_num = safe_int(row.get("hadith_id") or row.get("id") or row.get("Hadith_ID"))
-        book_num = safe_int(row.get("book_id") or row.get("book") or row.get("Book_ID"))
-        row_collection = _resolve_collection_name(book_num, collection_name, has_books)
+        # ``Num_hadith`` is the in-book citation ordinal; ``Book`` is the book's
+        # Arabic NAME (not an int id), digested to a stable collection key.
+        hadith_num = safe_int(row.get(num_col)) if num_col else None
+        book_name = safe_str(row.get(book_col)) if book_col else None
+        book_key = _book_key(book_name) if book_name else None
+        row_collection = _resolve_collection_name(book_key, collection_name)
 
-        source_id = generate_source_id(
-            _SOURCE_CORPUS,
-            row_collection,
-            str(book_num or 0),
-            str(hadith_num or 0),
-            str(row_offset + idx),
-        )
+        # source_id is content-derived and STABLE under re-acquisition (da#353):
+        # keyed on the book's name-digest and the ``Num_hadith`` citation ordinal,
+        # never a row offset. (Book, Num_hadith) is a perfect unique key over the
+        # corpus, so this stays collision-free; and the collection segment is a
+        # digest that can never equal the corpus name, so no id ever looks
+        # double-prefixed and ``_collapse_double_corpus`` never fires. A row with
+        # no citation number (degraded input; the real corpus has none) falls back
+        # to a content digest of its text — still content-derived, never positional.
+        num_part = str(hadith_num) if hadith_num is not None else _content_digest(full_text)
+        source_id = generate_source_id(_SOURCE_CORPUS, row_collection, num_part)
 
         # Extract SANAD and MATN content. The matn is additionally scrubbed of any
         # residual structural markup a malformed doubled-SANAD row leaks into the
@@ -475,7 +595,10 @@ def _process_chunk(
                 "source_id": source_id,
                 "source_corpus": _SOURCE_CORPUS,
                 "collection_name": row_collection,
-                "book_number": book_num,
+                # Sanadset cites a book by NAME, not an ordinal — there is no book
+                # number in the corpus, so ``book_number`` is left null (the
+                # APPEARS_IN loader coalesce-preserves a null positional prop).
+                "book_number": None,
                 "chapter_number": None,
                 "hadith_number": hadith_num,
                 "matn_ar": matn_text,
@@ -484,8 +607,8 @@ def _process_chunk(
                 "isnad_raw_en": None,
                 "full_text_ar": full_text,
                 "full_text_en": None,
-                "grade": safe_str(row.get("grade") or row.get("Grade")),
-                "chapter_name_ar": safe_str(row.get("chapter") or row.get("Chapter")),
+                "grade": safe_str(row.get(grade_col)) if grade_col else None,
+                "chapter_name_ar": safe_str(row.get(chapter_col)) if chapter_col else None,
                 "chapter_name_en": None,
                 "sect": "sunni",
             }
@@ -661,7 +784,6 @@ def parse_sanadset(
     total_malformed = 0
     total_raw_nar = 0
     total_rows = 0
-    global_row_offset = 0
 
     for csv_file in csv_files:
         logger.info("parsing_csv", file=csv_file.name)
@@ -681,8 +803,6 @@ def parse_sanadset(
             hadiths, mentions, malformed, raw_nar = _process_chunk(
                 chunk,
                 collection_name,
-                row_offset=global_row_offset + chunk_start,
-                has_books=has_books,
             )
             all_hadiths.extend(hadiths)
             all_mentions.extend(mentions)
@@ -696,8 +816,6 @@ def parse_sanadset(
                 hadiths=len(hadiths),
                 mentions=len(mentions),
             )
-
-        global_row_offset += len(rows)
 
     # Data quality logging
     valid_sanad_count = sum(1 for h in all_hadiths if h["isnad_raw_ar"] is not None)
@@ -742,8 +860,7 @@ def parse_sanadset(
         collection_counts[cname] = collection_counts.get(cname, 0) + 1
 
     collection_rows = [
-        _collection_row(cname, count, books, has_books)
-        for cname, count in sorted(collection_counts.items())
+        _collection_row(cname, count, books) for cname, count in sorted(collection_counts.items())
     ]
     # Fill sourced name_ar + expected_count where curated (da#230).
     collection_rows = [apply_collection_metadata(r) for r in collection_rows]

@@ -27,7 +27,7 @@ Recording convention: create/edit `.claude/memory/<kebab-slug>.md` with the stan
 
 ## Engineering gotchas (feedback)
 
-- [APPEARS_IN MERGE null-property bug](feedback_appears_in_merge_null.md) — _APPEARS_IN_QUERY MERGEs rel w/ hadith_number_in_book in pattern; Neo4j rejects null. main#139.
+- [APPEARS_IN MERGE null-property bug](feedback_appears_in_merge_null.md) — **HISTORICAL, fixed da#77.** Once MERGEd hadith_number_in_book in the pattern; Neo4j rejected null. HEAD is coalesce-after-MERGE (load_edges.py:440-448) and null-safe — emitting a null book_number IS safe. Records why that shape exists. Stale-check 2026-07-09 (PR#357). main#139.
 - [generate_source_id fail-fast breaks non-corpus keys](feedback_generate_source_id_failfast.md) — raises on non-SourceCorpus namespace; bio/aux adapters crash; latent. da#89.
 - [Neo4j SET null removes property](feedback_neo4j_set_null_removes_property.md) — MERGE {prop:null} aborts; null-safe=property-less MERGE+SET, but SET prop=null REMOVES the key. da#69.
 - [count>=0 masks empty graph](feedback_count_ge_zero_masks_empty_graph.md) — real-DB count(r)>=0 asserts nothing; read back the graph (concrete count + per-row keys).
