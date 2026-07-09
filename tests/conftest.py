@@ -27,6 +27,24 @@ def _set_test_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _dedup_no_ml_in_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the test suite against dedup's deterministic no-model fallback (da#309).
+
+    The `ml` dependency group (sentence-transformers, faiss) is NOT installed by a
+    bare ``uv sync``, so neither CI nor a fresh worktree can embed. Declaring that
+    here — once, explicitly — is what keeps ``DEDUP_REQUIRE_ML``'s *production*
+    default at ``True`` (an enabled stage missing a declared dep raises) without
+    reddening the suite.
+
+    This fixture must never be the reason the guard goes untested:
+    ``test_dedup_fail_loud.py`` pins the production default and drives the raise by
+    passing ``require_ml=True`` explicitly, bypassing this opt-out.
+    """
+    monkeypatch.setenv("DEDUP_REQUIRE_ML", "false")
+    get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
 def _clear_settings_cache() -> None:
     """Clear the cached settings singleton between tests."""
     get_settings.cache_clear()

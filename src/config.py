@@ -61,6 +61,15 @@ class Settings(BaseSettings):
     # capped in dedup); 1 = serial; >1 = that many workers, clamped to cores.
     dedup_encode_workers: int = 0
 
+    # Whether the dedup stage requires its declared ML dependencies (da#309). The
+    # `ml` dependency group is NOT installed by a bare `uv sync`, so a run on an
+    # unprovisioned box used to skip dedup silently and emit a zero-row
+    # parallel_links.parquet that reads as "no parallels found". Default True: an
+    # enabled stage missing a declared dep raises MissingDependencyError. Set
+    # DEDUP_REQUIRE_ML=false to opt in explicitly to the deterministic no-model
+    # fallback (src/resolve/parallels.py) — as the test suite does.
+    dedup_require_ml: bool = True
+
     # Betweenness-centrality sampling pivots for the enrich metrics phase (da#326).
     # Exact Brandes betweenness is O(V*E) (~4e11 at 150k nodes / 2.68M edges) and
     # intractable at prod scale, so GDS uses sampled (approximate) Brandes with this

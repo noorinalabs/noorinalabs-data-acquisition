@@ -30,6 +30,7 @@ from src.resolve._checkpoint import (
     resolve_cadence,
     save_checkpoint,
 )
+from src.resolve._deps import MissingDependencyError, missing_dependencies
 from src.resolve.schemas import PARALLEL_LINKS_SCHEMA
 from src.utils.logging import get_logger
 
@@ -83,6 +84,14 @@ _DEDUP_CHECKPOINT_EVERY_N_BLOCKS = 4
 _DEDUP_CHECKPOINT_SCHEMA_VERSION = 2
 _FAISS_INDEX_FILENAME = "hadith_embeddings.faiss"
 
+# Staging inputs this stage consumes. Note the plural `hadiths_` prefix.
+_HADITH_GLOB = "**/hadiths_*.parquet"
+
+# Third-party modules this stage declares (the `ml` dependency group, plus numpy,
+# which arrives transitively). Absence of any of these on an enabled stage is an
+# environment defect, not an empty result — see src/resolve/_deps.py (da#309).
+_DECLARED_DEPENDENCIES = ("numpy", "sentence_transformers", "faiss")
+
 
 def _id_set_hash(hadith_ids: list[str]) -> str:
     """Stable SHA-256 over the corpus id list in order.
@@ -124,6 +133,11 @@ def _is_cross_sect(sect_a: str | None, sect_b: str | None) -> bool:
     return bool(sect_a and sect_b and sect_a != sect_b)
 
 
+def _hadith_files(staging_dir: Path) -> list[Path]:
+    """Return the staging hadith Parquet files this stage consumes, sorted."""
+    return sorted(staging_dir.glob(_HADITH_GLOB))
+
+
 def _load_hadith_texts(
     staging_dir: Path,
 ) -> tuple[list[str], list[str], list[str]]:
@@ -133,7 +147,7 @@ def _load_hadith_texts(
     third element is the authoritative ``sect`` column, used to classify a pair as
     cross-sect (see :func:`_is_cross_sect` / da#321) — not the source corpus.
     """
-    hadith_files = sorted(staging_dir.glob("**/hadiths_*.parquet"))
+    hadith_files = _hadith_files(staging_dir)
     if not hadith_files:
         logger.warning("dedup_no_hadith_files", staging_dir=str(staging_dir))
         return [], [], []
@@ -600,6 +614,7 @@ def run_dedup(
     resume: bool = True,
     checkpoint_every_n_blocks: int | None = None,
     stop_after: int | None = None,
+    require_ml: bool | None = None,
 ) -> Path:
     """Run full hadith deduplication pipeline.
 
@@ -635,34 +650,87 @@ def run_dedup(
         leaving the checkpoint on disk and WITHOUT writing ``parallel_links.parquet``
         — raises :class:`~src.resolve._checkpoint.StopAfterReached`. ``None`` runs to
         completion.
+    require_ml:
+        Whether this stage's declared ML dependencies are mandatory (da#309).
+        ``None`` (the default) reads ``DEDUP_REQUIRE_ML`` from settings, which
+        defaults to ``True``. When ``True`` and a declared dependency is absent,
+        :class:`~src.resolve._deps.MissingDependencyError` is raised instead of
+        emitting a zero-row output. ``False`` is an explicit opt-in to the
+        deterministic no-model fallback (``parallels.py``).
 
     Returns
     -------
     Path to the output ``parallel_links.parquet`` file. The file is written
     even when zero pairs are found (empty table matching the schema).
+
+    Raises
+    ------
+    MissingDependencyError
+        When the stage is required (see ``require_ml``) but one of its declared
+        dependencies is not importable. Previously this returned a zero-row
+        ``parallel_links.parquet`` that downstream read as "no parallels found"
+        (da#309).
     """
+    from src.config import get_settings
+
     t0 = time.monotonic()
+
+    # ------------------------------------------------------------------
+    # 0. Declared-dependency guard (da#309).
+    #
+    # Checked at stage *entry*, before any input is read: an enabled stage whose
+    # declared dependency is absent is an environment defect regardless of
+    # whether its input happens to be empty. `require_ml=False` (DEDUP_REQUIRE_ML)
+    # is the one legitimate skip — an explicit opt-in to the deterministic
+    # no-model fallback in `parallels.py`, not an inferred one.
+    # ------------------------------------------------------------------
+    if require_ml is None:
+        require_ml = get_settings().dedup_require_ml
+    missing = missing_dependencies(_DECLARED_DEPENDENCIES)
+    if missing:
+        if require_ml:
+            raise MissingDependencyError(
+                stage="dedup",
+                missing=missing,
+                dependency_group="ml",
+                remediation="uv sync --group ml",
+            )
+        logger.warning(
+            "dedup_skipped_degraded",
+            missing=missing,
+            msg=(
+                "ML deps absent and DEDUP_REQUIRE_ML=false -- writing an empty "
+                "parallel_links.parquet on purpose; the deterministic parallels.py "
+                "detector still runs. This is NOT a 'no parallels found' result."
+            ),
+        )
+        return _write_empty_output(staging_dir)
 
     # ------------------------------------------------------------------
     # 1. Load hadith texts
     # ------------------------------------------------------------------
+    hadith_files = _hadith_files(staging_dir)
+    if not hadith_files:
+        # Case A: no input files at all. This is an upstream defect (parse never
+        # ran / wrong staging_dir), NOT a true negative -- but `run_dedup` is also
+        # called directly on empty tmp dirs by unit tests, so making it fatal is a
+        # behaviour change tracked separately. Kept distinct from Case B below so
+        # the two are no longer structurally indistinguishable.
+        logger.warning("dedup_no_hadith_files", staging_dir=str(staging_dir))
+        return _write_empty_output(staging_dir)
+
     hadith_ids, texts, sects = _load_hadith_texts(staging_dir)
     if not texts:
-        logger.warning("dedup_no_texts")
+        # Case B: input files exist, but no row carries a non-empty English matn.
+        # A genuinely empty input for an English-matn semantic detector.
+        logger.warning("dedup_no_texts", files=len(hadith_files))
         return _write_empty_output(staging_dir)
 
     # ------------------------------------------------------------------
     # 2. Generate embeddings
     # ------------------------------------------------------------------
-    try:
-        import numpy  # noqa: F401  (availability guard — used by _encode_with_resume)
-        from sentence_transformers import SentenceTransformer
-    except ImportError:
-        logger.error(
-            "dedup_missing_deps",
-            msg="sentence-transformers or numpy not installed -- skipping dedup",
-        )
-        return _write_empty_output(staging_dir)
+    import numpy  # noqa: F401  (used by _encode_with_resume; presence proven above)
+    from sentence_transformers import SentenceTransformer
 
     logger.info("dedup_loading_model", model=_MODEL_NAME)
     model = SentenceTransformer(_MODEL_NAME)
@@ -695,14 +763,7 @@ def run_dedup(
     # ------------------------------------------------------------------
     # 4. Build FAISS index & search
     # ------------------------------------------------------------------
-    try:
-        import faiss
-    except ImportError:
-        logger.error(
-            "dedup_missing_faiss",
-            msg="faiss-cpu not installed -- skipping similarity search",
-        )
-        return _write_empty_output(staging_dir)
+    import faiss  # presence proven by the entry guard (da#309)
 
     n = len(hadith_ids)
     dim = embeddings.shape[1]
