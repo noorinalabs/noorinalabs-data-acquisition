@@ -729,6 +729,31 @@ class TestInflectionFolding:
         assert make_canonical_id(JABIR_GLUED) == make_canonical_id(JABIR_SPACED)
 
     @pytest.mark.parametrize(
+        ("accusative", "stem", "mentions"),
+        [
+            ("عليا", "علي", "3,173 vs 122,269 — a top-20 narrator"),
+            ("انسا", "انس", "1,094 vs 43,900 — da#347's exact under-merge case"),
+            ("جابرا", "جابر", "815 vs 29,666"),
+            ("مالكا", "مالك", "620 vs 52,798"),
+            ("نافعا", "نافع", "350 vs 23,471"),
+            ("معمرا", "معمر", "61 vs 16,374"),
+        ],
+    )
+    def test_accusative_stems_are_folded(self, accusative: str, stem: str, mentions: str) -> None:
+        """POSITIVE direction: the accusative rule must actually merge something.
+
+        Deleting `_fold_token`'s accusative branch left the whole suite green — every
+        other fold test is negative-direction (`test_hazards_are_not_folded`) or
+        idempotence-only (`test_fold_is_idempotent`), and **both are satisfied by the
+        rule's absence**: `canonical_surface("عليا")` is a fixed point whether it folds
+        or not. Nothing asserted the rule merges anything. A rule whose deletion no test
+        notices is a rule that is not under test — the same "gate that cannot fail" this
+        PR exists to remove. Found by Alejandra Reyes-Fuentes in review of `27d20b1`.
+        """
+        assert canonical_surface(accusative) == stem, mentions
+        assert make_canonical_id(accusative) == make_canonical_id(stem), mentions
+
+    @pytest.mark.parametrize(
         ("a", "b", "why"),
         [
             ("زكريا", "زكري", "Zakariyya is not the accusative of a name 'Zakari'"),
