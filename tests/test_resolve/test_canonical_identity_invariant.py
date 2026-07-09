@@ -55,6 +55,9 @@ KUFI = "أبو جعفر محمد بن علي الكوفي"  # a DIFFERENT man   
 
 # da#248 control: a registered mononym whose split is chain-evidence-driven.
 SUFYAN = "سفيان"
+# Fuzzy-matches `سفيان` (ratio 0.889, lev 1) but is NOT a MONONYM_REGISTRY key — the
+# decoy that exposes the registry lookup keying on the bio instead of the mention.
+SUFYAN_DECOY = "سفين"
 
 
 def _bio_table(rows: list[dict[str, object]]) -> pa.Table:
@@ -500,6 +503,77 @@ class TestMononymSplitPreserved:
             f"got {[r['name_ar_normalized'] for r in canon.values()]}"
         )
         assert bare_id not in canon
+
+    def test_mononym_split_keys_on_the_mention_not_the_matched_bio(self, tmp_path: Path) -> None:
+        """The l.1214-after-l.1203 ordering bug: same defect as the main one, one call deeper.
+
+        Pre-fix, `refine_mononym_name` was handed `norm_name` *after* that variable had
+        already been overwritten with the matched bio's name. So the `MONONYM_REGISTRY`
+        lookup keyed on the **bio** spelling. A mention `سفيان` (a registry key) that
+        fuzzy-matched a bio spelled `سفين` (ratio 0.889, lev 1 — *not* a registry key)
+        therefore looked up `سفين`, missed, and the da#248 split was silently
+        **suppressed** — the mention landed on a chimeric `سفين` node instead.
+
+        This is the inverse failure of the guard above: there the split must survive,
+        here a split that should fire was being lost. Both follow from keying on the
+        mention.
+        """
+        persons = MONONYM_REGISTRY[normalize_arabic(SUFYAN)]
+        years = [
+            y
+            for y in range(60, 280)
+            if len([p for p in persons if _temporally_plausible(p, [y])]) == 1
+        ]
+        assert years, "fixture precondition: some year must select exactly one person"
+        neighbour_year = years[0]
+        (target,) = [p for p in persons if _temporally_plausible(p, [neighbour_year])]
+
+        staging, output = _dirs(tmp_path, "ordering")
+        pq.write_table(
+            _bio_table(
+                [
+                    {
+                        "bio_id": "bio:neighbour",
+                        "name_ar": IBN_ABBAS,
+                        "name_en": "Ibn Abbas",
+                        "name_ar_normalized": normalize_arabic(IBN_ABBAS),
+                        "death_year_ah": neighbour_year,
+                        "external_id": "ms-0002",
+                        "source": "muhaddithat",
+                    },
+                    {
+                        # Fuzzy-matches `سفيان` but is NOT a registry key. Undated, so the
+                        # temporal filter passes it through (soft constraint) and the
+                        # pre-fix code substitutes its name before the registry lookup.
+                        "bio_id": "bio:decoy",
+                        "name_ar": SUFYAN_DECOY,
+                        "name_en": None,
+                        "name_ar_normalized": normalize_arabic(SUFYAN_DECOY),
+                        "death_year_ah": None,
+                        "source": "itqan",
+                    },
+                ]
+            ),
+            staging / "narrators_bio_itqan.parquet",
+        )
+        _write_mentions(
+            output,
+            [
+                _mention("m:1", "hdt:sunnah:1", 0, IBN_ABBAS),
+                _mention("m:2", "hdt:sunnah:1", 1, SUFYAN),
+            ],
+        )
+        disambiguate.run(staging, output, batch_size=8)
+
+        canon = _canonical(output)
+        assert normalize_arabic(SUFYAN_DECOY) not in {
+            r["name_ar_normalized"] for r in canon.values()
+        }, "the decoy bio's spelling must never become a canonical name"
+        assert make_canonical_id(target.norm_name) in canon, (
+            f"registry lookup must key on the mention {normalize_arabic(SUFYAN)!r}, not on the "
+            f"matched bio {normalize_arabic(SUFYAN_DECOY)!r}; "
+            f"got {[r['name_ar_normalized'] for r in canon.values()]}"
+        )
 
 
 # ---------------------------------------------------------------------------
