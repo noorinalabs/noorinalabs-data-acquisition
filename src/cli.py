@@ -334,6 +334,18 @@ def _cmd_load(
     if incremental:
         print(f"  Files skipped: {len(skipped_files)}")
 
+    if summary.invalidated_narrators:
+        from src.graph import TOPOLOGY_DERIVED_NARRATOR_PROPERTIES
+
+        # An invalidation nobody is told about is a quieter version of the bug.
+        print(
+            f"\n  Stale enrich metrics removed from {summary.invalidated_narrators} narrator(s): "
+            f"{', '.join(TOPOLOGY_DERIVED_NARRATOR_PROPERTIES)}.\n"
+            "  They were computed against the previous topology and this load changed it.\n"
+            "  Run `make enrich` to recompute them. Until then those properties are absent,\n"
+            "  which is deliberate: absent beats confidently wrong."
+        )
+
     for nr in summary.node_results:
         print(
             f"    {nr.node_type}: created={nr.created} merged={nr.merged} skipped={nr.skipped}"
