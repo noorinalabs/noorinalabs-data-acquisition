@@ -7,6 +7,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+import structlog
 
 from src.pipeline.manifest import (
     LAST_LOADED_MANIFEST_FILENAME,
@@ -132,6 +133,51 @@ class TestSaveLoadManifest:
         path = tmp_path / "sub" / "dir" / MANIFEST_FILENAME
         save_manifest({"a": {"md5": "x"}}, path)
         assert path.exists()
+
+    def test_returns_written_path(self, tmp_path: Path) -> None:
+        path = tmp_path / MANIFEST_FILENAME
+        assert save_manifest({"a": {"md5": "x"}}, path) == path
+
+    def test_read_only_dir_is_best_effort(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A read-only filesystem (the graph-load container mounts its Parquet
+        inputs at /app/data:ro) must not raise — the manifest is change-detection
+        only, and the load must proceed without it (da#348)."""
+
+        def _raise_read_only(self: Path, *args: object, **kwargs: object) -> None:
+            raise OSError(30, "Read-only file system", str(self))
+
+        monkeypatch.setattr(Path, "write_text", _raise_read_only)
+
+        path = tmp_path / MANIFEST_FILENAME
+        with structlog.testing.capture_logs() as logs:
+            result = save_manifest({"a": {"md5": "x"}}, path)
+
+        assert result is None
+        assert not path.exists()
+        assert any(
+            log["event"] == "manifest_write_failed" and log["log_level"] == "warning"
+            for log in logs
+        )
+
+    def test_read_only_parent_mkdir_is_best_effort(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same best-effort contract when the failure surfaces on the parent
+        mkdir rather than the file write."""
+
+        def _raise_read_only(self: Path, *args: object, **kwargs: object) -> None:
+            raise OSError(30, "Read-only file system", str(self))
+
+        monkeypatch.setattr(Path, "mkdir", _raise_read_only)
+
+        path = tmp_path / "sub" / MANIFEST_FILENAME
+        with structlog.testing.capture_logs() as logs:
+            result = save_manifest({"a": {"md5": "x"}}, path)
+
+        assert result is None
+        assert any(log["event"] == "manifest_write_failed" for log in logs)
 
     def test_last_loaded_manifest_filename(self) -> None:
         assert LAST_LOADED_MANIFEST_FILENAME == ".last_loaded_manifest.json"
