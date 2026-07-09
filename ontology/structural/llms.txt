@@ -989,8 +989,8 @@ imports: __future__, hashlib, json, math, multiprocessing, os, time, concurrent.
 - func _encode_with_resume(texts, hadith_ids, staging_dir, model, batch_size, workers, model_provider, mp_start_method) @391
 - func _search_and_collect_resumable(embeddings, hadith_ids, id_to_sect, actual_k, threshold, ckpt_dir, fingerprint, cadence, resume, index_available, build_index, reload_index, block_size, stop_after) @484
 - func run_dedup(staging_dir, batch_size, top_k, threshold, index_type, encode_workers, resume, checkpoint_every_n_blocks, stop_after, require_ml) @606
-- func _write_empty_output(staging_dir) @870
-- func run(staging_dir, output_dir, resume, stop_after) @879
+- func _write_empty_output(staging_dir) @879
+- func run(staging_dir, output_dir, resume, stop_after) @888
 
 ## src/resolve/disambiguate.py [python]
 Narrator disambiguation via multi-stage matching.
@@ -3168,18 +3168,18 @@ imports: __future__, sys, pathlib, unittest.mock, pyarrow, pyarrow.parquet, pyte
 - func _staging_with_hadiths(tmp_path) @42
 - func test_dedup_requires_ml_by_default(monkeypatch) @71
 - func test_default_settings_make_run_dedup_raise(monkeypatch, tmp_path) @78
-- class TestEnabledStageMissingDeclaredDep @99
-  - method test_run_dedup_raises_when_embedder_missing(self, tmp_path) @100
-  - method test_run_dedup_raises_when_faiss_missing(self, tmp_path) @116
-  - method test_no_empty_output_is_written_when_dep_missing(self, tmp_path) @125
-- class TestExplicitDegradedSkip @142
-  - method test_degraded_skip_writes_empty_output_without_raising(self, tmp_path) @143
-  - method test_settings_opt_out_is_honoured(self, tmp_path) @152
-- class TestNotSwallowedByOrchestrator @165
-  - method test_missing_dependency_error_is_not_an_exception_subclass(self) @166
-  - method test_missing_dependency_error_propagates_through_run_all(self, tmp_path) @174
-- func test_cli_maps_missing_dependency_to_distinct_exit_code() @195
-- func test_missing_dependencies_reports_only_absent_modules() @215
+- class TestEnabledStageMissingDeclaredDep @100
+  - method test_run_dedup_raises_when_embedder_missing(self, tmp_path) @101
+  - method test_run_dedup_raises_when_faiss_missing(self, tmp_path) @117
+  - method test_no_empty_output_is_written_when_dep_missing(self, tmp_path) @126
+- class TestExplicitDegradedSkip @143
+  - method test_degraded_skip_writes_empty_output_without_raising(self, tmp_path) @144
+  - method test_settings_opt_out_is_honoured(self, tmp_path) @153
+- class TestNotSwallowedByOrchestrator @166
+  - method test_missing_dependency_error_is_not_an_exception_subclass(self) @167
+  - method test_missing_dependency_error_propagates_through_run_all(self, tmp_path) @175
+- func test_cli_maps_missing_dependency_to_distinct_exit_code() @196
+- func test_missing_dependencies_reports_only_absent_modules() @216
 
 ## tests/test_resolve/test_dedup_faiss_resume.py [python]
 Crash-resume tests for dedup's FAISS search + pair-collection phase (da#272).

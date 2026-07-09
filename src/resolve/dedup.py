@@ -678,11 +678,20 @@ def run_dedup(
     # ------------------------------------------------------------------
     # 0. Declared-dependency guard (da#309).
     #
-    # Checked at stage *entry*, before any input is read: an enabled stage whose
-    # declared dependency is absent is an environment defect regardless of
+    # Checked at *dedup's* entry, before dedup reads any input: an enabled stage
+    # whose declared dependency is absent is an environment defect regardless of
     # whether its input happens to be empty. `require_ml=False` (DEDUP_REQUIRE_ML)
     # is the one legitimate skip — an explicit opt-in to the deterministic
     # no-model fallback in `parallels.py`, not an inferred one.
+    #
+    # Note this is dedup's entry, NOT resolve's. dedup is the ninth of the ten
+    # `RESOLVE_STEP_ORDER` steps: ner, disambiguate, bio_promote, cluster,
+    # narrator_split, reconcile, tabaqa_dates and muhaddithat_links have all
+    # already run, and bio_promote has written `narrators_canonical.parquet`.
+    # `EXIT_MISSING_DEPENDENCY` therefore means "a stage aborted mid-pipeline with
+    # prior artifacts on disk", not "the pipeline refused to start" — an operator
+    # seeing exit 4 must not assume nothing was written. `MissingDependencyError`
+    # subclasses `BaseException` precisely so it escapes those stages' handlers.
     # ------------------------------------------------------------------
     if require_ml is None:
         require_ml = get_settings().dedup_require_ml

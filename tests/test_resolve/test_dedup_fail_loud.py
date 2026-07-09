@@ -72,7 +72,7 @@ def test_dedup_requires_ml_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """The shipped default is fail-loud, regardless of the suite's opt-out fixture."""
     monkeypatch.delenv("DEDUP_REQUIRE_ML", raising=False)
     get_settings.cache_clear()
-    assert Settings().dedup_require_ml is True
+    assert Settings(_env_file=None).dedup_require_ml is True
 
 
 def test_default_settings_make_run_dedup_raise(
@@ -83,6 +83,7 @@ def test_default_settings_make_run_dedup_raise(
     passes no `require_ml`, so `run_dedup` reads the setting.
     """
     monkeypatch.delenv("DEDUP_REQUIRE_ML", raising=False)
+    monkeypatch.chdir(tmp_path)
     get_settings.cache_clear()
     staging = _staging_with_hadiths(tmp_path)
 
