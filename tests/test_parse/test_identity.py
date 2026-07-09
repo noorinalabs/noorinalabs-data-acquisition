@@ -56,6 +56,36 @@ class TestGenerateSourceId:
         for corpus in SOURCE_CORPORA:
             assert generate_source_id(corpus, "coll", 1).startswith(f"{corpus}:")
 
+    def test_collection_equal_to_corpus_raises_at_the_producer(self) -> None:
+        # da#355 producer gate. `collection == corpus` is forbidden BECAUSE it is
+        # ambiguous: nothing in `sanadset:sanadset:1` distinguishes a doubled corpus
+        # from a corpus-named collection. Catching it here costs a parse re-run;
+        # catching it at load costs a partially-written graph after a 7.5h resolve.
+        # This is exactly the da#353 CSV-stem fallback, made unproducible.
+        with pytest.raises(DoubledCorpusPrefixError, match="doubled leading corpus"):
+            generate_source_id("sanadset", "sanadset", 645817)
+
+    def test_every_corpus_rejects_its_own_name_as_collection(self) -> None:
+        for corpus in SOURCE_CORPORA:
+            with pytest.raises(DoubledCorpusPrefixError):
+                generate_source_id(corpus, corpus, 1)
+
+    def test_empty_collection_raises(self) -> None:
+        # An empty segment collapses `corpus::1` -> an id whose collection is
+        # unrecoverable by the `<corpus>:<collection>` grammar the edge loader
+        # parses (composition.is_canonical_hadith_id).
+        with pytest.raises(ValueError, match="empty segment"):
+            generate_source_id("lk", "", 1)
+
+    def test_validate_source_id_has_a_production_caller(self) -> None:
+        # Kwesi's TechDebt note on #359: validate_source_id had no non-test caller,
+        # so the contract it encodes was never enforced anywhere it mattered.
+        # generate_source_id is now that caller — this test pins the wiring, not
+        # merely the behavior, so removing the call fails here and not silently.
+        assert validate_source_id("sanadset:sanadset:1") != []
+        with pytest.raises(DoubledCorpusPrefixError):
+            generate_source_id("sanadset", "sanadset", 1)
+
 
 class TestHadithNodeId:
     def test_adds_single_prefix(self) -> None:

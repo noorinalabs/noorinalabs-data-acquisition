@@ -12,7 +12,7 @@ from src.parse.composition import (
     is_canonical_hadith_id,
     is_cross_edition_dedup_source,
 )
-from src.parse.identity import DoubledCorpusPrefixError
+from src.parse.identity import DoubledCorpusPrefixError, hadith_node_id
 
 
 class TestIsCanonicalHadith:
@@ -108,14 +108,23 @@ class TestIsCanonicalHadithId:
         assert not is_canonical_hadith_id("hdt:fawaz:bukhari:1")
         assert is_canonical_hadith_id("hdt:lk:bukhari:1")
 
-    def test_double_prefixed_id_raises(self) -> None:
-        # da#355: the gate no longer collapses a doubled corpus before reading it.
-        # Collapsing guessed which segment was the corpus; a wrong guess silently
-        # routed a hadith through the wrong composition rule. Now it fails loudly.
+    def test_double_prefixed_id_is_total_never_raises(self) -> None:
+        # da#355: the gate no longer collapses a doubled corpus before reading it —
+        # collapsing guessed which segment was the corpus, and a wrong guess silently
+        # routed a hadith through the wrong composition rule. But this predicate
+        # contracts to return a bool, so it must not raise either: a malformed id is
+        # not its decision to make. It classifies on the segments as they literally
+        # are, and the LOADER's quarantine (load_nodes/load_edges) rejects the id and
+        # counts the row. Rejecting here instead would silently drop the edge, and
+        # raising here would abort a multi-hour non-atomic load from inside a bool.
+        assert is_canonical_hadith_id("sanadset:sanadset:0:0:1") is True
+        # corpus=fawaz, collection=fawaz -> not in fawaz's allowlist -> not canonical.
+        assert is_canonical_hadith_id("fawaz:fawaz:bukhari:1") is False
+
+    def test_doubled_id_is_rejected_by_the_id_constructor_not_this_gate(self) -> None:
+        # The contract violation is caught exactly once, at id construction.
         with pytest.raises(DoubledCorpusPrefixError):
-            is_canonical_hadith_id("sanadset:sanadset:0:0:1")
-        with pytest.raises(DoubledCorpusPrefixError):
-            is_canonical_hadith_id("fawaz:fawaz:bukhari:1")
+            hadith_node_id("sanadset:sanadset:0:0:1")
 
     def test_unknown_or_bare_corpus_defers_to_default_keep(self) -> None:
         # An id with no collection segment (toy ids in older tests, or a bare

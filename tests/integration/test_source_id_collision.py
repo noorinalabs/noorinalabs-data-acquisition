@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from src.graph.load_edges import load_all_edges
-from src.graph.load_nodes import load_all_nodes
+from src.graph.load_nodes import _load_hadiths, load_all_nodes
 from src.parse.identity import DoubledCorpusPrefixError, hadith_node_id
 from tests.test_graph.conftest import write_collections, write_hadiths
 
@@ -76,15 +76,62 @@ class TestSourceIdCollisionLive:
             id_rows[0]["id"] == hadith_node_id("sunnah:bukhari:1:1:1") == "hdt:sunnah:bukhari:1:1:1"
         )
 
-    def test_double_prefixed_staging_row_fails_the_load_loudly(
+    def test_double_prefixed_staging_row_is_quarantined_not_loaded(
         self, neo4j_client, staging: Path, curated: Path
     ) -> None:
-        """A main#139 double-prefixed staging id aborts the load (da#355).
+        """A main#139 double-prefixed staging id is quarantined, not loaded (da#355).
 
         It used to be silently collapsed onto the correct node — which also meant a
-        corpus whose collection is named after itself (``lk:lk:1``) silently lost
-        its collection segment. No producer emits this form since da#353, so it is a
-        producer defect and must not load at all.
+        corpus whose collection is named after itself (``lk:lk:1``) silently lost its
+        collection segment. No producer emits this form since da#353, so it is a
+        producer defect and must never become a node.
+
+        But it must not ABORT the load either. ``_cmd_load`` passes ``strict=False``
+        and the edge loaders commit each batch inside a streaming loop with no
+        spanning transaction, so an escaping exception would strand batches 1..N-1 in
+        Neo4j — hours in, after a 7.5-hour resolve. The bad row is recorded and
+        skipped; every good row still loads.
+        """
+        write_hadiths(
+            staging,
+            [
+                {
+                    "source_id": "sunnah:sunnah:bukhari:1:1:1",
+                    "collection_name": "bukhari",
+                    "source_corpus": "sunnah",
+                },
+                {
+                    "source_id": "lk:bukhari:1:1",
+                    "collection_name": "bukhari",
+                    "source_corpus": "lk",
+                },
+            ],
+            suffix="streaming",
+        )
+
+        results = load_all_nodes(neo4j_client, staging, curated, strict=False)
+
+        hadith_result = next(r for r in results if r.node_type == "Hadith")
+        assert hadith_result.skipped >= 1, "the malformed row must be counted as skipped"
+        assert any("doubled leading corpus" in e for e in hadith_result.validation_errors), (
+            f"the malformed id must be recorded, got {hadith_result.validation_errors!r}"
+        )
+
+        rows = neo4j_client.execute_read("MATCH (h:Hadith) RETURN h.id AS id ORDER BY h.id")
+        ids = [r["id"] for r in rows]
+        assert ids == ["hdt:lk:bukhari:1:1"], (
+            f"only the well-formed row may load; the doubled id must not appear: {ids}"
+        )
+
+    def test_double_prefixed_staging_row_aborts_under_strict(
+        self, neo4j_client, staging: Path, curated: Path
+    ) -> None:
+        """``strict=True`` (the default, used by tests/tools) still fails loudly.
+
+        Calls ``_load_hadiths`` directly rather than ``load_all_nodes``: under
+        ``strict=True`` the latter raises ``FileNotFoundError`` for the *other*
+        required staging files this fixture does not write, which would make the
+        assertion pass without ever reaching the malformed id.
         """
         write_hadiths(
             staging,
@@ -99,7 +146,7 @@ class TestSourceIdCollisionLive:
         )
 
         with pytest.raises(DoubledCorpusPrefixError, match="doubled leading corpus"):
-            load_all_nodes(neo4j_client, staging, curated, strict=False)
+            _load_hadiths(neo4j_client, staging, strict=True)
 
         rows = neo4j_client.execute_read("MATCH (h:Hadith) RETURN count(h) AS n")
         assert rows[0]["n"] == 0, "a rejected id must not have been written"

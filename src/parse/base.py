@@ -11,7 +11,13 @@ import pyarrow.csv as pcsv
 import pyarrow.parquet as pq
 
 from src.models.enums import Sect, SourceCorpus
-from src.parse.identity import ID_DELIMITER, SOURCE_CORPORA
+from src.parse.identity import (
+    ID_DELIMITER,
+    SOURCE_CORPORA,
+    DoubledCorpusPrefixError,
+    is_double_prefixed,
+    validate_source_id,
+)
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -136,6 +142,14 @@ def generate_source_id(corpus: str, collection: str, *parts: int | str) -> str:
     unknown corpus is a collision hazard (ids only stay unique across sources
     because the corpus namespaces them), so it fails fast. The canonical grammar
     and the graph node-id rules live in :mod:`src.parse.identity`.
+
+    The generated id is then asserted against the full grammar via
+    :func:`identity.validate_source_id` — this is the **producer gate** (da#355).
+    Catching a malformed id here costs a parse re-run (minutes); catching it at
+    load costs a partially-written graph, hours in, after a 7.5-hour resolve. In
+    particular ``collection == corpus`` raises :exc:`DoubledCorpusPrefixError`,
+    which is how the da#353 CSV-stem fallback becomes unproducible rather than
+    merely undetected.
     """
     if corpus not in SOURCE_CORPORA:
         msg = (
@@ -144,7 +158,14 @@ def generate_source_id(corpus: str, collection: str, *parts: int | str) -> str:
         )
         raise ValueError(msg)
     segments = [corpus, collection, *[str(p) for p in parts]]
-    return ID_DELIMITER.join(segments)
+    source_id = ID_DELIMITER.join(segments)
+    problems = validate_source_id(source_id)
+    if problems:
+        msg = f"generated source_id {source_id!r} violates the id contract: " + "; ".join(problems)
+        if is_double_prefixed(source_id):
+            raise DoubledCorpusPrefixError(msg)
+        raise ValueError(msg)
+    return source_id
 
 
 def safe_int(value: Any) -> int | None:

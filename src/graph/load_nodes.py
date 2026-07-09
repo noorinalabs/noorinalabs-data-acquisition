@@ -40,6 +40,7 @@ from src.parse.composition import (
     is_cross_edition_dedup_source,
 )
 from src.parse.identity import (
+    DoubledCorpusPrefixError,
     chain_node_id,
     collection_node_id,
     grading_node_id,
@@ -360,7 +361,20 @@ def _load_hadiths(
                     total_skipped += 1
                     total_deduped += 1
                     continue
-            hid = hadith_node_id(sid)
+            # Quarantine, never abort (da#355). ``strict`` governs missing *files*,
+            # so it cannot be relied on to make a malformed row fatal-or-not; the
+            # production path (``cli._cmd_load``) passes strict=False. A single bad
+            # id must not kill a multi-hour, non-atomic load — the batches already
+            # committed would stay in Neo4j. Mirrors the null-``source_id`` handling
+            # five lines up: record it, count it, keep going.
+            try:
+                hid = hadith_node_id(sid)
+            except DoubledCorpusPrefixError as exc:
+                if strict:
+                    raise
+                all_errors.append(f"{fp.name} row {i}: {exc}")
+                total_skipped += 1
+                continue
             batch.append(
                 {
                     "id": hid,
@@ -565,12 +579,22 @@ def _load_chains(
     skipped = 0
 
     for hid, mentions in seen_hadiths.items():
-        chn_id = chain_node_id(hid, 0)
+        # da#355: both constructors route through ``bare_source_id``, so a malformed
+        # hadith id raises here too. Quarantine the chain rather than abort the load.
+        try:
+            chn_id = chain_node_id(hid, 0)
+            chain_hadith_id = hadith_node_id(hid)
+        except DoubledCorpusPrefixError as exc:
+            if strict:
+                raise
+            errors.append(f"chain for hadith_id={hid!r}: {exc}")
+            skipped += 1
+            continue
         narrator_ids = [nid for _pos, nid in sorted(mentions, key=lambda pair: pair[0])]
         batch.append(
             {
                 "id": chn_id,
-                "hadith_id": hadith_node_id(hid),
+                "hadith_id": chain_hadith_id,
                 "chain_index": 0,
                 "full_chain_text_ar": None,
                 "full_chain_text_en": None,
@@ -640,11 +664,20 @@ def _load_gradings(
                 errors.append(f"{fp.name} row {i}: grade present but no source_id")
                 skipped += 1
                 continue
-            gid = grading_node_id(sid)
+            # da#355: quarantine a malformed id, never abort the load.
+            try:
+                gid = grading_node_id(sid)
+                grading_hadith_id = hadith_node_id(sid)
+            except DoubledCorpusPrefixError as exc:
+                if strict:
+                    raise
+                errors.append(f"{fp.name} row {i}: {exc}")
+                skipped += 1
+                continue
             batch.append(
                 {
                     "id": gid,
-                    "hadith_id": hadith_node_id(sid),
+                    "hadith_id": grading_hadith_id,
                     "scholar_name": _val(row, "collection_name", "unknown"),
                     "grade": grade,
                     # Normalized display grade (da#148): the raw ``grade`` may be

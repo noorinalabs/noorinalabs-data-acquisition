@@ -35,11 +35,14 @@ Two historical identity hazards this module designs out
    it). :func:`hadith_node_id` is the ONE prefixing rule both paths call: it is
    idempotent on the ``hdt:`` prefix, so both paths converge on exactly one id
    per hadith. A doubled leading corpus is **asserted against, never repaired**
-   (:exc:`DoubledCorpusPrefixError`) — the old collapse could not distinguish it
-   from a collection legitimately named after its corpus (``lk:lk:1``) and so
-   silently dropped a valid collection segment, 16M+ times in a single load
-   (da#355). Since da#353 no producer emits the doubled form. Legacy ids already
-   persisted in a graph are canonicalized one-shot by :mod:`src.graph.migrate`.
+   (:exc:`DoubledCorpusPrefixError`): ``collection == corpus`` is FORBIDDEN as a
+   producer output precisely because it is ambiguous — ``lk:lk:1`` could be read
+   either as corpus ``lk`` doubled or as corpus ``lk`` with a collection named
+   ``lk``, and nothing in the id distinguishes them. That ambiguity is exactly
+   why the old collapse could never be safe: it resolved the ambiguity by fiat
+   and silently dropped a segment, 16M+ times in a single load (da#355). Since
+   da#353 no producer emits the shape at all. Legacy ids already persisted in a
+   graph are canonicalized one-shot by :mod:`src.graph.migrate`.
 2. **collection-ref vs in-book-ordinal** (da#77): ``source_id``'s positional
    tail is a stable within-collection key. The *in-book ordinal* that flows to
    ``APPEARS_IN.hadith_number_in_book`` is the staging ``hadith_number`` column —
@@ -133,11 +136,16 @@ _TYPE_PREFIXES = (
 
 
 class DoubledCorpusPrefixError(ValueError):
-    """A ``source_id`` arrived with a doubled leading corpus (``lk:lk:1``).
+    """A ``source_id`` arrived with a doubled leading corpus (``sanadset:sanadset:1``).
 
     Raised by :func:`bare_source_id` — and so by every hadith-derived node-id
-    constructor. Subclasses :exc:`ValueError` so existing broad handlers and the
+    constructor — and by ``generate_source_id`` at the producer boundary.
+    Subclasses :exc:`ValueError` so existing broad handlers and the
     ``generate_source_id`` fail-fast family stay uniform.
+
+    Loaders catch this *specifically* (never bare :exc:`ValueError`, which would
+    also swallow ``safe_int``) and quarantine the offending row rather than abort
+    a multi-hour, non-atomic load. See :mod:`src.graph.load_nodes`.
     """
 
 
@@ -161,23 +169,29 @@ def bare_source_id(value: str) -> str:
     for a given hadith.
 
     Raises :exc:`DoubledCorpusPrefixError` if *value* carries a doubled leading
-    corpus. It does **not** repair one: ``<corpus>:<collection>`` is the defined
-    grammar, so ``lk:lk:1`` (a collection legitimately named after its corpus) is
-    indistinguishable from a genuinely double-prefixed id, and the collapse this
-    function used to perform silently DROPPED the collection segment of a valid
-    identifier (da#355). Since da#353 no producer emits the doubled form, so its
-    arrival is a producer defect and must fail loudly. Ids already in a graph are
-    migrated one-shot by :mod:`src.graph.migrate`, where the intent is explicit.
+    corpus, and does **not** repair one. In the grammar ``<corpus>:<collection>``
+    a ``collection`` equal to its ``corpus`` is forbidden as a producer output,
+    because such an id is ambiguous: ``lk:lk:1`` admits no reading that
+    distinguishes a doubled corpus from a corpus-named collection. A collapse
+    must therefore *guess*, and the guess this function used to make silently
+    dropped the collection segment (da#355). No producer emits the shape — across
+    all 9 staged corpora only ``sanadset`` does, on 100% of its rows with exactly
+    one distinct collection, which is the da#353 CSV-stem fallback, not a real
+    collection. Its arrival is a producer defect and must fail loudly. Ids already
+    in a graph are migrated one-shot by :mod:`src.graph.migrate`, where the
+    resolution of the ambiguity is a deliberate, scoped decision rather than a
+    guess made silently on the hot path.
     """
     body = value[len(HADITH_ID_PREFIX) :] if value.startswith(HADITH_ID_PREFIX) else value
     if is_double_prefixed(body):
         msg = (
             f"source_id has a doubled leading corpus: {value!r}. This is a producer "
-            f"defect — no producer emits this form (da#353). It is NOT repaired here: "
-            f"'<corpus>:<collection>' is the defined grammar, so a collection named "
-            f"after its corpus (e.g. 'lk:lk:1') is indistinguishable from a doubled "
-            f"prefix, and collapsing would silently drop a valid collection segment "
-            f"(da#355). To canonicalize ids already in a graph, use src.graph.migrate."
+            f"defect — no producer emits this shape (da#353). It is NOT repaired here: "
+            f"in the '<corpus>:<collection>' grammar a collection equal to its corpus "
+            f"is forbidden precisely because it is ambiguous — nothing distinguishes a "
+            f"doubled corpus from a corpus-named collection — so collapsing would have "
+            f"to guess, and guessing silently drops a segment (da#355). To canonicalize "
+            f"ids already in a graph, use src.graph.migrate."
         )
         raise DoubledCorpusPrefixError(msg)
     return body
