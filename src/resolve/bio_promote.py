@@ -28,7 +28,7 @@ import pyarrow.parquet as pq
 from src.models.enums import DatePrecision
 from src.parse.base import safe_str, write_parquet
 from src.parse.identity import make_canonical_id
-from src.parse.name_quality import clean_narrator_name
+from src.parse.name_quality import clean_narrator_name, cleaner_removed_content
 from src.resolve.schemas import NARRATORS_CANONICAL_SCHEMA
 from src.resolve.sect_affiliation import (
     derive_sect_affiliation,
@@ -151,6 +151,7 @@ def promote_bios_to_canonical(
     skipped_no_name = 0
     skipped_source = 0
     skipped_pollution = 0
+    skipped_truncated_merge = 0
 
     for bf in bio_files:
         table = pq.read_table(bf)
@@ -182,10 +183,33 @@ def promote_bios_to_canonical(
             if not cleaned:
                 skipped_pollution += 1
                 continue
+            truncated = cleaner_removed_content(norm, cleaned)
             norm = cleaned
 
             bio_id = safe_str(row.get("bio_id"))
             cid = make_canonical_id(norm)
+
+            # When the cleaner had to remove tokens, the residue is not a name the
+            # source asserted — it is whatever survived a truncation, and it is
+            # routinely a bare ism (da#379). Such a residue may not claim an
+            # *attested* narrator: `عبيدة مولى رسول الله ذكره بن شاهين …` cleans to
+            # `عبيده` and would otherwise merge onto ʿAbīda al-Salmānī (1,695
+            # mentions), back-filling an obscure client's jarḥ grade and death year
+            # onto him via _BACKFILL_FIELDS. A bare ism is not a person. Refusing the
+            # merge is always safe; asserting it is not.
+            #
+            # Scoped to targets that carry mentions: those are narrators attested in
+            # an isnad, and corrupting them is the defect. A truncated residue landing
+            # on a zero-mention catalog node merges two catalog entries under a
+            # mangled key — wrong, but it touches no attested narrator and is fixed by
+            # the deferred name/prose extraction, not here. Widening the guard to
+            # zero-mention targets would drop 12,043 kaggle rows for zero
+            # mention-bearing fixes (kaggle collides with an attested narrator exactly
+            # 0 times) and that corpus belongs to da#299.
+            existing = canonical_map.get(cid)
+            if truncated and existing is not None and (existing.get("mention_count") or 0) > 0:
+                skipped_truncated_merge += 1
+                continue
 
             if cid not in canonical_map:
                 canonical_map[cid] = {
@@ -260,6 +284,7 @@ def promote_bios_to_canonical(
         skipped_no_name=skipped_no_name,
         skipped_source=skipped_source,
         skipped_pollution=skipped_pollution,
+        skipped_truncated_merge=skipped_truncated_merge,
         aliases_added=aliases_added,
     )
     return canonical_path

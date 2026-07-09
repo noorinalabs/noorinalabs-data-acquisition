@@ -154,6 +154,7 @@ from src.utils.arabic import normalize_arabic
 __all__ = [
     "clean_narrator_name",
     "clean_narrator_name_display",
+    "cleaner_removed_content",
     "split_compound_narrators",
     "strip_markup",
 ]
@@ -1510,6 +1511,36 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
         return None
 
     return result
+
+
+def cleaner_removed_content(name_normalized: str | None, cleaned: str | None) -> bool:
+    """True when :func:`clean_narrator_name` dropped name *tokens*, not just punctuation.
+
+    ``clean_narrator_name`` has two very different behaviours that its return value
+    alone does not distinguish (da#379):
+
+    * a **cosmetic** pass — edge punctuation stripped off tokens, nothing else. The
+      residue is still the source's own name.
+    * a **truncation** — an isnad/matn tail, honorific, or bracketed entry number is
+      removed and the *head* is kept. The residue is whatever survived the cut, and
+      it is frequently a bare ism: ``"عبيدة مولى رسول الله ذكره بن شاهين …"`` (an
+      obscure client of the Prophet) reduces to ``"عبيده"``, which is the name of a
+      different, heavily-attested narrator.
+
+    A caller that keys identity on the cleaner's output must be able to tell these
+    apart, because the residue of a truncation is not a name the source ever
+    asserted. Compares the two token sequences under the same ``_EDGE_PUNCT``
+    stripping the cleaner itself applies, so a comma or a colon never counts as
+    removed content.
+    """
+    if not name_normalized or not cleaned:
+        return False
+    return _name_tokens(cleaned) != _name_tokens(name_normalized)
+
+
+def _name_tokens(name: str) -> tuple[str, ...]:
+    """Edge-punctuation-stripped, empty-dropped tokens — the cleaner's own tokenization."""
+    return tuple(s for t in name.split() if (s := t.strip(_EDGE_PUNCT)))
 
 
 def clean_narrator_name_display(name_ar: str | None) -> str | None:
