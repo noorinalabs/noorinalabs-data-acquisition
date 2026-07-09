@@ -22,6 +22,7 @@ import pytest
 import src.cli as cli
 import src.graph as graph
 import src.graph.validate as validate_mod
+import src.pipeline.manifest as manifest_mod
 from src.exit_codes import ExitCode
 from src.graph import LoadSummary
 from src.graph.validate import ValidationResult
@@ -151,6 +152,143 @@ class TestLoadExitCode:
         assert exc.value.code == ExitCode.LOAD_FAILED
         # A load that raised did not happen: it must not be recorded as loaded.
         assert not (tmp_path / LAST_LOADED_MANIFEST_FILENAME).exists()
+
+
+class TestPostLoadBookkeepingCannotExitOne:
+    """The `rc=1 => the load did not happen` binding must not leak (da#354).
+
+    `save_manifest`, `create_audit_entry` and `write_audit_entry` run *after*
+    `load_all` returns, so the graph is already committed when they execute.
+    `main()` installs no top-level handler, so before this guard an exception in
+    any of them reached Python's default handler and exited `1` -- the same code
+    as a load that never wrote a node. `rc=1` before the commit is safe to retry;
+    `rc=1` after it re-loads a graph that already holds the data, and nothing
+    separated the two.
+    """
+
+    def _order(self, monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
+        """Record load_all's position relative to the bookkeeping calls."""
+        summary = _summary(validation=[_passing()])
+
+        def _load_all(*a: Any, **k: Any) -> LoadSummary:
+            calls.append("load_all")
+            return summary
+
+        monkeypatch.setattr(graph, "load_all", _load_all)
+
+    def test_audit_write_failure_does_not_exit_one(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _install_load_stubs(monkeypatch, tmp_path, _summary(validation=[_passing()]))
+
+        def _boom(*a: Any, **k: Any) -> None:
+            raise OSError("read-only file system: 'data'")
+
+        monkeypatch.setattr("src.pipeline.audit.write_audit_entry", _boom)
+
+        cli._cmd_load()  # must not raise SystemExit at all
+
+        # The load committed and IS recorded as loaded -- the audit is a side
+        # note, not the load.
+        assert (tmp_path / LAST_LOADED_MANIFEST_FILENAME).exists()
+        err = capsys.readouterr().err
+        assert "the load SUCCEEDED" in err
+
+    def test_last_loaded_manifest_failure_does_not_exit_one(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Raise on the POST-load `save_manifest` only, and prove it was that one.
+
+        `save_manifest` is called twice: once at the top of `_cmd_load` for
+        `MANIFEST_FILENAME`, and once after the load for
+        `LAST_LOADED_MANIFEST_FILENAME`. Patching it globally raises on the first
+        call, *before* `load_all` -- which leaves the graph unwritten and makes an
+        `rc=1` entirely correct. Such a probe passes for the wrong reason and says
+        nothing about the post-load path. The recorded call order is what makes
+        this a measurement: `load_all` must appear before the raise.
+        """
+        _install_load_stubs(monkeypatch, tmp_path, _summary(validation=[_passing()]))
+        calls: list[str] = []
+        self._order(monkeypatch, calls)
+
+        real_save = manifest_mod.save_manifest
+
+        def _save(manifest: Any, path: Path) -> Any:
+            if path.name == LAST_LOADED_MANIFEST_FILENAME:
+                calls.append("save_manifest(LAST_LOADED)")
+                raise OSError("read-only file system: 'data'")
+            calls.append("save_manifest(MANIFEST)")
+            return real_save(manifest, path)
+
+        monkeypatch.setattr("src.pipeline.manifest.save_manifest", _save)
+
+        cli._cmd_load()  # must not raise SystemExit
+
+        assert calls == ["save_manifest(MANIFEST)", "load_all", "save_manifest(LAST_LOADED)"], calls
+        # The raise happened after the commit, and the operator is told so.
+        err = capsys.readouterr().err
+        assert "the load SUCCEEDED" in err
+        assert "re-load every input, which is safe" in err
+
+    def test_bookkeeping_failure_still_yields_findings_code_not_one(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A findings load whose audit write fails is still findings, never `1`."""
+        _install_load_stubs(monkeypatch, tmp_path, _summary(validation=[_fatal()]))
+
+        def _boom(*a: Any, **k: Any) -> None:
+            raise OSError("read-only file system: 'data'")
+
+        monkeypatch.setattr("src.pipeline.audit.write_audit_entry", _boom)
+
+        with pytest.raises(SystemExit) as exc:
+            cli._cmd_load()
+        assert exc.value.code == ExitCode.VALIDATION_FINDINGS
+        assert exc.value.code != ExitCode.LOAD_FAILED
+
+    def test_enrich_exits_bare_one_after_the_load_has_committed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Why the invariant names `load` and not `pipeline`.
+
+        `_cmd_pipeline` runs `_cmd_load()` and then `_cmd_enrich()`, and enrich
+        exits a bare `1` when any step fails -- after its own audit write, and long
+        after the load committed and recorded its manifest. So under
+        `isnad-ingest pipeline` an rc of `1` does NOT mean the load did not happen.
+        Guarding `_cmd_load` cannot fix that; only scoping the claim can, which is
+        what the comment there now does. If enrich grows an exit code of its own,
+        this test reds and that comment must change with it.
+        """
+        (tmp_path / "staging").mkdir(exist_ok=True)
+        monkeypatch.setattr(cli, "_check_neo4j", lambda: None)
+        monkeypatch.setattr(
+            "src.config.get_settings",
+            lambda: SimpleNamespace(
+                data_staging_dir=tmp_path / "staging",
+                betweenness_sampling_size=None,
+                betweenness_sampling_seed=42,
+            ),
+        )
+        monkeypatch.setattr("src.utils.neo4j_client.Neo4jClient", _StubClient)
+        monkeypatch.setattr(
+            "src.enrich.run_all",
+            lambda *a, **k: SimpleNamespace(
+                steps_completed=["centrality"],
+                steps_failed=["topics"],
+                metrics=None,
+                topics=None,
+                historical=None,
+            ),
+        )
+        monkeypatch.setattr("src.pipeline.audit.write_audit_entry", lambda *a, **k: None)
+
+        with pytest.raises(SystemExit) as exc:
+            cli._cmd_enrich()
+
+        # A bare 1 -- the same value EXIT_LOAD_FAILED carries, from a command that
+        # never touches the loaders. This is the leak the scoped comment names.
+        assert exc.value.code == 1
+        assert exc.value.code == ExitCode.LOAD_FAILED
 
 
 class TestValidateCommandExitCode:

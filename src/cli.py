@@ -244,6 +244,12 @@ def _cmd_load(
         # A genuine load failure (da#354). Exits LOAD_FAILED, distinct from the
         # code used for validation findings, and reaches neither the manifest
         # write nor the audit entry below -- a load that raised did not happen.
+        #
+        # That invariant is scoped to `isnad-ingest load`. It does NOT hold for
+        # `isnad-ingest pipeline`, which goes on to run `_cmd_enrich`; enrich
+        # exits a bare 1 of its own long after this load has committed and
+        # recorded its manifest. Read an rc of EXIT_LOAD_FAILED as "the load did
+        # not happen" only for the `load` command.
         traceback.print_exc()
         print(
             "\nLOAD FAILED: the graph was not fully written. See traceback above.",
@@ -253,21 +259,45 @@ def _cmd_load(
 
     duration = time.monotonic() - start
 
-    save_manifest(current_manifest, data_dir / LAST_LOADED_MANIFEST_FILENAME)
+    # Post-load bookkeeping. `load_all` returned, so the graph is COMMITTED --
+    # the loaders write per batch with no spanning transaction. A failure to
+    # record the manifest or the audit entry is therefore not a failed load, and
+    # must not exit EXIT_LOAD_FAILED: an rc of 1 *before* the commit is safe to
+    # retry, and an rc of 1 *after* it sends the operator to re-run a load whose
+    # data is already in the graph. Nothing below may raise past this handler --
+    # `main()` has none, so an escaping exception reaches Python's default
+    # handler and exits 1, which is exactly the ambiguity this PR exists to end.
+    #
+    # Bookkeeping failure leaves the rc alone (0, or findings) rather than
+    # claiming a code of its own; the exit-code space is being consolidated into
+    # one registry (da#384) and a new value does not get minted here.
+    try:
+        save_manifest(current_manifest, data_dir / LAST_LOADED_MANIFEST_FILENAME)
 
-    audit = create_audit_entry(
-        "load",
-        duration_seconds=round(duration, 2),
-        files_changed=changed_file_details,
-        rows_affected=summary.total_nodes + summary.total_edges,
-        summary={
-            "total_nodes": summary.total_nodes,
-            "total_edges": summary.total_edges,
-            "incremental": incremental,
-            "files_skipped": len(skipped_files),
-        },
-    )
-    write_audit_entry(data_dir, audit)
+        audit = create_audit_entry(
+            "load",
+            duration_seconds=round(duration, 2),
+            files_changed=changed_file_details,
+            rows_affected=summary.total_nodes + summary.total_edges,
+            summary={
+                "total_nodes": summary.total_nodes,
+                "total_edges": summary.total_edges,
+                "incremental": incremental,
+                "files_skipped": len(skipped_files),
+            },
+        )
+        write_audit_entry(data_dir, audit)
+    except Exception:
+        traceback.print_exc()
+        print(
+            "\nWARNING: the load SUCCEEDED and is committed to the graph, but "
+            "post-load bookkeeping failed (traceback above). The last-loaded "
+            "manifest and/or the audit entry may be missing. Do NOT read this as "
+            "a load failure. A missing last-loaded manifest makes the next "
+            "--incremental load re-load every input, which is safe: every loader "
+            "is an idempotent MERGE.",
+            file=sys.stderr,
+        )
 
     print("\n=== Load Summary ===")
     print(f"  Nodes loaded : {summary.total_nodes}")
