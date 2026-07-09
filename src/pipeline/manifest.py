@@ -112,27 +112,49 @@ def compare_manifests(
 
 
 def save_manifest(manifest: dict[str, dict[str, Any]], path: Path) -> Path | None:
-    """Write manifest dict to *path* as pretty-printed JSON.
+    """Atomically write manifest dict to *path* as pretty-printed JSON.
 
     Best-effort: the manifest is a change-detection optimization, not a
     correctness dependency, so a filesystem failure here (e.g. a read-only
     container mount over the loader's Parquet inputs) must never fail an
     otherwise-runnable pipeline stage. Returns the path of the written
     file, or ``None`` if the write could not be performed.
+
+    The write goes to a sibling temp file and is then ``os.replace``d into
+    position, so an interrupted or failing write leaves the *previous* manifest
+    intact rather than a truncated one (da#350). A truncated manifest is worse
+    than a stale one: a stale manifest over-reports changes and costs a
+    redundant load, while a truncated one is unreadable, and any attempt to be
+    lenient about it risks under-reporting changes and silently skipping inputs.
     """
+    tmp = path.with_name(path.name + ".tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        tmp.replace(path)
     except OSError:
         logger.warning("manifest_write_failed", path=str(path))
+        tmp.unlink(missing_ok=True)
         return None
 
     return path
 
 
 def load_manifest(path: Path) -> dict[str, dict[str, Any]]:
-    """Load a manifest from *path*. Returns empty dict if file does not exist."""
+    """Load a manifest from *path*. Returns empty dict if absent or unreadable.
+
+    An unparseable manifest reads as ``{}``, which makes
+    :func:`compare_manifests` classify every input as *added* and so forces a
+    full load. That is the only safe direction: the loaders are idempotent
+    MERGEs, so re-loading an already-loaded file costs time, whereas trusting a
+    damaged manifest could mark an input "unchanged" and skip it forever
+    (da#350). The corruption is logged rather than swallowed silently.
+    """
     if not path.exists():
         return {}
-    result: dict[str, dict[str, Any]] = json.loads(path.read_text())
+    try:
+        result: dict[str, dict[str, Any]] = json.loads(path.read_text())
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        logger.warning("manifest_unreadable_forcing_full_load", path=str(path))
+        return {}
     return result
