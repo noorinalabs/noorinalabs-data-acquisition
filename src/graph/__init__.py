@@ -17,7 +17,27 @@ from src.utils.neo4j_client import Neo4jClient
 
 logger = get_logger(__name__)
 
+# --- Exit codes (da#359) ----------------------------------------------------
+# A malformed id is quarantined, never aborted: these loaders commit per batch
+# with no spanning transaction, so an escaping exception would strand batches
+# 1..N-1 in Neo4j hours into a load. But a load that ran to completion having
+# REFUSED input is not a success, and it must not exit 0 -- that is how 650,986
+# sanadset hadiths (76.3% of staging) could be absent from the graph while
+# parse, load and validation all reported success.
+#
+# This is a third, distinct fact, not either of da#354's two:
+#   * NOT a load failure. The loaders completed and their batches are committed.
+#   * NOT a validation finding. Validation never sees a quarantined row, so it
+#     cannot report on one; the graph is not what the loader intended.
+# It means: the load completed, the graph is INCOMPLETE, and the producer
+# emitted ids that violate the grammar asserted in src/parse/identity.py.
+#
+# 0 is success; 2 is argparse's usage error; 3 is src.resolve.EXIT_STOPPED_AT_LIMIT;
+# 1 and 4 are claimed by da#354 (EXIT_LOAD_FAILED / EXIT_VALIDATION_FINDINGS).
+EXIT_MALFORMED_IDS = 5
+
 __all__ = [
+    "EXIT_MALFORMED_IDS",
     "EdgeLoadResult",
     "LoadResult",
     "LoadSummary",
@@ -34,11 +54,24 @@ class LoadSummary:
     """Full pipeline outcome: nodes + edges + validation."""
 
     node_results: list[LoadResult]
-    edge_results: list[EdgeLoadResult]
+    edge_results: list[EdgeLoadResult] = field(default_factory=list)
     validation_results: list[ValidationResult] = field(default_factory=list)
     total_nodes: int = 0
     total_edges: int = 0
     validation_passed: bool = True
+
+    @property
+    def total_malformed_ids(self) -> int:
+        """Rows and edges refused across every loader because their id was malformed.
+
+        Summed over BOTH node and edge results: a doubled hadith id is refused by
+        the Hadith/Chain/Grading node loaders *and* by the APPEARS_IN, PARALLEL_OF,
+        NARRATED, TRANSMITTED_TO and GRADED_BY edge loaders, and a total that
+        counted only one side would under-report a load that dropped the other.
+        """
+        return sum(r.malformed_ids for r in self.node_results) + sum(
+            r.malformed_ids for r in self.edge_results
+        )
 
 
 def load_all(

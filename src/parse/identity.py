@@ -40,9 +40,14 @@ Two historical identity hazards this module designs out
    either as corpus ``lk`` doubled or as corpus ``lk`` with a collection named
    ``lk``, and nothing in the id distinguishes them. That ambiguity is exactly
    why the old collapse could never be safe: it resolved the ambiguity by fiat
-   and silently dropped a segment, 16M+ times in a single load (da#355). Since
-   da#353 no producer emits the shape at all. Legacy ids already persisted in a
-   graph are canonicalized one-shot by :mod:`src.graph.migrate`.
+   and silently dropped a segment. It did so for **650,986 distinct hadiths** —
+   every ``sanadset`` row, 76.3% of staging — which is the number that matters;
+   the 16M+ figure quoted elsewhere counts id-canonicalization *calls* across
+   hadiths, chains, gradings and ``PARALLEL_OF`` pairs, not distinct hadiths
+   (da#355). Since da#353 no producer emits the shape at all, so any occurrence
+   at load time is a producer defect and exits non-zero (da#359, see
+   ``src.graph.EXIT_MALFORMED_IDS``). Legacy ids already persisted in a graph are
+   canonicalized one-shot by :mod:`src.graph.migrate`.
 2. **collection-ref vs in-book-ordinal** (da#77): ``source_id``'s positional
    tail is a stable within-collection key. The *in-book ordinal* that flows to
    ``APPEARS_IN.hadith_number_in_book`` is the staging ``hadith_number`` column —

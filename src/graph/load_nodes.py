@@ -65,6 +65,11 @@ class LoadResult:
     merged: int
     skipped: int
     validation_errors: list[str] = field(default_factory=list)
+    # Rows refused because their ``source_id`` violates the id grammar (da#359).
+    # Kept OUT of ``skipped``, which already conflates null ``source_id``,
+    # non-canonical composition drops and cross-edition dedup. A quarantined row
+    # is a producer defect and has to be attributable to that cause alone.
+    malformed_ids: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +322,7 @@ def _load_hadiths(
     total_created = 0
     total_skipped = 0
     total_deduped = 0
+    total_malformed = 0
     all_errors: list[str] = []
     total_batch = 0
 
@@ -374,6 +380,7 @@ def _load_hadiths(
                     raise
                 all_errors.append(f"{fp.name} row {i}: {exc}")
                 total_skipped += 1
+                total_malformed += 1
                 continue
             batch.append(
                 {
@@ -405,10 +412,13 @@ def _load_hadiths(
         created=total_created,
         merged=merged,
         skipped=total_skipped,
+        malformed_ids=total_malformed,
         cross_edition_deduped=total_deduped,
         curated_identities=len(curated_identities),
     )
-    return LoadResult("Hadith", total_created, merged, total_skipped, all_errors)
+    return LoadResult(
+        "Hadith", total_created, merged, total_skipped, all_errors, malformed_ids=total_malformed
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -577,6 +587,7 @@ def _load_chains(
     batch: list[dict[str, Any]] = []
     errors: list[str] = []
     skipped = 0
+    malformed = 0
 
     for hid, mentions in seen_hadiths.items():
         # da#355: both constructors route through ``bare_source_id``, so a malformed
@@ -589,6 +600,7 @@ def _load_chains(
                 raise
             errors.append(f"chain for hadith_id={hid!r}: {exc}")
             skipped += 1
+            malformed += 1
             continue
         narrator_ids = [nid for _pos, nid in sorted(mentions, key=lambda pair: pair[0])]
         batch.append(
@@ -608,8 +620,10 @@ def _load_chains(
 
     created = client.execute_write_batch(_CHAIN_MERGE, batch) if batch else 0
     merged = len(batch) - created
-    logger.info("chains_loaded", created=created, merged=merged, skipped=skipped)
-    return LoadResult("Chain", created, merged, skipped, errors)
+    logger.info(
+        "chains_loaded", created=created, merged=merged, skipped=skipped, malformed_ids=malformed
+    )
+    return LoadResult("Chain", created, merged, skipped, errors, malformed_ids=malformed)
 
 
 # ---------------------------------------------------------------------------
@@ -652,6 +666,7 @@ def _load_gradings(
     batch: list[dict[str, Any]] = []
     errors: list[str] = []
     skipped = 0
+    malformed = 0
 
     for fp in files:
         rows = _read_parquet_rows(fp)
@@ -673,6 +688,7 @@ def _load_gradings(
                     raise
                 errors.append(f"{fp.name} row {i}: {exc}")
                 skipped += 1
+                malformed += 1
                 continue
             batch.append(
                 {
@@ -691,8 +707,10 @@ def _load_gradings(
 
     created = client.execute_write_batch(_GRADING_MERGE, batch) if batch else 0
     merged = len(batch) - created
-    logger.info("gradings_loaded", created=created, merged=merged, skipped=skipped)
-    return LoadResult("Grading", created, merged, skipped, errors)
+    logger.info(
+        "gradings_loaded", created=created, merged=merged, skipped=skipped, malformed_ids=malformed
+    )
+    return LoadResult("Grading", created, merged, skipped, errors, malformed_ids=malformed)
 
 
 # ---------------------------------------------------------------------------

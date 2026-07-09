@@ -45,6 +45,8 @@ class EdgeLoadResult:
     created: int
     skipped: int
     missing_endpoints: int
+    # Edges refused because an endpoint id violates the id grammar (da#359).
+    malformed_ids: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +297,7 @@ def _load_transmitted_to(
 
     if not all_pairs:
         logger.info("transmitted_to_no_pairs", dropped_noncanonical=dropped_noncanonical)
-        return EdgeLoadResult("TRANSMITTED_TO", 0, 0, 0)
+        return EdgeLoadResult("TRANSMITTED_TO", 0, 0, 0, malformed_ids=malformed_ids)
 
     # Check for missing endpoints
     check_results = _chunked_read(client, _TRANSMITTED_TO_CHECK, all_pairs, batch_size)
@@ -323,7 +325,7 @@ def _load_transmitted_to(
         total_pairs=len(all_pairs),
         dropped_noncanonical=dropped_noncanonical,
     )
-    return EdgeLoadResult("TRANSMITTED_TO", created, 0, missing)
+    return EdgeLoadResult("TRANSMITTED_TO", created, 0, missing, malformed_ids=malformed_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +419,7 @@ def _load_narrated(
 
     if not batch:
         logger.info("narrated_no_edges")
-        return EdgeLoadResult("NARRATED", 0, 0, 0)
+        return EdgeLoadResult("NARRATED", 0, 0, 0, malformed_ids=malformed_ids)
 
     # Check endpoints
     check_results = _chunked_read(client, _NARRATED_CHECK, batch, batch_size)
@@ -440,7 +442,7 @@ def _load_narrated(
         missing_endpoints=missing,
         dropped_noncanonical=dropped_noncanonical,
     )
-    return EdgeLoadResult("NARRATED", created, 0, missing)
+    return EdgeLoadResult("NARRATED", created, 0, missing, malformed_ids=malformed_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -538,7 +540,7 @@ def _load_appears_in(
 
     if not batch:
         logger.info("appears_in_no_edges")
-        return EdgeLoadResult("APPEARS_IN", 0, skipped, 0)
+        return EdgeLoadResult("APPEARS_IN", 0, skipped, 0, malformed_ids=malformed_ids)
 
     # Check endpoints
     check_results = _chunked_read(client, _APPEARS_IN_CHECK, batch, batch_size)
@@ -556,7 +558,7 @@ def _load_appears_in(
         else 0
     )
     logger.info("appears_in_loaded", created=created, skipped=skipped, missing_endpoints=missing)
-    return EdgeLoadResult("APPEARS_IN", created, skipped, missing)
+    return EdgeLoadResult("APPEARS_IN", created, skipped, missing, malformed_ids=malformed_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -680,7 +682,7 @@ def _load_parallel_of(
             "parallel_of_no_edges",
             msg="parallel_links.parquet has no usable rows — /compare will be empty",
         )
-        return EdgeLoadResult("PARALLEL_OF", 0, skipped, 0)
+        return EdgeLoadResult("PARALLEL_OF", 0, skipped, 0, malformed_ids=malformed_ids)
 
     # Detected links that resolved to zero loaded edges is a silent-failure mode
     # (every endpoint missing — e.g. an id-scheme mismatch): warn, do not pass it
@@ -697,7 +699,7 @@ def _load_parallel_of(
         logger.info(
             "parallel_of_loaded", created=created, skipped=skipped, missing_endpoints=missing
         )
-    return EdgeLoadResult("PARALLEL_OF", created, skipped, missing)
+    return EdgeLoadResult("PARALLEL_OF", created, skipped, missing, malformed_ids=malformed_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -923,7 +925,7 @@ def _load_graded_by(
 
     if not batch:
         logger.info("graded_by_no_edges")
-        return EdgeLoadResult("GRADED_BY", 0, skipped, 0)
+        return EdgeLoadResult("GRADED_BY", 0, skipped, 0, malformed_ids=malformed_ids)
 
     # Check endpoints
     check_results = _chunked_read(client, _GRADED_BY_CHECK, batch, batch_size)
@@ -941,7 +943,7 @@ def _load_graded_by(
         else 0
     )
     logger.info("graded_by_loaded", created=created, skipped=skipped, missing_endpoints=missing)
-    return EdgeLoadResult("GRADED_BY", created, skipped, missing)
+    return EdgeLoadResult("GRADED_BY", created, skipped, missing, malformed_ids=malformed_ids)
 
 
 # ---------------------------------------------------------------------------
