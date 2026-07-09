@@ -35,12 +35,23 @@ import pytest
 import src.cli as cli
 import src.graph as graph
 from src.graph import EXIT_MALFORMED_IDS, EdgeLoadResult, LoadResult, LoadSummary
-from src.graph.load_edges import _load_appears_in, _load_graded_by
-from src.graph.load_nodes import _load_hadiths
+from src.graph.load_edges import (
+    _load_appears_in,
+    _load_graded_by,
+    _load_narrated,
+    _load_parallel_of,
+    _load_transmitted_to,
+)
+from src.graph.load_nodes import _load_chains, _load_hadiths
 from src.graph.validate import ValidationResult
 from src.resolve._checkpoint import EXIT_STOPPED_AT_LIMIT
 
-from .conftest import MockNeo4jClient, write_hadiths
+from .conftest import (
+    MockNeo4jClient,
+    write_hadiths,
+    write_narrator_mentions_resolved,
+    write_parallel_links,
+)
 
 # Verbatim from data/staging/hadiths_sanadset.parquet, row 0. All 650,986 rows
 # share the `sanadset:sanadset` prefix. Do NOT replace this with a synthetic
@@ -266,6 +277,90 @@ class TestEdgeLoadersReportMalformedOnTheEmptyBatchPath:
         )
         assert summary.total_nodes == 0
         assert summary.total_malformed_ids == 6  # 2 hadith + 2 graded_by + 2 appears_in
+
+
+class TestEveryLoaderThatQuarantinesAlsoReports:
+    """The four returns that Kwesi Boateng's mutants walked straight through.
+
+    I wrote a test for `_load_graded_by`'s empty-batch return and one for
+    `_load_appears_in`'s, and stopped -- as though those were the only two.
+    Deleting `malformed_ids=` from `_load_narrated`, `_load_transmitted_to`,
+    `_load_parallel_of` or `_load_chains` left all 186 graph tests green. Same
+    shape, same file, no test. Oyunbileg Batbayar independently found three of
+    the four.
+
+    Each loader below is fed ONLY malformed ids, which is the production case:
+    all 650,986 sanadset rows are malformed, so `batch` is empty and the edge
+    loaders return through `if not batch:` -- never reaching the normal return.
+    `_load_chains` reaches its normal return and needs the count there.
+    """
+
+    def _resolved_mentions(self, d: Path, hadith_ids: list[str]) -> None:
+        rows = []
+        for hid in hadith_ids:
+            for pos in (0, 1):
+                rows.append(
+                    {
+                        "mention_id": f"{hid}-m{pos}",
+                        "hadith_id": hid,
+                        "position_in_chain": pos,
+                        "canonical_narrator_id": f"nar:{pos}",
+                        "name_raw": f"n{pos}",
+                        "name_normalized": f"n{pos}",
+                    }
+                )
+        write_narrator_mentions_resolved(d, rows)
+
+    def test_transmitted_to_reports_malformed_on_the_empty_pair_path(self, tmp_path: Path) -> None:
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        self._resolved_mentions(staging, [REAL_DOUBLED_SOURCE_ID])
+
+        result = _load_transmitted_to(MockNeo4jClient(), staging, strict=False)
+
+        assert result.created == 0  # the empty-pair early return
+        assert result.malformed_ids == 1
+        assert result.refused == 1
+
+    def test_narrated_reports_malformed_on_the_empty_batch_path(self, tmp_path: Path) -> None:
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        self._resolved_mentions(staging, [REAL_DOUBLED_SOURCE_ID])
+
+        result = _load_narrated(MockNeo4jClient(), staging, strict=False)
+
+        assert result.created == 0
+        assert result.malformed_ids == 1
+        assert result.refused == 1
+
+    def test_parallel_of_reports_malformed_on_the_empty_batch_path(self, tmp_path: Path) -> None:
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        write_parallel_links(
+            staging,
+            [{"hadith_id_a": REAL_DOUBLED_SOURCE_ID, "hadith_id_b": "sanadset:sanadset:0:0:1"}],
+        )
+
+        result = _load_parallel_of(MockNeo4jClient(), staging, strict=False)
+
+        assert result.created == 0
+        assert result.malformed_ids == 1
+        assert result.refused == 1
+
+    def test_chains_reports_malformed_on_its_normal_return(self, tmp_path: Path) -> None:
+        """`_load_chains` does NOT take an empty-batch path; the count rides the normal return."""
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        curated = tmp_path / "curated"
+        curated.mkdir()
+        self._resolved_mentions(curated, [REAL_DOUBLED_SOURCE_ID, CONTROL_SOURCE_ID])
+
+        result = _load_chains(MockNeo4jClient(), staging, curated, strict=False)
+
+        assert result.malformed_ids == 1
+        # POSITIVE CONTROL: the well-formed chain still loaded, so `malformed_ids == 1`
+        # is not also satisfied by the loader having refused everything.
+        assert result.created == 1
 
 
 class TestLoadSummaryAggregation:
