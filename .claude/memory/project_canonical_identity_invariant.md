@@ -1,6 +1,6 @@
 ---
 name: project_canonical_identity_invariant
-description: da#356 — canonical id/display name is a function of the MENTION, never the matched bio. crossref (Stage 5), not fuzzy, caused 92% of the 14,316 chimeric nodes. Corroboration criterion "mention is bio-registered" is vacuous by stage ordering. PR #363.
+description: da#356 — canonical id/display name is a function of the MENTION, never the matched bio. crossref (Stage 5), not fuzzy, caused 92% of the 14,316 chimeric nodes. "mention is bio-registered" is vacuous by stage ordering. De-keying ALONE trades over-merge for under-merge — needs the da#376 fold. PR #363.
 metadata:
   type: project
 ---
@@ -23,9 +23,19 @@ Pre-fix, a mention `عائشة` fuzzy-matching the OCR-corrupt itqan bio `عائ
 
 The gate matters even though identity is now safe: an attached `death_year_ah` enters `death_year_index` → feeds `_temporal_filter` for neighbours **and** `refine_mononym_name`'s da#248 evidence → **bad metadata propagates back into identity.**
 
-## De-keying does NOT fragment the graph
+## De-keying alone trades an over-merge for an under-merge — it needs [[project_fuzzy_cluster_unblockable]]
 
-Node count 34,915 → 162,349 at disambiguate output (4.65×). Of the 128,058 new nodes, classified against each group's modal form: **10.6% spelling variants** (`fuzzy_cluster` re-merges; `_choose_representative` ranks by `mention_count`) vs **89.4% genuinely different people**. The shatter is an over-merge being undone. 63.9% of post-fix forms are `mention_count==1` singletons — the OCR/matn tail, zero graph-metric weight.
+Node count 34,915 → 162,349 at disambiguate output (4.65×), → 158,573 with the da#376 fold.
+
+**A first version of this note claimed "10.6% variants / 89.4% different people". That was WRONG** — it came from a *lexical proxy* (`ratio>=90 & lev<=2` vs the group's modal form), not from the production predicate. Two reviewers falsified it. Derived instead with `fuzzy_cluster._can_merge` at the production threshold (90.0), over the 124,834 new nodes:
+
+| fate | nodes | share | mentions |
+|---|---|---|---|
+| `fuzzy_cluster` **will re-merge** | 20,692 | 16.6% | 73,811 |
+| scored, precision guards **refused** (correct separation) | 96,917 | 77.6% | 289,366 |
+| **never scored** — no blocking key | 7,225 | 5.8% | 94,657 |
+
+The old claim conflated the last two. **"Refused" is a decision; "never scored" is a non-decision.** Never assert a merge outcome from a lexical proxy — run `_can_merge`.
 
 ## Gotchas for anyone touching this
 
