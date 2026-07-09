@@ -56,14 +56,41 @@ def _staging_with_hadiths(tmp_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# The production default. If this flips to False the guard below stops firing in
-# production while every other test in this file keeps passing.
+# The production default.
+#
+# `tests/conftest.py` sets DEDUP_REQUIRE_ML=false suite-wide (CI cannot import the
+# embedder). Both tests below therefore `delenv` it first — verified load-bearing:
+# with the delenv removed, the suite's env var reaches `Settings()` and the
+# assertion reads False. Both go red if the default is flipped to False or the
+# field is deleted, so neither is inert.
+#
+# The first pins the flag's *value*; the second pins the *behaviour* the flag is
+# supposed to buy, so deleting or flipping the default cannot leave the pipeline
+# silently degrading with only a constant-comparison test to notice.
 # ---------------------------------------------------------------------------
 def test_dedup_requires_ml_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """The shipped default is fail-loud, regardless of the suite's opt-out fixture."""
     monkeypatch.delenv("DEDUP_REQUIRE_ML", raising=False)
     get_settings.cache_clear()
     assert Settings().dedup_require_ml is True
+
+
+def test_default_settings_make_run_dedup_raise(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """End-to-end: with the suite's opt-out removed and no `require_ml` argument,
+    a missing declared dep raises. This is the production call shape — `run_all`
+    passes no `require_ml`, so `run_dedup` reads the setting.
+    """
+    monkeypatch.delenv("DEDUP_REQUIRE_ML", raising=False)
+    get_settings.cache_clear()
+    staging = _staging_with_hadiths(tmp_path)
+
+    with patch.dict(sys.modules, {"sentence_transformers": None}):
+        with pytest.raises(MissingDependencyError):
+            run_dedup(staging, threshold=0.70)
+
+    assert not (staging / "parallel_links.parquet").exists()
 
 
 # ---------------------------------------------------------------------------
