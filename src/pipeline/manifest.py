@@ -16,6 +16,8 @@ from typing import Any
 
 import pyarrow.parquet as pq
 
+from src.utils.logging import get_logger
+
 __all__ = [
     "ChangedFiles",
     "compare_manifests",
@@ -26,6 +28,8 @@ __all__ = [
 
 MANIFEST_FILENAME = ".manifest.json"
 LAST_LOADED_MANIFEST_FILENAME = ".last_loaded_manifest.json"
+
+logger = get_logger(__name__)
 
 
 def md5_file(path: Path, chunk_size: int = 8192) -> str:
@@ -107,10 +111,23 @@ def compare_manifests(
     return ChangedFiles(added=added, modified=modified, unchanged=unchanged, removed=removed)
 
 
-def save_manifest(manifest: dict[str, dict[str, Any]], path: Path) -> None:
-    """Write manifest dict to *path* as pretty-printed JSON."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+def save_manifest(manifest: dict[str, dict[str, Any]], path: Path) -> Path | None:
+    """Write manifest dict to *path* as pretty-printed JSON.
+
+    Best-effort: the manifest is a change-detection optimization, not a
+    correctness dependency, so a filesystem failure here (e.g. a read-only
+    container mount over the loader's Parquet inputs) must never fail an
+    otherwise-runnable pipeline stage. Returns the path of the written
+    file, or ``None`` if the write could not be performed.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    except OSError:
+        logger.warning("manifest_write_failed", path=str(path))
+        return None
+
+    return path
 
 
 def load_manifest(path: Path) -> dict[str, dict[str, Any]]:
