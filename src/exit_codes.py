@@ -82,7 +82,18 @@ Who emits ``1``
 ---------------
 Exactly one call site, read from the tree rather than reasoned about::
 
-    src/cli.py:258   sys.exit(ExitCode.LOAD_FAILED)   # _cmd_load, genuine failure
+    src/cli.py   sys.exit(ExitCode.LOAD_FAILED)   # _cmd_load, in the except around load_all
+
+Named by function and enclosing block, never by line number. The first version of
+this paragraph wrote ``src/cli.py:258`` -- true of the tree the walk ran against,
+false by the time that same commit landed, because rewriting the comment block
+directly above the call moved it six lines down. The call has sat at ``252``,
+``258`` and ``264`` across the three commits of da#372: it drifted at every one.
+
+A line number in prose is a hand-maintained fact about a file, unguarded, in the
+module whose whole argument is that hand-maintained facts rot and that the
+mechanism must be the guard rather than the test. Nothing here can red on a stale
+line number. Nothing should have to.
 
 ``_check_neo4j`` is **not** among them; it exits :attr:`ExitCode.DB_UNREACHABLE`
 (da#384 Amendment R). An earlier version of this paragraph named it, which is the

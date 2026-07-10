@@ -427,8 +427,8 @@ imports: __future__, os, typing, src.models.enrich, src.utils.logging, src.utils
 ## src/exit_codes.py [python]
 The one owner of this pipeline's process exit-code space (da#384).
 imports: __future__, enum
-- class ExitCode(enum.IntEnum) @161
-  - method __new__(cls, value) @187
+- class ExitCode(enum.IntEnum) @172
+  - method __new__(cls, value) @198
 
 ## src/graph/__init__.py [python]
 Phase 3: Neo4j node/edge loaders and validation queries.
