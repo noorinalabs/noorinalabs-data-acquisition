@@ -53,6 +53,7 @@ firehose — the ``narrator_mentions_sanadset`` baseline in
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import re
 from pathlib import Path
@@ -130,6 +131,15 @@ class BooksCsvSchemaError(SanadsetSchemaError):
 _SANAD_RE: re.Pattern[str] = re.compile(r"<SANAD>(.*?)</SANAD>", re.DOTALL)
 _MATN_RE: re.Pattern[str] = re.compile(r"<MATN>(.*?)</MATN>", re.DOTALL)
 _NAR_RE: re.Pattern[str] = re.compile(r"<NAR>(.*?)</NAR>", re.DOTALL)
+
+# Presence of ANY ``<SANAD>``/``</SANAD>`` token, well-formed or not. Used to tell
+# a genuinely tag-less row (159,558 "No SANAD" rows, #366) apart from a row that
+# DOES carry SANAD markup which ``_SANAD_RE``'s open→close capture could not use —
+# an empty ``<SANAD></SANAD>`` pair (6,052 rows), an opening tag with no close, or
+# an orphaned ``</SANAD>`` closing tag preceding its open (91 rows). Those 6,143
+# rows are not chainless: the chain sits pre-segmented in the ``Sanad`` column
+# (da#368). A present-but-unusable tag is logged, never silently tolerated.
+_SANAD_TAG_RE: re.Pattern[str] = re.compile(r"</?SANAD>")
 
 # Residual structural markup (da#318). Malformed upstream rows carry a doubled
 # ``<SANAD>…<MATN>`` segment closed by a single ``</MATN>``, so ``_MATN_RE``'s
@@ -357,6 +367,76 @@ def _extract_narrator_mentions(
     return mentions
 
 
+def _parse_sanad_column(value: object) -> list[str] | None:
+    """Parse the pre-segmented ``Sanad`` column into a list of narrator names (da#368).
+
+    The Sanadset raw CSV carries a dedicated ``Sanad`` column alongside the
+    ``<SANAD>``-tagged markup in ``Hadith``. For the 485,285 well-tagged rows the
+    column merely duplicates the chain, but for 6,143 rows the inline ``<SANAD>``
+    markup is empty or orphaned so :func:`_extract_tag` yields nothing — and the
+    column is then the ONLY place the chain survives. It holds an already-segmented
+    Python **list literal** of diacritized names, e.g.
+    ``"['مُسَدَّدٌ', 'صَفِيَّةَ بِنْتِ حُيَيٍّ']"``.
+
+    Returns the list of non-empty name strings, or ``None`` when the value is
+    absent, the sentinel ``"No SANAD"`` (159,558 rows, #366), or not a list literal
+    of strings. This is a **pure column read**: a value that does not
+    ``ast.literal_eval`` to a list is rejected rather than coerced — there is NO
+    NER / free-text extraction here (da#369 fallback stays disabled), so a row with
+    no usable column value keeps ``isnad_raw_ar = None``.
+    """
+    text = safe_str(value)
+    if text is None:
+        return None
+    if text.strip().lower() == "no sanad":
+        return None
+    try:
+        parsed = ast.literal_eval(text)
+    except (ValueError, SyntaxError):
+        return None
+    if not isinstance(parsed, list):
+        return None
+    names = [str(item).strip() for item in parsed if isinstance(item, str) and str(item).strip()]
+    return names or None
+
+
+def _mentions_from_names(
+    names: list[str],
+    source_hadith_id: str,
+) -> list[dict[str, str | int | None]]:
+    """Build narrator mentions from the pre-segmented ``Sanad`` column (da#368).
+
+    Unlike :func:`_extract_narrator_mentions`, the column form is a plain ordered
+    list of names with no ``<NAR>`` tags and no inter-narrator transmission
+    particles, so there is nothing to segment — each list item is exactly one
+    narrator. Pollution is filtered by the SAME :func:`_is_narrator_like` gate the
+    ``<NAR>`` path applies (relational pronouns, honorifics, bare particles), so
+    column-recovered mentions carry the same quality as tag-derived ones.
+    ``position_in_chain`` is numbered over the *accepted* mentions so it stays
+    gap-free; ``transmission_method`` is null (the column carries no connective).
+    """
+    mentions: list[dict[str, str | int | None]] = []
+    position = 0
+    for name in names:
+        if not _is_narrator_like(name):
+            continue
+        mention_id = generate_source_id(_SOURCE_CORPUS, "mention", source_hadith_id, str(position))
+        mentions.append(
+            {
+                "mention_id": mention_id,
+                "source_hadith_id": source_hadith_id,
+                "source_corpus": _SOURCE_CORPUS,
+                "position_in_chain": position,
+                "name_ar": name,
+                "name_en": None,
+                "name_ar_normalized": normalize_arabic(name),
+                "transmission_method": None,
+            }
+        )
+        position += 1
+    return mentions
+
+
 def _book_key(name_ar: str) -> str:
     """Stable, content-derived collection key for a Sanadset book *name* (da#353).
 
@@ -531,13 +611,18 @@ def _collection_row(
 def _process_chunk(
     rows: list[dict[str, object]],
     collection_name: str,
-) -> tuple[list[dict[str, object]], list[dict[str, str | int | None]], int, int]:
+) -> tuple[list[dict[str, object]], list[dict[str, str | int | None]], int, int, int, int]:
     """Process a chunk of rows.
 
-    Returns ``(hadiths, mentions, malformed_count, raw_nar_count)``. ``raw_nar_count``
-    is the number of raw ``<NAR>`` tags seen before B3 re-segmentation / filtering;
-    comparing it to ``len(mentions)`` quantifies how much coarse-tag pollution the
-    B3 filter removed (da#221).
+    Returns ``(hadiths, mentions, malformed_count, raw_nar_count,
+    recovered_sanad_count, column_mention_count)``. ``raw_nar_count`` is the number
+    of raw ``<NAR>`` tags seen before B3 re-segmentation / filtering; comparing it
+    to the *tag-derived* mention count quantifies how much coarse-tag pollution the
+    B3 filter removed (da#221). ``recovered_sanad_count`` is the number of rows
+    whose chain was recovered from the ``Sanad`` column because the inline
+    ``<SANAD>`` markup was empty/orphaned (da#368); ``column_mention_count`` is the
+    mentions those rows contributed (kept separate so the B3 firehose metric, which
+    is about ``<NAR>`` tags only, is not skewed by the tag-free column path).
 
     Source columns are resolved case-insensitively (da#353): the production
     Sanadset header is ``Hadith,Book,Num_hadith,Matn,Sanad,Sanad_Length``, and the
@@ -554,8 +639,17 @@ def _process_chunk(
     mentions: list[dict[str, str | int | None]] = []
     malformed_count = 0
     raw_nar_count = 0
+    recovered_sanad_count = 0
+    column_mention_count = 0
     if not rows:
-        return hadiths, mentions, malformed_count, raw_nar_count
+        return (
+            hadiths,
+            mentions,
+            malformed_count,
+            raw_nar_count,
+            recovered_sanad_count,
+            column_mention_count,
+        )
 
     # Resolve the source columns ONCE per chunk (all rows share one header).
     colmap: dict[str, str] = {str(k).lower(): k for k in rows[0]}
@@ -581,6 +675,10 @@ def _process_chunk(
     book_col = col("book")
     grade_col = col("grade")
     chapter_col = col("chapter")
+    # The dedicated pre-segmented isnad column (da#368). It carries the chain as a
+    # Python list literal and is the recovery source when the inline ``<SANAD>``
+    # markup is empty/orphaned. Absent in some fixtures/editions → no recovery.
+    sanad_col = col("sanad")
 
     # The ``Book`` column is the collection join key, so its absence is a broken
     # corpus — the same standard ``_parse_books`` applies to an unmappable
@@ -643,10 +741,35 @@ def _process_chunk(
         sanad_text = _extract_tag(_SANAD_RE, full_text)
         matn_text = _strip_structural_tags(_extract_tag(_MATN_RE, full_text))
 
-        # Handle "No SANAD" rows
+        # Resolve the isnad chain (da#368). The primary source is the inline
+        # ``<SANAD>…</SANAD>`` markup. When ``_extract_tag`` yields nothing — an
+        # empty ``<SANAD></SANAD>`` pair, an unclosed opening tag, or an orphaned
+        # ``</SANAD>`` preceding its open (6,143 rows) — the chain is NOT lost: it
+        # sits pre-segmented in the dedicated ``Sanad`` column. Recover it there.
+        # Zero-inference: this reads an already-segmented column, it does NOT run
+        # NER or any matn fallback (da#369). A row with neither a usable tag nor a
+        # usable ``Sanad`` value (the 159,558 "No SANAD" rows, #366) stays null.
         isnad_raw_ar: str | None = None
+        column_names: list[str] | None = None
         if sanad_text and sanad_text.lower() != "no sanad":
             isnad_raw_ar = sanad_text
+        else:
+            sanad_value = row.get(sanad_col) if sanad_col else None
+            column_names = _parse_sanad_column(sanad_value)
+            if column_names is not None:
+                # Store the raw column value verbatim — ``isnad_raw_ar`` is a raw,
+                # markup-bearing field (the tag path stores ``<NAR>``-laden text),
+                # so the list-literal string is the faithful raw form. Mentions are
+                # built from the parsed names below (the column has no <NAR> tags).
+                isnad_raw_ar = safe_str(sanad_value)
+                recovered_sanad_count += 1
+                # A SANAD tag present but unusable is a real upstream defect —
+                # surface it, do not silently tolerate it (da#368 acceptance).
+                if _SANAD_TAG_RE.search(full_text):
+                    logger.debug(
+                        "sanad_recovered_from_column_orphaned_markup",
+                        source_id=source_id,
+                    )
 
         hadiths.append(
             {
@@ -672,8 +795,14 @@ def _process_chunk(
             }
         )
 
-        # Extract narrator mentions from SANAD if available
-        if isnad_raw_ar:
+        # Extract narrator mentions. A column-recovered chain (da#368) is already
+        # segmented, so build mentions directly from the names; otherwise parse the
+        # ``<NAR>`` tags out of the tag-derived isnad.
+        if column_names is not None:
+            row_mentions = _mentions_from_names(column_names, source_id)
+            mentions.extend(row_mentions)
+            column_mention_count += len(row_mentions)
+        elif isnad_raw_ar:
             raw_nar_count += len(_NAR_RE.findall(isnad_raw_ar))
             try:
                 row_mentions = _extract_narrator_mentions(isnad_raw_ar, source_id)
@@ -682,7 +811,14 @@ def _process_chunk(
                 malformed_count += 1
                 logger.debug("malformed_nar_tags", source_id=source_id)
 
-    return hadiths, mentions, malformed_count, raw_nar_count
+    return (
+        hadiths,
+        mentions,
+        malformed_count,
+        raw_nar_count,
+        recovered_sanad_count,
+        column_mention_count,
+    )
 
 
 def _parse_narrators_bio(narrators_dir: Path) -> pa.Table | None:
@@ -841,6 +977,8 @@ def parse_sanadset(
     all_mentions: list[dict[str, str | int | None]] = []
     total_malformed = 0
     total_raw_nar = 0
+    total_recovered_sanad = 0
+    total_column_mentions = 0
     total_rows = 0
 
     for csv_file in csv_files:
@@ -858,14 +996,18 @@ def parse_sanadset(
 
         for chunk_start in range(0, len(rows), _CHUNK_SIZE):
             chunk = rows[chunk_start : chunk_start + _CHUNK_SIZE]
-            hadiths, mentions, malformed, raw_nar = _process_chunk(
-                chunk,
-                collection_name,
+            hadiths, mentions, malformed, raw_nar, recovered_sanad, column_mentions = (
+                _process_chunk(
+                    chunk,
+                    collection_name,
+                )
             )
             all_hadiths.extend(hadiths)
             all_mentions.extend(mentions)
             total_malformed += malformed
             total_raw_nar += raw_nar
+            total_recovered_sanad += recovered_sanad
+            total_column_mentions += column_mentions
 
             logger.info(
                 "chunk_processed",
@@ -880,9 +1022,11 @@ def parse_sanadset(
     valid_sanad_pct = (valid_sanad_count / len(all_hadiths) * 100) if all_hadiths else 0
     avg_narrators = len(all_mentions) / valid_sanad_count if valid_sanad_count > 0 else 0
     # B3 (da#221) observability: how much coarse-tag pollution the re-segmentation
-    # filter removed. total_raw_nar counts raw <NAR> tags; len(all_mentions) is the
-    # clean post-filter mention count. A positive filtered_pct is the firehose drop.
-    filtered_nar = total_raw_nar - len(all_mentions)
+    # filter removed. total_raw_nar counts raw <NAR> tags; the *tag-derived* mention
+    # count is the clean post-filter total. Column-recovered mentions (da#368) carry
+    # no <NAR> tags, so they are excluded here or the firehose drop would read low.
+    tag_mentions = len(all_mentions) - total_column_mentions
+    filtered_nar = total_raw_nar - tag_mentions
     filtered_nar_pct = (filtered_nar / total_raw_nar * 100) if total_raw_nar else 0
 
     logger.info(
@@ -896,6 +1040,11 @@ def parse_sanadset(
         filtered_nar_pct=round(filtered_nar_pct, 1),
         avg_narrators_per_chain=round(avg_narrators, 2),
         malformed_tags=total_malformed,
+        # da#368: rows whose chain was recovered from the ``Sanad`` column because
+        # the inline ``<SANAD>`` markup was empty/orphaned, and the mentions they
+        # contributed. Expected ~6,143 recovered on the full corpus.
+        recovered_sanad_from_column=total_recovered_sanad,
+        column_mentions=total_column_mentions,
     )
 
     # Write hadith Parquet

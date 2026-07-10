@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import re
 from pathlib import Path
 from unittest.mock import patch
@@ -762,3 +763,158 @@ class TestBooksCsvAbsentIdentity:
                 f"sanadset:{key_m}:2",
             ]
         )
+
+
+class TestSanadColumnRecovery:
+    """Recover the chain from the ``Sanad`` column when ``<SANAD>`` markup fails (da#368).
+
+    ``_extract_tag(_SANAD_RE, …)`` requires a well-formed ``<SANAD>…</SANAD>`` pair.
+    For 6,143 real rows the pair is empty, unclosed, or the ``</SANAD>`` is orphaned
+    (precedes its open), so the tag path yields nothing and the parser used to drop
+    the isnad — even though the chain sits pre-segmented in the dedicated ``Sanad``
+    column. This class pins the recovery on rows **copied verbatim from the real
+    ``data/raw/sanadset/sanadset.csv``** (per ``feedback_fixture_makes_guard_assertion_inert``
+    — the production filename + header + real defect, so no assertion is inert).
+
+    ``_ROW_EMPTY_TAG`` (real Num_hadith 1814) carries an orphaned ``</SANAD>`` before
+    the only ``<SANAD>`` (which sits inside its ``<MATN>``). ``_ROW_OPEN_NO_CLOSE``
+    (real Num_hadith 2947) opens ``<SANAD>`` twice and never closes it. Both keep a
+    populated list-literal ``Sanad`` column; both are dropped by the pre-fix parser
+    and recovered by the fix.
+    """
+
+    # --- rows copied verbatim from data/raw/sanadset/sanadset.csv ------------------
+    # (Hadith, Book, Num_hadith, Matn, Sanad, Sanad_Length)
+    _HEADER = ["Hadith", "Book", "Num_hadith", "Matn", "Sanad", "Sanad_Length"]
+
+    _ROW_EMPTY_TAG = [
+        "وَعَنْ <NAR> صَفِيَّةَ بِنْتِ حُيَيٍّ </NAR> </SANAD> <MATN>   ، أَنَّهَا قَالَتْ : "
+        "أَفْطَرَ الْحَاجِمُ وَالْمَحْجُومُ  . رَوَاهُ <SANAD> <NAR> مُسَدَّدٌ </NAR>  "
+        "مَوْقُوفًا . . </MATN>",
+        "إتحاف الخيرة المهرة بزوائد المسانيد العشرة",
+        "1814",
+        "  ، أَنَّهَا قَالَتْ : أَفْطَرَ الْحَاجِمُ وَالْمَحْجُومُ  . رَوَاهُ مُسَدَّدٌ  مَوْقُوفًا . .",
+        "['مُسَدَّدٌ', 'صَفِيَّةَ بِنْتِ حُيَيٍّ']",
+        "2",
+    ]
+
+    _ROW_OPEN_NO_CLOSE = [
+        "عَنْ عَنْ عَمْرِو بْنِ حَوْشَبٍ , قَالَ : أَخْبَرَنِي عَبْدُ اللَّهِ بْنُ أَبِي يَزِيدَ , "
+        '" أَنَّهُ رَأَى <SANAD> <NAR> عُمَرَ </NAR>  , وَابْنَ <SANAD> <NAR> عُمَرَ </NAR>  '
+        'يُقْعِيَانِ بَيْنَ السَّجْدَتَيْنِ "  . </MATN>',
+        "مصنف عبد الرزاق",
+        "2947",
+        'يُقْعِيَانِ بَيْنَ السَّجْدَتَيْنِ "  .',
+        "['عُمَرَ', 'وَابْنَ عُمَرَ']",
+        "2",
+    ]
+
+    # A well-formed control row: the ``<SANAD>`` tag is usable, so the tag path wins
+    # and the (deliberately different) ``Sanad`` column value is IGNORED — proving
+    # recovery is a fallback, never a replacement of the 485,285 good rows.
+    _ROW_VALID_TAG = [
+        "<SANAD> <NAR> مَالِك بْنُ أَنَسٍ </NAR> </SANAD> <MATN> متن </MATN>",
+        "صحيح البخاري",
+        "5",
+        "متن",
+        "['اسم مختلف تماما']",
+        "1",
+    ]
+
+    # A genuinely tag-less "No SANAD" row (the 159,558 class, #366): no tag AND the
+    # sentinel column value → stays null (acceptance: never invent a chain).
+    _ROW_NO_SANAD = [
+        "بعض المتن هنا فقط",
+        "صحيح مسلم",
+        "9",
+        "بعض المتن هنا فقط",
+        "No SANAD",
+        "0",
+    ]
+
+    def _write_csv(self, raw_dir: Path, rows: list[list[str]]) -> None:
+        raw_dir.mkdir(parents=True)
+        with (raw_dir / "sanadset.csv").open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(self._HEADER)
+            writer.writerows(rows)
+
+    def _parse(self, tmp_path: Path, rows: list[list[str]]) -> tuple[list[dict], list[dict]]:
+        raw_dir = tmp_path / "raw" / "sanadset"
+        staging_dir = tmp_path / "staging"
+        self._write_csv(raw_dir, rows)
+        parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
+        hadiths = pq.read_table(staging_dir / "hadiths_sanadset.parquet").to_pylist()
+        mentions_path = staging_dir / "narrator_mentions_sanadset.parquet"
+        mentions = pq.read_table(mentions_path).to_pylist() if mentions_path.exists() else []
+        return hadiths, mentions
+
+    def test_empty_tag_row_recovers_chain_from_column(self, tmp_path: Path) -> None:
+        """The empty-``<SANAD>``/orphaned-``</SANAD>`` row is no longer dropped."""
+        hadiths, _ = self._parse(tmp_path, [self._ROW_EMPTY_TAG])
+        (row,) = hadiths
+        # Pre-fix this is None (the drop). Post-fix it carries the raw column value.
+        assert row["isnad_raw_ar"] == "['مُسَدَّدٌ', 'صَفِيَّةَ بِنْتِ حُيَيٍّ']"
+
+    def test_open_no_close_row_recovers_chain_from_column(self, tmp_path: Path) -> None:
+        """The unclosed-``<SANAD>`` row is no longer dropped."""
+        hadiths, _ = self._parse(tmp_path, [self._ROW_OPEN_NO_CLOSE])
+        (row,) = hadiths
+        assert row["isnad_raw_ar"] == "['عُمَرَ', 'وَابْنَ عُمَرَ']"
+
+    def test_recovered_rows_emit_mentions_from_segmented_names(self, tmp_path: Path) -> None:
+        """Recovery also produces the narrator mentions, straight from the column."""
+        _, mentions = self._parse(tmp_path, [self._ROW_EMPTY_TAG, self._ROW_OPEN_NO_CLOSE])
+        names = sorted(m["name_ar"] for m in mentions)
+        assert names == sorted(["مُسَدَّدٌ", "صَفِيَّةَ بِنْتِ حُيَيٍّ", "عُمَرَ", "وَابْنَ عُمَرَ"])
+        # position_in_chain is gap-free per hadith; method is null (no connective).
+        assert all(m["transmission_method"] is None for m in mentions)
+        assert all(m["name_ar_normalized"] for m in mentions)
+
+    def test_instrument_count_moves_from_zero_to_full_population(self, tmp_path: Path) -> None:
+        """Verify-the-instrument (per ``feedback_silent_zero_is_not_a_measurement``).
+
+        The two recoverable rows go from ``isnad_raw_ar IS NOT NULL`` count 0 (they
+        are the exact rows the pre-fix parser dropped) to the FULL expected
+        population of 2 — not merely ">0". The mirror ``No SANAD`` row stays null,
+        so the count separates the two classes rather than blanket-filling.
+        """
+        hadiths, _ = self._parse(
+            tmp_path,
+            [self._ROW_EMPTY_TAG, self._ROW_OPEN_NO_CLOSE, self._ROW_NO_SANAD],
+        )
+        not_null = [h for h in hadiths if h["isnad_raw_ar"] is not None]
+        # Both recoverable rows recovered; the genuinely chain-less row stays null.
+        assert len(not_null) == 2
+        by_num = {h["hadith_number"]: h["isnad_raw_ar"] for h in hadiths}
+        assert by_num[1814] is not None
+        assert by_num[2947] is not None
+        assert by_num[9] is None
+
+    def test_valid_tag_row_ignores_the_column(self, tmp_path: Path) -> None:
+        """A usable ``<SANAD>`` tag wins; the ``Sanad`` column is not consulted.
+
+        Guards the 485,285 good rows: recovery must be a strict fallback, never
+        override the tag-derived, ``<NAR>``-bearing isnad the chain extractor needs.
+        """
+        hadiths, mentions = self._parse(tmp_path, [self._ROW_VALID_TAG])
+        (row,) = hadiths
+        # isnad_raw_ar is the tag content (carries <NAR>), NOT the column list.
+        assert "<NAR>" in str(row["isnad_raw_ar"])
+        assert "اسم مختلف تماما" not in str(row["isnad_raw_ar"])
+        # The mention comes from the <NAR> tag, not the ignored column value.
+        assert [m["name_ar"] for m in mentions] == ["مَالِك بْنُ أَنَسٍ"]
+
+    def test_parse_sanad_column_rejects_non_list_and_sentinel(self) -> None:
+        """Zero-inference guard: only a real list literal recovers; else ``None``."""
+        from src.parse.sanadset import _parse_sanad_column
+
+        assert _parse_sanad_column("['مالك', 'أنس']") == ["مالك", "أنس"]
+        # Sentinel, blank, free text, and non-list literals never invent a chain.
+        assert _parse_sanad_column("No SANAD") is None
+        assert _parse_sanad_column("no sanad") is None
+        assert _parse_sanad_column("") is None
+        assert _parse_sanad_column(None) is None
+        assert _parse_sanad_column("حدثنا فلان عن فلان") is None  # free text, not a list
+        assert _parse_sanad_column("[]") is None  # empty list → nothing to recover
+        assert _parse_sanad_column("'just a string'") is None  # literal, but not a list
