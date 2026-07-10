@@ -45,6 +45,7 @@ code    name                   what is on disk when it fires
 ``7``   ``ENRICH_FAILED``      the graph and the manifest; enrich failed
 ``8``   ``DB_UNREACHABLE``     nothing written by the command that raised it
 ``9``   ``UNROUTED_CORPUS``    nothing resolve would have written (NER Step-1 abort)
+``10``  ``PARSE_PRODUCER_DEFECT`` the clean sources' staging; the defective source's is absent
 ======  =====================  ===================================================
 
 ``4`` is not a "nothing ran" code. ``MissingDependencyError`` is raised at
@@ -157,6 +158,7 @@ __all__ = [
     "EXIT_ENRICH_FAILED",
     "EXIT_LOAD_FAILED",
     "EXIT_MISSING_DEPENDENCY",
+    "EXIT_PARSE_PRODUCER_DEFECT",
     "EXIT_REFUSED_ROWS",
     "EXIT_STOPPED_AT_LIMIT",
     "EXIT_UNROUTED_CORPUS",
@@ -281,6 +283,25 @@ class ExitCode(enum.IntEnum):
     dedup's Step-4 entry) -- this is an unroutable *input* at NER's Step-1 entry.
     """
 
+    PARSE_PRODUCER_DEFECT = 10
+    """``parse`` aborted: an adapter hit the da#355 producer gate (da#386).
+
+    ``generate_source_id`` asserts the id grammar and raises
+    :exc:`~src.parse.identity.DoubledCorpusPrefixError` when ``collection ==
+    corpus``. ``src.parse.run_all`` used to catch that in its broad ``except
+    Exception`` (it subclasses :exc:`ValueError`), log ``parse_failed`` and
+    ``return`` -- so ``parse`` exited ``0`` with the **stale** staging parquet in
+    place, and da#359's ``_cmd_load`` remediation ("re-run ``parse``") silently
+    changed nothing.
+
+    What is on disk when it fires: the offending source's partial writes from this
+    run are purged and its stale output was NOT regenerated; every OTHER source
+    that parsed cleanly has its staging parquet written. Raised from ``_cmd_parse``
+    (and so halts ``pipeline`` before ``resolve``/``load`` reads an incomplete
+    staging set). A data-defect assertion is not a transient parse failure, so it
+    fails the whole invocation rather than being logged and skipped.
+    """
+
 
 # Module-level aliases. Consumers may import either the enum or these names; the
 # alias form keeps a migrating call site to an *import-site* change rather than a
@@ -294,3 +315,4 @@ EXIT_MISSING_DEPENDENCY = ExitCode.MISSING_DEPENDENCY
 EXIT_VALIDATION_FINDINGS = ExitCode.VALIDATION_FINDINGS
 EXIT_REFUSED_ROWS = ExitCode.REFUSED_ROWS
 EXIT_UNROUTED_CORPUS = ExitCode.UNROUTED_CORPUS
+EXIT_PARSE_PRODUCER_DEFECT = ExitCode.PARSE_PRODUCER_DEFECT
