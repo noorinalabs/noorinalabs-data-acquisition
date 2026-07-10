@@ -99,6 +99,48 @@ def _registry_member_names() -> frozenset[str]:
     return members
 
 
+def _exported_exit_aliases() -> frozenset[str]:
+    """Names the registry EXPORTS that resolve to a member. Derived twice over.
+
+    `_is_exit_name` matches any `EXIT_`-prefixed identifier, which is right for the
+    sole-declarer scan (a rival *declaration* is an offence whatever it is called)
+    and **wrong for the exit allowlist**. Ivana Horvat::
+
+        _is_exit_name("EXIT_MADE_UP")  -> True
+
+        def _die(EXIT_CODE: int):
+            sys.exit(EXIT_CODE)        # PERMITTED. A parameter is not a Store
+                                       # binding, so the sole-declarer scan never
+                                       # sees it either.
+        def _die(code: int):
+            sys.exit(code)             # REDS.
+
+    **Naming the parameter well is what made it invisible. A guard defeated by
+    good naming will be defeated.**
+
+    Her fix is `arg.id in registry.__all__`, which also makes `__all__`
+    load-bearing: a stale `__all__` narrows what the guard permits, so the
+    tidiness item becomes the mechanism.
+
+    One refinement. `__all__` also carries `ExitCode` and `RESERVED_BY_RUNTIME`,
+    so a bare membership test would permit `sys.exit(ExitCode)` and
+    `sys.exit(RESERVED_BY_RUNTIME)` -- neither an exit code. Resolving each name
+    to its value and requiring it to BE a member closes that, and is derived from
+    the registry twice: once through `__all__`, once through the value.
+    """
+    registry = sys.modules[ExitCode.__module__]
+    exported = getattr(registry, "__all__", ())
+    aliases = frozenset(
+        name for name in exported if isinstance(getattr(registry, name, None), ExitCode)
+    )
+    # INSTRUMENT GUARD: an empty derivation would make the Name branch refuse
+    # every live call site, which reads as "the guard is strict" rather than
+    # "the guard is broken". A derivation that yields nothing is not a
+    # derivation that found nothing wrong.
+    assert aliases, "no exported exit aliases resolved to a member; the allowlist is blind"
+    return aliases
+
+
 def _is_exit_name(name: str) -> bool:
     """Names that constitute an exit-code declaration.
 
@@ -470,7 +512,9 @@ def _exit_arg_is_named(
             return True  # `sys.exit(None)` exits 0
         return arg.value == 0 and not isinstance(arg.value, bool)
     if isinstance(arg, ast.Name):
-        return _is_exit_name(arg.id)
+        # NOT `_is_exit_name`: that permits any EXIT_-prefixed identifier,
+        # including a well-named function parameter. See `_exported_exit_aliases`.
+        return arg.id in _exported_exit_aliases()
     if isinstance(arg, ast.Attribute):
         return (
             isinstance(arg.value, ast.Name)
@@ -550,6 +594,13 @@ class TestNoUnnamedExit:
         "def f():\n    return 0\ndef g():\n    return f()\nsys.exit(g())",
         "sys.exit(other.main())",  # not module-local; cannot follow
         "sys.exit(ExitCode.NOPE)",  # a typo'd member -- resolved through __members__
+        # A well-named PARAMETER. `_is_exit_name` permitted this; a parameter is
+        # not a Store binding, so the sole-declarer scan cannot see it either.
+        "def _die(EXIT_CODE: int):\n    sys.exit(EXIT_CODE)",
+        "def _die(EXIT_MADE_UP: int):\n    sys.exit(EXIT_MADE_UP)",
+        # In `__all__`, but not exit codes. A bare membership test would permit these.
+        "sys.exit(ExitCode)",
+        "sys.exit(RESERVED_BY_RUNTIME)",
         # Self- and mutual recursion terminate: the hop carries `funcs=None`, so the
         # inner Call can never be followed. Fail-closed, and no RecursionError.
         "def f():\n    return f()\nsys.exit(f())",
