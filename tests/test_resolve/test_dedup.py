@@ -12,6 +12,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from src.models.enums import VariantType
+from src.resolve._provenance import DetectorStatus, read_provenance
 from src.resolve.dedup import (
     _classify_pair,
     _is_cross_sect,
@@ -143,11 +144,18 @@ class TestLoadHadithTexts:
 # ---------------------------------------------------------------------------
 class TestWriteEmptyOutput:
     def test_creates_empty_parquet(self, tmp_path: Path) -> None:
-        path = _write_empty_output(tmp_path)
+        path = _write_empty_output(tmp_path, DetectorStatus.NO_TEXTS)
         assert path.exists()
         table = pq.read_table(path)
         assert table.num_rows == 0
+        # ``equals`` ignores metadata by default, so the column schema is unchanged.
         assert table.schema.equals(PARALLEL_LINKS_SCHEMA)
+        # da#378: the empty artifact records WHY it is empty, so it is no longer
+        # byte-identical to a RAN zero-row true negative.
+        prov = read_provenance(path)
+        assert prov is not None
+        assert prov.semantic is DetectorStatus.NO_TEXTS
+        assert prov.semantic_rows == 0
 
 
 # ---------------------------------------------------------------------------

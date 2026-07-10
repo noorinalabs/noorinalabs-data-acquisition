@@ -130,9 +130,12 @@ def _cmd_resolve(
     from src.config import get_settings
     from src.resolve import (
         EXIT_MISSING_DEPENDENCY,
+        EXIT_STAGE_FAILED,
         EXIT_STOPPED_AT_LIMIT,
         EXIT_UNROUTED_CORPUS,
         MissingDependencyError,
+        ResolveStageError,
+        StageRan,
         StopAfterReached,
         UnroutedCorpusError,
     )
@@ -169,10 +172,24 @@ def _cmd_resolve(
     except UnroutedCorpusError as unrouted:
         # A staged corpus has no NER extraction route. Halt loudly rather than
         # silently drop it (or, pre-da#369, matn-mine it via the full_text
-        # fallback that this guard replaces).
+        # fallback that this guard replaces). UnroutedCorpusError subclasses
+        # BaseException, so run_all's per-stage `except Exception` (da#360) does
+        # not swallow it — it propagates here just like MissingDependencyError.
         print(f"\nERROR: {unrouted}", file=sys.stderr)
         sys.exit(EXIT_UNROUTED_CORPUS)
-    total = sum(len(v) for v in results.values())
+    except ResolveStageError as stage_error:
+        # One or more stages raised. run_all swept the rest best-effort but refuses
+        # to report success — the whole point of da#360: a run that skipped a stage
+        # can no longer exit 0. Surface every failed stage and exit non-zero.
+        print(
+            f"\nERROR: {len(stage_error.errored)} resolve stage(s) failed:",
+            file=sys.stderr,
+        )
+        for e in stage_error.errored:
+            print(f"  - {e.step} ({e.exc_type})", file=sys.stderr)
+        sys.exit(EXIT_STAGE_FAILED)
+    # Every value is a StageOutcome; count files only from stages that RAN.
+    total = sum(len(v.files) for v in results.values() if isinstance(v, StageRan))
     print(f"\nResolution complete. {total} output files.")
 
 

@@ -65,6 +65,11 @@ from src.resolve._checkpoint import (
     resolve_cadence,
     save_checkpoint,
 )
+from src.resolve._provenance import (
+    DetectorProvenance,
+    DetectorStatus,
+    write_parallel_links,
+)
 from src.resolve.schemas import PARALLEL_LINKS_SCHEMA
 from src.utils.arabic import is_arabic, normalize_arabic
 from src.utils.logging import get_logger
@@ -172,9 +177,19 @@ def _write_links(staging_dir: Path, records: Iterable[dict[str, object]]) -> Pat
         },
         schema=PARALLEL_LINKS_SCHEMA,
     )
-    output_path = staging_dir / "parallel_links.parquet"
-    pq.write_table(table, output_path)
-    return output_path
+    # da#378: the deterministic detector RAN; ``semantic`` is NOT_RUN in
+    # parallels' own artifact (dedup writes its side separately, and run_all's
+    # compose stamps the combined provenance onto the final composed artifact).
+    return write_parallel_links(
+        table,
+        staging_dir / "parallel_links.parquet",
+        DetectorProvenance(
+            semantic=DetectorStatus.NOT_RUN,
+            semantic_rows=0,
+            deterministic=DetectorStatus.RAN,
+            deterministic_rows=table.num_rows,
+        ),
+    )
 
 
 def _build_postings(

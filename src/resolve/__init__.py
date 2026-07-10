@@ -26,8 +26,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from src.exit_codes import EXIT_STAGE_FAILED
 from src.resolve._checkpoint import EXIT_STOPPED_AT_LIMIT, StopAfterReached
 from src.resolve._deps import EXIT_MISSING_DEPENDENCY, MissingDependencyError
+from src.resolve._provenance import DetectorProvenance, DetectorStatus, read_provenance
 from src.resolve.ner import EXIT_UNROUTED_CORPUS, UnroutedCorpusError
 from src.utils.logging import get_logger
 
@@ -38,16 +40,92 @@ logger = get_logger(__name__)
 
 __all__ = [
     "EXIT_MISSING_DEPENDENCY",
+    "EXIT_STAGE_FAILED",
     "EXIT_STOPPED_AT_LIMIT",
     "EXIT_UNROUTED_CORPUS",
     "RESOLVE_STEP_ORDER",
     "RESUMABLE_STEPS",
     "MissingDependencyError",
     "ResolveMetrics",
+    "ResolveStageError",
+    "StageErrored",
+    "StageOutcome",
+    "StageRan",
+    "StageSkipped",
     "StopAfterReached",
     "UnroutedCorpusError",
     "run_all",
 ]
+
+
+@dataclass(frozen=True)
+class StageRan:
+    """A stage executed and produced ``files`` (possibly an empty list).
+
+    An empty ``files`` here is an honest "ran, produced no output file" — it is
+    NOT the ``[]`` that pre-da#360 ``run_all`` also left behind for a stage that
+    RAISED. Those two were indistinguishable in the old ``dict[str, list[Path]]``;
+    a raised stage now yields :class:`StageErrored`, never a bare empty list.
+    """
+
+    step: str
+    files: list[Path]
+
+
+@dataclass(frozen=True)
+class StageSkipped:
+    """A stage was not run this invocation, by design.
+
+    ``reason`` is ``"precomputed"`` (skipped by ``--from-step`` past it, outputs
+    assumed on disk) or ``"dependency_unmet"`` (e.g. ``disambiguate`` when NER
+    produced no mentions). A skip is a success, not a failure.
+    """
+
+    step: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class StageErrored:
+    """A stage raised. Its output is absent or partial.
+
+    Recording this — rather than swallowing the exception and leaving an empty
+    file list that reads as success — is the da#360 fix: any ``StageErrored`` in
+    the outcome makes ``run_all`` raise :class:`ResolveStageError` at the end, so
+    the process can never exit 0 having skipped a stage.
+    """
+
+    step: str
+    exc_type: str
+    traceback_str: str
+
+
+# The discriminated stage-result union. Every step of a ``run_all`` maps to
+# exactly one of these — there is no fourth "empty list that might mean either"
+# state, which is the representation defect da#360 closes.
+StageOutcome = StageRan | StageSkipped | StageErrored
+
+
+class ResolveStageError(Exception):
+    """One or more resolve stages raised; ``run_all`` refuses to report success.
+
+    Raised at the END of ``run_all`` (after the best-effort, dependency-aware
+    continue-past-failure sweep) when any stage produced a :class:`StageErrored`.
+    The CLI maps it to :data:`~src.exit_codes.EXIT_STAGE_FAILED`, so a run that
+    silently skipped a stage can no longer exit 0 (da#360). It aggregates *every*
+    failed stage, not just the first, so one 7.5-hour run surfaces them all.
+    """
+
+    def __init__(self, errored: list[StageErrored]) -> None:
+        self.errored = errored
+        steps = ", ".join(e.step for e in errored)
+        super().__init__(f"resolve stage(s) failed: {steps}")
+
+
+def _outcome_files(outcome: StageOutcome | None) -> list[Path]:
+    """Files a stage produced, or ``[]`` for a skipped/errored/absent stage."""
+    return outcome.files if isinstance(outcome, StageRan) else []
+
 
 # Canonical execution order of the resolve steps. ``run_all(from_step=...)`` skips
 # every step BEFORE the named one (their outputs must already exist on disk) and
@@ -189,6 +267,7 @@ def _compose_parallel_links(
     staging_dir: Path,
     semantic: pa.Table | None,
     deterministic: pa.Table | None,
+    provenance: DetectorProvenance,
 ) -> Path | None:
     """Union the two PARALLEL_OF detectors' links into the shared artifact.
 
@@ -201,6 +280,11 @@ def _compose_parallel_links(
     a no-model environment — where ``dedup`` degrades to an empty table — still
     emits the deterministic cross-sect edges (da#117).
 
+    ``provenance`` (da#378) is stamped into the composed artifact's parquet
+    metadata so a zero-row result records WHICH detectors produced it and in what
+    state — a ``DEDUP_REQUIRE_ML=false`` degraded composition is no longer
+    byte-identical to a true negative.
+
     Returns the written path, or ``None`` when neither detector produced a table
     (the shared artifact is then left untouched).
     """
@@ -208,8 +292,8 @@ def _compose_parallel_links(
         return None
 
     import pyarrow as pa
-    import pyarrow.parquet as pq
 
+    from src.resolve._provenance import write_parallel_links
     from src.resolve.schemas import PARALLEL_LINKS_SCHEMA
 
     # Insert deterministic first, then semantic, so a semantic row overwrites a
@@ -232,13 +316,14 @@ def _compose_parallel_links(
         },
         schema=PARALLEL_LINKS_SCHEMA,
     )
-    output_path = staging_dir / "parallel_links.parquet"
-    pq.write_table(composed, output_path)
+    output_path = write_parallel_links(composed, staging_dir / "parallel_links.parquet", provenance)
     logger.info(
         "parallel_links_composed",
         semantic=0 if semantic is None else semantic.num_rows,
         deterministic=0 if deterministic is None else deterministic.num_rows,
         composed=composed.num_rows,
+        semantic_status=provenance.semantic.value,
+        deterministic_status=provenance.deterministic.value,
         path=str(output_path),
     )
     return output_path
@@ -290,8 +375,15 @@ def run_all(
     from_step: str | None = None,
     resume: bool = True,
     stop_after: int | None = None,
-) -> dict[str, list[Path]]:
+) -> dict[str, StageOutcome]:
     """Run full entity resolution pipeline.
+
+    Returns a discriminated ``{step: StageOutcome}`` map (da#360): each step is a
+    :class:`StageRan`, :class:`StageSkipped` or :class:`StageErrored`, so a stage
+    that produced no file (``StageRan`` with an empty ``files``) is no longer
+    indistinguishable from a stage that raised. If ANY stage raised, this does not
+    return a map at all — it raises :class:`ResolveStageError` after the sweep, so
+    the process can never exit 0 having silently skipped a stage.
 
     Order: ``NER -> disambiguate -> bio_promote -> (dedup + detect_parallels)``.
 
@@ -354,18 +446,15 @@ def run_all(
         tabaqa_dates,
     )
 
-    results: dict[str, list[Path]] = {
-        "ner": [],
-        "disambiguate": [],
-        "bio_promote": [],
-        "cluster": [],
-        "narrator_split": [],
-        "reconcile": [],
-        "tabaqa_dates": [],
-        "muhaddithat_links": [],
-        "dedup": [],
-        "parallels": [],
-    }
+    # Discriminated per-stage outcomes (da#360). Every step maps to exactly one
+    # StageRan/StageSkipped/StageErrored — there is no "empty list that might mean
+    # either ran-empty or raised" state, which is the conflation that let a run
+    # exit 0 having skipped a stage. ``_stage_files`` mirrors StageRan.files into
+    # the metrics/compose bookkeeping below.
+    outcomes: dict[str, StageOutcome] = {}
+
+    def _stage_files(step: str) -> list[Path]:
+        return _outcome_files(outcomes.get(step))
 
     # Pre-flight check: verify staging has Parquet files.
     if not staging_dir.exists() or not _has_staging_parquets(staging_dir):
@@ -375,7 +464,7 @@ def run_all(
             msg="No Parquet files found in staging directory",
         )
         logger.warning("resolution_skipped", reason="no staging Parquet files found")
-        return results
+        return {s: StageSkipped(s, "preflight_no_staging") for s in RESOLVE_STEP_ORDER}
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -384,16 +473,19 @@ def run_all(
     if _do("ner"):
         try:
             logger.info("resolve_step", step="ner", status="running")
-            results["ner"] = ner.run(staging_dir, output_dir)
+            ner_files = ner.run(staging_dir, output_dir)
+            outcomes["ner"] = StageRan("ner", ner_files)
             ner_ok = True
-            logger.info("resolve_step", step="ner", status="complete", files=len(results["ner"]))
-        except Exception:  # noqa: BLE001
+            logger.info("resolve_step", step="ner", status="complete", files=len(ner_files))
+        except Exception as exc:  # noqa: BLE001
+            outcomes["ner"] = StageErrored("ner", type(exc).__name__, traceback.format_exc())
             logger.error("resolve_step_failed", step="ner", traceback=traceback.format_exc())
     else:
         # Precomputed by an earlier run (--from-step past ner): its mention output
         # must already exist for disambiguate to consume + resume against.
         mentions_present = (output_dir / "narrator_mentions_resolved.parquet").exists()
         ner_ok = mentions_present
+        outcomes["ner"] = StageSkipped("ner", "precomputed")
         logger.info(
             "resolve_step_skipped_precomputed",
             step="ner",
@@ -404,24 +496,30 @@ def run_all(
     if _do("disambiguate") and ner_ok:
         try:
             logger.info("resolve_step", step="disambiguate", status="running")
-            results["disambiguate"] = disambiguate.run(
+            disambiguate_files = disambiguate.run(
                 staging_dir, output_dir, resume=resume, stop_after=stop_after
             )
+            outcomes["disambiguate"] = StageRan("disambiguate", disambiguate_files)
             logger.info(
                 "resolve_step",
                 step="disambiguate",
                 status="complete",
-                files=len(results["disambiguate"]),
+                files=len(disambiguate_files),
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            outcomes["disambiguate"] = StageErrored(
+                "disambiguate", type(exc).__name__, traceback.format_exc()
+            )
             logger.error(
                 "resolve_step_failed",
                 step="disambiguate",
                 traceback=traceback.format_exc(),
             )
     elif not _do("disambiguate"):
+        outcomes["disambiguate"] = StageSkipped("disambiguate", "precomputed")
         logger.info("resolve_step_skipped_precomputed", step="disambiguate")
     else:
+        outcomes["disambiguate"] = StageSkipped("disambiguate", "dependency_unmet")
         logger.warning(
             "resolve_step_skipped",
             step="disambiguate",
@@ -437,18 +535,23 @@ def run_all(
         try:
             logger.info("resolve_step", step="bio_promote", status="running")
             promoted = bio_promote.promote_bios_to_canonical(staging_dir, output_dir)
-            results["bio_promote"] = [promoted] if promoted is not None else []
+            bio_files = [promoted] if promoted is not None else []
+            outcomes["bio_promote"] = StageRan("bio_promote", bio_files)
             logger.info(
                 "resolve_step",
                 step="bio_promote",
                 status="complete",
-                files=len(results["bio_promote"]),
+                files=len(bio_files),
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            outcomes["bio_promote"] = StageErrored(
+                "bio_promote", type(exc).__name__, traceback.format_exc()
+            )
             logger.error(
                 "resolve_step_failed", step="bio_promote", traceback=traceback.format_exc()
             )
     else:
+        outcomes["bio_promote"] = StageSkipped("bio_promote", "precomputed")
         logger.info("resolve_step_skipped_precomputed", step="bio_promote")
 
     # Step 3.5: Fuzzy cross-source clustering (da#118) — recall increment on the
@@ -469,7 +572,8 @@ def run_all(
                 resume=resume,
                 stop_after=stop_after,
             )
-            results["cluster"] = [canonical_path] if cluster_metrics.merged_records else []
+            cluster_files = [canonical_path] if cluster_metrics.merged_records else []
+            outcomes["cluster"] = StageRan("cluster", cluster_files)
             logger.info(
                 "resolve_step",
                 step="cluster",
@@ -477,9 +581,13 @@ def run_all(
                 merged=cluster_metrics.merged_records,
                 clusters=cluster_metrics.multi_member_clusters,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            outcomes["cluster"] = StageErrored(
+                "cluster", type(exc).__name__, traceback.format_exc()
+            )
             logger.error("resolve_step_failed", step="cluster", traceback=traceback.format_exc())
     else:
+        outcomes["cluster"] = StageSkipped("cluster", "precomputed")
         logger.info("resolve_step_skipped_precomputed", step="cluster")
 
     # Step 3.55: Same-name split (da#337) — the *split* mirror of fuzzy_cluster's
@@ -497,18 +605,23 @@ def run_all(
         try:
             logger.info("resolve_step", step="narrator_split", status="running")
             split_path = narrator_split.split_generic_narrators(output_dir, staging_dir=staging_dir)
-            results["narrator_split"] = [split_path] if split_path is not None else []
+            split_files = [split_path] if split_path is not None else []
+            outcomes["narrator_split"] = StageRan("narrator_split", split_files)
             logger.info(
                 "resolve_step",
                 step="narrator_split",
                 status="complete",
-                files=len(results["narrator_split"]),
+                files=len(split_files),
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            outcomes["narrator_split"] = StageErrored(
+                "narrator_split", type(exc).__name__, traceback.format_exc()
+            )
             logger.error(
                 "resolve_step_failed", step="narrator_split", traceback=traceback.format_exc()
             )
     else:
+        outcomes["narrator_split"] = StageSkipped("narrator_split", "precomputed")
         logger.info("resolve_step_skipped_precomputed", step="narrator_split")
 
     # Step 3.6: Multi-source date reconciliation (da#165). After bio_promote and
@@ -521,18 +634,23 @@ def run_all(
         try:
             logger.info("resolve_step", step="reconcile_dates", status="running")
             reconciled = date_reconcile.reconcile_canonical_dates(staging_dir, output_dir)
-            results["reconcile"] = [reconciled] if reconciled is not None else []
+            reconcile_files = [reconciled] if reconciled is not None else []
+            outcomes["reconcile"] = StageRan("reconcile", reconcile_files)
             logger.info(
                 "resolve_step",
                 step="reconcile_dates",
                 status="complete",
-                files=len(results["reconcile"]),
+                files=len(reconcile_files),
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            outcomes["reconcile"] = StageErrored(
+                "reconcile", type(exc).__name__, traceback.format_exc()
+            )
             logger.error(
                 "resolve_step_failed", step="reconcile_dates", traceback=traceback.format_exc()
             )
     else:
+        outcomes["reconcile"] = StageSkipped("reconcile", "precomputed")
         logger.info("resolve_step_skipped_precomputed", step="reconcile")
 
     # Step 3.65: ṭabaqa → estimated-window fallback (da#166). The LAST date stage:
@@ -546,18 +664,23 @@ def run_all(
         try:
             logger.info("resolve_step", step="tabaqa_dates", status="running")
             estimated = tabaqa_dates.apply_tabaqa_fallback(output_dir)
-            results["tabaqa_dates"] = [estimated] if estimated is not None else []
+            tabaqa_files = [estimated] if estimated is not None else []
+            outcomes["tabaqa_dates"] = StageRan("tabaqa_dates", tabaqa_files)
             logger.info(
                 "resolve_step",
                 step="tabaqa_dates",
                 status="complete",
-                files=len(results["tabaqa_dates"]),
+                files=len(tabaqa_files),
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            outcomes["tabaqa_dates"] = StageErrored(
+                "tabaqa_dates", type(exc).__name__, traceback.format_exc()
+            )
             logger.error(
                 "resolve_step_failed", step="tabaqa_dates", traceback=traceback.format_exc()
             )
     else:
+        outcomes["tabaqa_dates"] = StageSkipped("tabaqa_dates", "precomputed")
         logger.info("resolve_step_skipped_precomputed", step="tabaqa_dates")
 
     # Step 3.7: Curated muhaddithat orphan mention-links (da#228 / ADR-004 item #3).
@@ -576,78 +699,112 @@ def run_all(
                 output_dir,
                 canonical_path=canonical_path if canonical_path.exists() else None,
             )
-            results["muhaddithat_links"] = [link_path] if link_path is not None else []
+            link_files = [link_path] if link_path is not None else []
+            outcomes["muhaddithat_links"] = StageRan("muhaddithat_links", link_files)
             logger.info(
                 "resolve_step",
                 step="muhaddithat_links",
                 status="complete",
-                files=len(results["muhaddithat_links"]),
+                files=len(link_files),
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            outcomes["muhaddithat_links"] = StageErrored(
+                "muhaddithat_links", type(exc).__name__, traceback.format_exc()
+            )
             logger.error(
                 "resolve_step_failed", step="muhaddithat_links", traceback=traceback.format_exc()
             )
     else:
+        outcomes["muhaddithat_links"] = StageSkipped("muhaddithat_links", "precomputed")
         logger.info("resolve_step_skipped_precomputed", step="muhaddithat_links")
 
     # Step 4: Dedup (semantic; degrades to an empty table without the embedding
     # model). Runs independently of NER/disambiguation. Capture its output before
     # detect_parallels overwrites the shared artifact, so the two can be composed.
+    # ``semantic_status`` (da#378) records WHY the semantic side is what it is —
+    # read back from the provenance dedup stamped on its own artifact — so the
+    # composed artifact can distinguish a degraded run from a true negative.
     semantic_links: pa.Table | None = None
+    semantic_status = DetectorStatus.NOT_RUN
     if _do("dedup"):
         try:
             logger.info("resolve_step", step="dedup", status="running")
-            results["dedup"] = dedup.run(
-                staging_dir, output_dir, resume=resume, stop_after=stop_after
-            )
+            dedup_files = dedup.run(staging_dir, output_dir, resume=resume, stop_after=stop_after)
+            outcomes["dedup"] = StageRan("dedup", dedup_files)
             semantic_links = _read_parallel_links(staging_dir)
-            logger.info(
-                "resolve_step", step="dedup", status="complete", files=len(results["dedup"])
-            )
-        except Exception:  # noqa: BLE001
+            dedup_prov = read_provenance(staging_dir / "parallel_links.parquet")
+            semantic_status = dedup_prov.semantic if dedup_prov else DetectorStatus.RAN
+            logger.info("resolve_step", step="dedup", status="complete", files=len(dedup_files))
+        except Exception as exc:  # noqa: BLE001
+            outcomes["dedup"] = StageErrored("dedup", type(exc).__name__, traceback.format_exc())
+            semantic_status = DetectorStatus.ERRORED
             logger.error("resolve_step_failed", step="dedup", traceback=traceback.format_exc())
     else:
+        outcomes["dedup"] = StageSkipped("dedup", "precomputed")
         logger.info("resolve_step_skipped_precomputed", step="dedup")
         # dedup skipped but parallels will re-run and overwrite the shared artifact;
         # preserve the already-composed links (which include the semantic side) so
-        # the recompose below doesn't drop them.
+        # the recompose below doesn't drop them, and carry the prior run's semantic
+        # provenance forward so the recomposed artifact stays honest (da#378).
         if _do("parallels"):
             semantic_links = _read_parallel_links(staging_dir)
+            prior_prov = read_provenance(staging_dir / "parallel_links.parquet")
+            semantic_status = prior_prov.semantic if prior_prov else DetectorStatus.NOT_RUN
 
     # Step 5: Deterministic lexical parallels (offline/CI complement + no-model
     # fallback). Overwrites parallel_links.parquet — capture its output too.
     deterministic_links: pa.Table | None = None
+    deterministic_status = DetectorStatus.NOT_RUN
     if _do("parallels"):
         try:
             logger.info("resolve_step", step="parallels", status="running")
-            results["parallels"] = parallels.run(
+            parallels_files = parallels.run(
                 staging_dir, output_dir, resume=resume, stop_after=stop_after
             )
+            outcomes["parallels"] = StageRan("parallels", parallels_files)
             deterministic_links = _read_parallel_links(staging_dir)
+            deterministic_status = DetectorStatus.RAN
             logger.info(
-                "resolve_step", step="parallels", status="complete", files=len(results["parallels"])
+                "resolve_step", step="parallels", status="complete", files=len(parallels_files)
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            outcomes["parallels"] = StageErrored(
+                "parallels", type(exc).__name__, traceback.format_exc()
+            )
+            deterministic_status = DetectorStatus.ERRORED
             logger.error("resolve_step_failed", step="parallels", traceback=traceback.format_exc())
     else:
+        outcomes["parallels"] = StageSkipped("parallels", "precomputed")
         logger.info("resolve_step_skipped_precomputed", step="parallels")
 
     # Step 6: Compose both detectors' links into the single shared artifact so a
     # no-model run still emits the deterministic cross-sect edges (da#117). Only
     # recompose when at least one detector re-ran this invocation; otherwise the
-    # existing composed artifact from the prior run is left untouched.
+    # existing composed artifact from the prior run is left untouched. The composed
+    # artifact carries the combined detector provenance (da#378) so a zero-row
+    # result records which detectors produced it and in what state.
     if _do("dedup") or _do("parallels"):
-        composed = _compose_parallel_links(staging_dir, semantic_links, deterministic_links)
+        provenance = DetectorProvenance(
+            semantic=semantic_status,
+            semantic_rows=semantic_links.num_rows if semantic_links is not None else 0,
+            deterministic=deterministic_status,
+            deterministic_rows=deterministic_links.num_rows
+            if deterministic_links is not None
+            else 0,
+        )
+        composed = _compose_parallel_links(
+            staging_dir, semantic_links, deterministic_links, provenance
+        )
         if composed is not None:
-            results["parallels"] = [composed]
+            outcomes["parallels"] = StageRan("parallels", [composed])
 
     # Collect metrics from output files.
     metrics = ResolveMetrics(
-        ner_files=results["ner"],
-        disambiguate_files=results["disambiguate"],
-        bio_promote_files=results["bio_promote"],
-        dedup_files=results["dedup"],
-        parallels_files=results["parallels"],
+        ner_files=_stage_files("ner"),
+        disambiguate_files=_stage_files("disambiguate"),
+        bio_promote_files=_stage_files("bio_promote"),
+        dedup_files=_stage_files("dedup"),
+        parallels_files=_stage_files("parallels"),
     )
     _collect_ner_metrics(metrics, output_dir)
     _collect_disambig_metrics(metrics, output_dir)
@@ -670,4 +827,15 @@ def run_all(
 
     logger.info("resolve_metrics_summary", summary=metrics.summary())
 
-    return results
+    # da#360: a stage that raised must never let the process report success. The
+    # sweep above is best-effort and dependency-aware (a failed NER still lets
+    # bio_promote run), so failures are collected rather than fail-fast — but any
+    # StageErrored now forces a non-zero exit via the CLI's ResolveStageError
+    # handler, aggregating every failed stage from this one (possibly 7.5-hour) run.
+    errored = [o for o in outcomes.values() if isinstance(o, StageErrored)]
+    if errored:
+        for e in errored:
+            logger.error("resolve_stage_errored", step=e.step, exc_type=e.exc_type)
+        raise ResolveStageError(errored)
+
+    return outcomes
