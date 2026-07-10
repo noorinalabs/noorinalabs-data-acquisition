@@ -9,14 +9,18 @@ These lock the two historical identity hazards out:
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from src.models.enums import SourceCorpus
 from src.parse.base import generate_source_id
 from src.parse.identity import (
+    CANONICAL_NAMESPACE,
     SOURCE_CORPORA,
     DoubledCorpusPrefixError,
     bare_source_id,
+    canonical_key,
     chain_node_id,
     collection_node_id,
     grading_node_id,
@@ -27,7 +31,8 @@ from src.parse.identity import (
     narrator_node_id,
     validate_source_id,
 )
-from src.utils.arabic import normalize_arabic
+from src.parse.name_quality import clean_narrator_name
+from src.utils.arabic import canonical_surface, normalize_arabic
 
 
 class TestSourceCorpora:
@@ -315,3 +320,141 @@ class TestMakeDiscriminatedCanonicalId:
         # the honest behavior here: the empty-disc path is byte-identical to
         # make_canonical_id, unconditionally (the backward-compat contract).
         assert make_discriminated_canonical_id("a\x1fb", "") == make_canonical_id("a\x1fb")
+
+
+def _pre_da371_id(name: str) -> str:
+    """The id ``make_canonical_id`` produced BEFORE da#371 — ``canonical_surface`` only,
+    no ``clean_narrator_name`` trim. Used as the frozen baseline for the negative
+    control: an already-cleaned name must map to the SAME id under the new authority.
+    """
+    return narrator_node_id(str(uuid.uuid5(CANONICAL_NAMESPACE, canonical_surface(name))))
+
+
+# Real narrator names that are ALREADY a fixed point of the declared writer
+# ``clean_narrator_name(normalize_arabic(·))`` — the clean, folded majority (~99.5% of
+# the corpus). Adding the da#371 trim to the id authority must be a NO-OP for these.
+_ALREADY_CLEAN_NAMES = (
+    "ابو هريره",
+    "محمد بن اسماعيل البخاري",
+    "عبد الله بن عمر",
+    "مالك بن انس",
+    "سفيان بن عيينه",
+    "عائشه",
+    "انس بن مالك",
+    # زكريا (Zakariyya) — its trailing alif is part of the name, not an accusative
+    # ending. It is deliberately EXCLUDED from the da#376 `_ACCUSATIVE_STEMS`
+    # lexicon; including it here proves the trim path does NOT re-introduce the
+    # naive "strip a trailing alif" corruption that would fold it to `زكري`.
+    "زكريا",
+)
+
+
+class TestNameNormalizedDrift:
+    """da#371 — one authority for the canonical normalized form.
+
+    ``name_ar_normalized`` was *written* as ``clean_narrator_name(normalize_arabic(x))``
+    but the id surface (``canonical_surface`` = normalize + da#376 fold) never applied
+    the trim, so minting an id from a raw/uncleaned name disagreed with the
+    cleaned-column path — two canonical ids for one name, and STUDIED_UNDER edges
+    silently dropped when an endpoint resolved to the un-trimmed id. Option A folds the
+    trim INTO :func:`make_canonical_id` (via :func:`canonical_key`) so all minting sites
+    converge. da#356/da#376 had already closed the normalization/format-mark axis; these
+    lock the residual clean axis and guard against a collateral whole-corpus re-key.
+    """
+
+    # ---- POSITIVE (red-first: these FAIL on pre-da#371 code) ----------------
+
+    def test_clean_axis_raw_and_cleaned_name_mint_one_id(self) -> None:
+        # The issue's own non-Arabic row: clean_narrator_name drops the '.', which
+        # canonical_surface preserves. Pre-fix these minted two distinct nar: ids.
+        assert make_canonical_id("Khabbab b. al-Aratt") == make_canonical_id("Khabbab b al-Aratt")
+
+    def test_clean_axis_arabic_honorific_and_bare_mint_one_id(self) -> None:
+        # An eulogy-suffixed spelling and the bare name are one narrator; the trim is
+        # what makes them converge on a single id.
+        with_eulogy = "خباب بن الأرت رضي الله عنه"
+        bare = "خباب بن الأرت"
+        assert make_canonical_id(with_eulogy) == make_canonical_id(bare)
+
+    def test_studied_under_endpoint_attaches_to_the_promoted_node(self) -> None:
+        # The load-bearing harm: _studied_under_endpoint resolved an edge endpoint via
+        # make_canonical_id(normalize_arabic(name)) — un-trimmed — while the node it
+        # must land on was minted by bio_promote from the CLEANED form. Pre-fix the ids
+        # differ and the STUDIED_UNDER edge silently drops. After da#371 they agree, so
+        # the edge attaches.
+        from src.graph.load_edges import _studied_under_endpoint
+
+        name = "خباب بن الأرت رضي الله عنه"
+        promoted_node_id = make_canonical_id(clean_narrator_name(normalize_arabic(name)))
+        endpoint = _studied_under_endpoint(name, None)
+        assert endpoint == promoted_node_id
+
+    def test_bio_promote_and_load_edges_rules_converge(self) -> None:
+        # The two relocated minting sites the issue's mechanism moved to: bio_promote
+        # cleans, load_edges did not. Both now route through the same authority.
+        name = "'Abdur Rahman ( عبد الرحمن ( رضي الله عنه"
+        bio_promote_rule = make_canonical_id(clean_narrator_name(normalize_arabic(name)))
+        load_edges_rule = make_canonical_id(normalize_arabic(name))
+        assert bio_promote_rule == load_edges_rule
+
+    # ---- NEGATIVE CONTROL (must be GREEN before AND after — no collateral re-key) --
+
+    def test_already_clean_names_are_not_rekeyed(self) -> None:
+        # The failure mode to guard: silently re-keying the whole corpus. For a name
+        # that is already a fixed point of the writer, the added trim must be a no-op,
+        # so canonical_key == canonical_surface and the id is byte-identical to the
+        # frozen pre-da#371 baseline.
+        for name in _ALREADY_CLEAN_NAMES:
+            assert canonical_key(name) == canonical_surface(name), name
+            assert make_canonical_id(name) == _pre_da371_id(name), name
+
+    def test_normalization_axis_still_one_id(self) -> None:
+        # da#376 regression guard: the issue's ORIGINAL headline repro (format marks +
+        # colon) must still collapse to one id under the composed authority.
+        a = make_canonical_id("ابو داود ‏:‏ وكذلك")
+        b = make_canonical_id(normalize_arabic("ابو داود : وكذلك"))
+        assert a == b
+
+    def test_da376_case_fold_preserved(self) -> None:
+        # The kunya case endings still fold to one Abu Hurayra.
+        assert make_canonical_id("ابي هريره") == make_canonical_id("ابو هريره")
+        assert make_canonical_id("ابا هريره") == make_canonical_id("ابو هريره")
+
+    def test_canonical_corruption_traps_never_false_merge(self) -> None:
+        # On a wipe-coupled, wholesale-re-minted identity authority an عمرو→عمر
+        # (ʿAmr→ʿUmar) false-merge is catastrophic and irreversible, so the guard
+        # lives in the suite, not in a reviewer's read. clean_narrator_name is
+        # token-level and the da#376 fold abstains by lexicon, so two distinct men
+        # keep two ids: `عمرو` (ʿAmr) never collapses onto `عمر` (ʿUmar) — not the
+        # base name, and not its accusative `عمرا` (the exact naive-alif-strip trap).
+        assert make_canonical_id("عمرو") != make_canonical_id("عمر")
+        assert make_canonical_id("عمرا") != make_canonical_id("عمر")
+        # And Zakariyya's own name is not mistaken for a stem+alif inflection.
+        assert make_canonical_id("زكريا") != make_canonical_id("زكري")
+
+    # ---- Contract properties of the composed key ----------------------------
+
+    def test_canonical_key_is_idempotent(self) -> None:
+        for name in ("خباب بن الأرت رضي الله عنه", "Khabbab b. al-Aratt", *_ALREADY_CLEAN_NAMES):
+            once = canonical_key(name)
+            assert canonical_key(once) == once, name
+
+    def test_pollution_reject_falls_back_not_collapse(self) -> None:
+        # clean_narrator_name rejects a pure-honorific span (returns None). The key must
+        # fall back to the pre-trim surface, NOT collapse every rejected name onto the
+        # single empty-string id.
+        assert make_canonical_id("رضي الله عنه") != make_canonical_id("")
+        assert make_canonical_id("صلى الله عليه وسلم") != make_canonical_id("رضي الله عنه")
+
+    def test_empty_name_is_stable(self) -> None:
+        assert canonical_key("") == ""
+        assert make_canonical_id("").startswith("nar:")
+
+    def test_discriminated_name_half_is_also_trimmed(self) -> None:
+        # The da#337 discriminated split must trim the NAME half through the same
+        # authority, so a raw and a cleaned spelling under the same discriminator agree.
+        raw = "خباب بن الأرت رضي الله عنه"
+        cleaned = clean_narrator_name(normalize_arabic(raw))
+        assert make_discriminated_canonical_id(raw, "d37") == make_discriminated_canonical_id(
+            cleaned, "d37"
+        )

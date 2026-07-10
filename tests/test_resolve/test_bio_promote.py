@@ -933,11 +933,14 @@ def test_alias_rekeyed_to_cleaned_form_attaches(tmp_path: Path) -> None:
     out_dir.mkdir()
 
     raw_norm = normalize_arabic(_ITQAN_635_BIO_NAME)
-    # The premise: the cleaner rewrites this name, and the raw vs cleaned forms mint
-    # DIFFERENT ids — otherwise the raw-key lookup would already work and there is no
-    # bug for this test to catch.
+    # Premise (updated by da#371): the cleaner still rewrites this name, but da#371
+    # centralized `clean_narrator_name` inside `make_canonical_id` (`canonical_key`), so
+    # the raw and cleaned forms now mint the SAME id at the identity layer — da#389's
+    # whole bug class (alias keyed on raw ≠ node minted on cleaned) is structurally gone,
+    # and da#389's manual re-key to the cleaned form is now redundant-but-correct
+    # (belt-and-suspenders). The alias-attach assertion below still proves the behavior.
     assert clean_narrator_name(raw_norm) == _ITQAN_635_CLEANED
-    assert make_canonical_id(raw_norm) != make_canonical_id(_ITQAN_635_CLEANED)
+    assert make_canonical_id(raw_norm) == make_canonical_id(_ITQAN_635_CLEANED)
 
     _write_bios(
         staging,
