@@ -13,6 +13,8 @@ independent exit codes.
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -246,18 +248,30 @@ class TestPostLoadBookkeepingCannotExitOne:
         assert exc.value.code == ExitCode.VALIDATION_FINDINGS
         assert exc.value.code != ExitCode.LOAD_FAILED
 
-    def test_enrich_exits_bare_one_after_the_load_has_committed(
+    def test_enrich_leaks_rc_one_after_the_load_has_committed(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Why the invariant names `load` and not `pipeline`.
+        """Why the invariant still names `load` and not `pipeline` -- for a NEW reason.
 
-        `_cmd_pipeline` runs `_cmd_load()` and then `_cmd_enrich()`, and enrich
-        exits a bare `1` when any step fails -- after its own audit write, and long
-        after the load committed and recorded its manifest. So under
-        `isnad-ingest pipeline` an rc of `1` does NOT mean the load did not happen.
-        Guarding `_cmd_load` cannot fix that; only scoping the claim can, which is
-        what the comment there now does. If enrich grows an exit code of its own,
-        this test reds and that comment must change with it.
+        This test was named ``test_enrich_exits_bare_one_after_the_load_has_committed``
+        and asserted that ``_cmd_enrich`` exits a bare ``1`` when a step fails. Its
+        docstring promised: *"If enrich grows an exit code of its own, this test reds
+        and that comment must change with it."* da#384 Amendment I gave enrich
+        ``ExitCode.ENRICH_FAILED`` (7). It reded. Renamed here, in the commit that
+        falsified it, together with the comment it guards.
+
+        The leak survives its own cause. ``_cmd_enrich`` writes its audit entry
+        OUTSIDE any handler, and neither ``main()`` nor ``_cmd_pipeline`` has a
+        top-level one -- so an escaping exception reaches Python's default handler
+        and exits ``1``, long after ``_cmd_load`` committed the graph and recorded
+        its manifest. Under ``isnad-ingest pipeline`` an rc of ``1`` therefore still
+        does NOT mean the load did not happen.
+
+        That is the same unguarded-bookkeeping defect this PR fixes in ``_cmd_load``,
+        sitting in ``_cmd_enrich``. Fixing it is not da#372's (this PR owns
+        ``_cmd_load``); it is filed as da#394. Scoping the claim is what this PR
+        can honestly do, and the comment in ``_cmd_load`` now names the mechanism
+        (no top-level handler) rather than an exit code someone can renumber.
         """
         (tmp_path / "staging").mkdir(exist_ok=True)
         monkeypatch.setattr(cli, "_check_neo4j", lambda: None)
@@ -274,21 +288,50 @@ class TestPostLoadBookkeepingCannotExitOne:
             "src.enrich.run_all",
             lambda *a, **k: SimpleNamespace(
                 steps_completed=["centrality"],
+                steps_failed=[],
+                metrics=None,
+                topics=None,
+                historical=None,
+            ),
+        )
+
+        def _audit_boom(*a: Any, **k: Any) -> None:
+            raise OSError("read-only file system: 'data'")
+
+        monkeypatch.setattr("src.pipeline.audit.write_audit_entry", _audit_boom)
+
+        # NOT a SystemExit: the exception escapes _cmd_enrich entirely. Nothing in
+        # cli.py catches it, so CPython's default handler prints it and exits 1.
+        with pytest.raises(OSError, match="read-only file system"):
+            cli._cmd_enrich()
+
+        # POSITIVE CONTROL for the claim above -- that an escaping exception really
+        # does yield rc=1, rather than this test merely observing an exception.
+        # Asserted from a real process, because `sys.exit(m)` and an uncaught raise
+        # reach the OS by different routes and only $? sees both.
+        proc = subprocess.run(  # noqa: S603
+            [sys.executable, "-c", "raise OSError('read-only file system')"],
+            capture_output=True,
+        )
+        assert proc.returncode == 1, f"CPython's default handler exited {proc.returncode}"
+
+        # SCOPE CONTROL: a *failed step* is a named code, not the leak. If this
+        # stops being 7, the comment in _cmd_load must be re-read, not re-numbered.
+        monkeypatch.setattr("src.pipeline.audit.write_audit_entry", lambda *a, **k: None)
+        monkeypatch.setattr(
+            "src.enrich.run_all",
+            lambda *a, **k: SimpleNamespace(
+                steps_completed=["centrality"],
                 steps_failed=["topics"],
                 metrics=None,
                 topics=None,
                 historical=None,
             ),
         )
-        monkeypatch.setattr("src.pipeline.audit.write_audit_entry", lambda *a, **k: None)
-
         with pytest.raises(SystemExit) as exc:
             cli._cmd_enrich()
-
-        # A bare 1 -- the same value EXIT_LOAD_FAILED carries, from a command that
-        # never touches the loaders. This is the leak the scoped comment names.
-        assert exc.value.code == 1
-        assert exc.value.code == ExitCode.LOAD_FAILED
+        assert exc.value.code == ExitCode.ENRICH_FAILED
+        assert exc.value.code != ExitCode.LOAD_FAILED
 
 
 class TestValidateCommandExitCode:

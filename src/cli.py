@@ -16,7 +16,7 @@ def _mask_password(value: str) -> str:
 
 
 def _check_neo4j() -> None:
-    """Pre-flight Neo4j connectivity check. Exits with code 1 on failure."""
+    """Pre-flight Neo4j connectivity check. Exits ``ExitCode.DB_UNREACHABLE`` on failure."""
     from neo4j import GraphDatabase
 
     from src.config import get_settings
@@ -246,10 +246,16 @@ def _cmd_load(
         # write nor the audit entry below -- a load that raised did not happen.
         #
         # That invariant is scoped to `isnad-ingest load`. It does NOT hold for
-        # `isnad-ingest pipeline`, which goes on to run `_cmd_enrich`; enrich
-        # exits a bare 1 of its own long after this load has committed and
-        # recorded its manifest. Read an rc of EXIT_LOAD_FAILED as "the load did
-        # not happen" only for the `load` command.
+        # `isnad-ingest pipeline`, which goes on to run `_cmd_enrich`. Enrich's
+        # own audit write sits outside any handler, and neither `main()` nor
+        # `_cmd_pipeline` has a top-level one, so an escaping exception reaches
+        # CPython's default handler and exits 1 -- long after this load committed
+        # and recorded its manifest. Read rc=1 as "the load did not happen" only
+        # for the `load` command.
+        #
+        # The mechanism, not the number: enrich once exited a bare 1 here, and
+        # now exits ENRICH_FAILED (da#384 Amendment I). The leak outlived its
+        # cause because it was never about enrich's exit code (da#394).
         traceback.print_exc()
         print(
             "\nLOAD FAILED: the graph was not fully written. See traceback above.",
