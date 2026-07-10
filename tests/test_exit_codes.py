@@ -76,8 +76,22 @@ def _src_root() -> Path:
 
 
 def _registry_member_names() -> frozenset[str]:
-    """The registry's member names, through the ``enum`` API. Never grepped."""
-    return frozenset(c.name for c in ExitCode)
+    """The registry's member names, through the ``enum`` API. Never grepped.
+
+    Reads ``__members__``, **not** iteration. Iteration skips aliases, so an
+    iteration-derived set would make two OTHER guards silently alias-blind:
+
+    * the docstring guard would never check an undocumented alias;
+    * the sole-declarer scan would not flag a rival module declaring the alias's
+      name, because that name is not in the set it matches against.
+
+    Both are unreachable today, because ``test_the_registry_has_no_aliases``
+    reds on any alias. But that makes the guards **ordered rather than
+    independent**: delete the one assertion and two more go blind with it,
+    which is exactly the mutant it exists to catch. `__members__` costs nothing
+    and makes each guard alias-aware on its own. (Oyunbileg Batbayar.)
+    """
+    return frozenset(ExitCode.__members__)
 
 
 def _is_exit_name(name: str) -> bool:
