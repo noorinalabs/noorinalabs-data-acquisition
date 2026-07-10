@@ -19,56 +19,58 @@ The fix is not to renumber. It is to make a duplicate **inexpressible**:
 every ``EXIT_*`` consumer imports this module. A test that *checks* uniqueness
 is the fallback; the decorator is the mechanism.
 
-What each code means -- a monotone on how much is on disk
----------------------------------------------------------
-The ordering is **how much is on disk when the process exits, ascending**. Not
-"nothing ran / something ran": that framing produced two false claims in this
-registry's own ruling, one about ``4`` and one about ``1``. A monotone has a fact
-behind it at every value, rather than a story that must hold for every emitter.
+What each code means
+--------------------
+Each code is defined by **what is on disk when it fires**. There is no ordering
+claim: an earlier draft called this "a monotone, how much is on disk, ascending"
+and that is FALSE -- ``5`` is a fully written graph while ``6`` is an incomplete
+one, so ``6`` wrote *less* than ``5``. Nor does it ascend on how far the process
+got: ``REFUSED_ROWS`` fires before the validation verdict that produces
+``VALIDATION_FINDINGS``.
+
+The ordering is not the specification. **The per-member docstrings are.** A
+monotone offered as the specification reinstates reasoning-from-a-neighbouring-
+constant as the specification -- the very thing this module exists to abolish.
 
 ======  =====================  ===================================================
-code    name                   on disk when it fires
+code    name                   what is on disk when it fires
 ======  =====================  ===================================================
+``0``   *(success)*            everything the command meant to write
 ``1``   ``LOAD_FAILED``        nothing the load would have written
 ``2``   *(argparse)*           nothing
 ``3``   ``STOPPED_AT_LIMIT``   partial, by request (``--stop-after``)
 ``4``   ``MISSING_DEPENDENCY`` prior stages' artifacts (dedup is Step 4)
 ``5``   ``VALIDATION_FINDINGS`` the graph, fully written
 ``6``   ``REFUSED_ROWS``       the graph, minus the refused rows
-``7``   ``ENRICH_FAILED``      the graph and the manifest, plus a partial enrich
+``7``   ``ENRICH_FAILED``      the graph and the manifest; enrich failed
+``8``   ``DB_UNREACHABLE``     nothing written by the command that raised it
 ======  =====================  ===================================================
 
-``4`` sits nearer ``6`` than to argparse's ``2``. ``MissingDependencyError`` is
-raised at ``run_dedup``'s entry, and dedup is **Step 4** of ``run_all``: NER,
+``4`` is not a "nothing ran" code. ``MissingDependencyError`` is raised at
+``run_dedup``'s entry, and dedup is **Step 4** of ``run_all``: NER,
 disambiguation, bio-promotion, fuzzy clustering, same-name split, date
 reconciliation and the ṭabaqa fallback have all already run, and Step 3 has
 already written ``narrators_canonical.parquet``. The error subclasses
 ``BaseException`` precisely so it escapes those stages' handlers.
 
-``7`` exists because **a failed enrich is not a failed load.** ``_cmd_enrich``
-runs after ``_cmd_load`` has committed the graph, the manifest and the audit
-entry. Routing it to :attr:`ExitCode.LOAD_FAILED` would have made this module
-*assert* that falsehood — and a bare ``1`` claims nothing, while a registry
-constant claims something and invites citation. Laundering a wrong code through
-the registry does not make it right; it makes it citable.
-
 .. note::
 
-   **Two false claims are recorded here rather than quietly corrected**, because
-   both were made in the artifact whose purpose is to stop people reasoning from
-   a neighbouring constant, and both had the same mechanism:
+   **Three false claims were made about this table and are recorded rather than
+   quietly corrected**, because each was made in the artifact whose purpose is to
+   stop people reasoning from a neighbouring constant:
 
-   * ``run_dedup``'s *"checked at stage entry, before any input is read"* is true
-     of **dedup**; it was generalized to **resolve**, making ``4`` look like a
-     "nothing ran" code.
-   * ``_check_neo4j``'s *"the load did not happen"* is true of **that call
-     site**; it was generalized into a band table row, making ``1`` look like a
-     "nothing ran" band while ``_cmd_enrich`` still exited ``1`` from a fully
-     committed graph.
+   * ``run_dedup``'s *"before any input is read"* is true of **dedup**; it was
+     generalized to **resolve**, making ``4`` look like "nothing ran".
+   * ``_check_neo4j``'s *"the load did not happen"* is true of **that helper's
+     own knowledge**; it was generalized into a band row, making ``1`` look like
+     a "nothing ran" band while ``_cmd_enrich`` still exited ``1``.
+   * The **monotone** itself: a story that fitted the values already chosen,
+     pinned by a test that compared a list to its own sort and so could never
+     fail. It passed on a deliberately scrambled enum.
 
    **A comment true at one call site is not a specification of the code it
-   returns.** ``1`` is true again now — not by rewording the row, but by giving
-   ``_cmd_enrich`` a code of its own.
+   returns**, and an ordering that fits the values you happened to pick is not a
+   property of them.
 
 Call sites still emitting a bare integer
 ----------------------------------------
@@ -124,6 +126,7 @@ from __future__ import annotations
 import enum
 
 __all__ = [
+    "EXIT_DB_UNREACHABLE",
     "EXIT_ENRICH_FAILED",
     "EXIT_LOAD_FAILED",
     "EXIT_MISSING_DEPENDENCY",
@@ -183,9 +186,8 @@ class ExitCode(enum.IntEnum):
     LOAD_FAILED = 1
     """The load raised. The graph was not fully written.
 
-    NOT a general "nothing ran" band: ``_cmd_enrich`` still exits a bare ``1``
-    after the load has committed its graph, manifest and audit entry. See the
-    module docstring, "Call sites still emitting a bare integer".
+    Says nothing about any other command. ``_cmd_enrich`` exits
+    :attr:`ENRICH_FAILED`; the connectivity pre-check exits :attr:`DB_UNREACHABLE`.
     """
 
     # 2 is argparse's usage error. See RESERVED_BY_RUNTIME.
@@ -214,9 +216,27 @@ class ExitCode(enum.IntEnum):
     ENRICH_FAILED = 7
     """The enrich stage failed. The graph, manifest and audit entry are written (da#384).
 
-    A failed enrich is NOT a failed load. `_cmd_enrich` runs after `_cmd_load`
-    committed everything it writes, so this cannot be `LOAD_FAILED` without the
-    registry asserting a falsehood about on-disk state.
+    Fires only on ``summary.steps_failed`` -- a real enrich failure after a
+    committed load. **A failed enrich is not a failed load.** That is the whole
+    reason this member exists; no argument from where it sits relative to any
+    other value is doing any work here.
+    """
+
+    DB_UNREACHABLE = 8
+    """The connectivity pre-check could not reach Neo4j (da#384 Amendment R).
+
+    No stage ran; nothing was written by the command that raised it.
+    **Stage-agnostic by construction.** ``_check_neo4j`` has four callers --
+    ``_cmd_load``, ``_cmd_validate``, ``_cmd_migrate_transmitted_hadith_ids``,
+    ``_cmd_enrich`` -- and cannot know which one it is serving. It knows exactly
+    one fact, identical at every site: the database is not there. This names that.
+
+    It previously exited :attr:`LOAD_FAILED`, which was true for one caller of
+    four. Passing the code in as a parameter would not have fixed it: it would
+    have turned four call sites into a hand-maintained mapping from caller to
+    exit code -- the same object as a hand-maintained list of reserved values, of
+    AST node types, or of permitted bare exits. Each was proposed as the fix for
+    the one before it.
     """
 
 
@@ -224,6 +244,7 @@ class ExitCode(enum.IntEnum):
 # alias form keeps a migrating call site to an *import-site* change rather than a
 # value change, which is what lets an already-approved PR rebase without
 # invalidating its approvals.
+EXIT_DB_UNREACHABLE = ExitCode.DB_UNREACHABLE
 EXIT_ENRICH_FAILED = ExitCode.ENRICH_FAILED
 EXIT_LOAD_FAILED = ExitCode.LOAD_FAILED
 EXIT_STOPPED_AT_LIMIT = ExitCode.STOPPED_AT_LIMIT

@@ -45,11 +45,14 @@ from __future__ import annotations
 import ast
 import enum
 import importlib
+import inspect
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import src.cli as cli
 from src.exit_codes import RESERVED_BY_RUNTIME, ExitCode
 
 # ---------------------------------------------------------------------------
@@ -239,6 +242,7 @@ class TestReservedSetIsEnumerated:
             "VALIDATION_FINDINGS": 5,
             "REFUSED_ROWS": 6,
             "ENRICH_FAILED": 7,
+            "DB_UNREACHABLE": 8,
         }
 
     def test_the_ruling_table_is_pinned(self) -> None:
@@ -251,19 +255,62 @@ class TestReservedSetIsEnumerated:
         assert ExitCode.VALIDATION_FINDINGS == 5  # da#354 moves 4 -> 5
         assert ExitCode.REFUSED_ROWS == 6  # da#359 moves 5 -> 6
         assert ExitCode.ENRICH_FAILED == 7  # da#384 Amendment I: a failed enrich != a failed load
+        assert (
+            ExitCode.DB_UNREACHABLE == 8
+        )  # da#384 Amendment R: the helper names only what it knows
 
-    def test_the_band_is_a_monotone_on_how_much_is_on_disk(self) -> None:
-        """The codes ascend with what the operator will find written.
+    def test_every_member_documents_what_is_on_disk(self) -> None:
+        """The DOCSTRINGS are the specification. There is no ordering claim.
 
-        Pinned because the ordering IS the specification: `1` nothing, `4` prior
-        stages' artifacts, `5` the full graph, `6` the graph minus refused rows,
-        `7` the graph plus a partial enrich. The earlier "nothing ran / something
-        ran" framing produced two false rows.
+        An earlier version asserted the band was "a monotone, how much is on
+        disk, ascending", via::
+
+            ascending = [c.value for c in sorted(ExitCode, key=lambda c: c.value)]
+            assert ascending == sorted(ascending)
+
+        That is a list compared to its own sort. **It cannot fail.** Verified
+        against a deliberately scrambled `IntEnum` (`Z=9, A=1, M=5`): it passes.
+        And the property was false anyway -- `5` is a fully written graph while
+        `6` is an incomplete one, so `6` wrote LESS than `5`.
+
+        An ordering that fits the values you happened to pick is not a property
+        of them. This replaces it with a check that CAN fail: minting a code
+        forces its author to state what is on disk when it fires.
+
+        Member docstrings are not stored at runtime -- `ExitCode.LOAD_FAILED.__doc__`
+        returns the CLASS docstring -- so this reads the registry's AST.
         """
-        ascending = [c.value for c in sorted(ExitCode, key=lambda c: c.value)]
-        assert ascending == sorted(ascending)
-        assert ExitCode.LOAD_FAILED < ExitCode.MISSING_DEPENDENCY < ExitCode.VALIDATION_FINDINGS
-        assert ExitCode.VALIDATION_FINDINGS < ExitCode.REFUSED_ROWS < ExitCode.ENRICH_FAILED
+        tree = ast.parse(_registry_path().read_text(encoding="utf-8"))
+        cls = next(
+            n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == ExitCode.__name__
+        )
+
+        documented: set[str] = set()
+        body = cls.body
+        for i, node in enumerate(body):
+            if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+                continue
+            target = node.targets[0]
+            if not isinstance(target, ast.Name) or target.id not in _registry_member_names():
+                continue
+            nxt = body[i + 1] if i + 1 < len(body) else None
+            if (
+                isinstance(nxt, ast.Expr)
+                and isinstance(nxt.value, ast.Constant)
+                and isinstance(nxt.value.value, str)
+                and nxt.value.value.strip()
+            ):
+                documented.add(target.id)
+
+        # INSTRUMENT GUARD: the walk must have found the members at all. An empty
+        # `documented` would otherwise satisfy nothing and look like agreement.
+        assert documented, "the AST walk found no documented members -- it is blind"
+        missing = _registry_member_names() - documented
+        assert not missing, (
+            f"members with no docstring: {sorted(missing)}.\n"
+            "  Every code must state what is on disk when it fires. That is the\n"
+            "  specification; the ordering is not."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +492,69 @@ class TestTheScanSeesEveryBindingForm:
         """The form the registry itself uses, carrying no ``EXIT_`` prefix."""
         source = "import enum\n\n\nclass _Rival(enum.IntEnum):\n    REFUSED_ROWS = 6\n"
         assert "REFUSED_ROWS" in _exit_name_assignments(ast.parse(source))
+
+
+class TestCheckNeo4jNamesOnlyWhatItKnows:
+    """The connectivity pre-check is a shared helper. It cannot know its caller.
+
+    It exited `ExitCode.LOAD_FAILED`, which is true for one of its four callers.
+    Under `pipeline`, `_cmd_load()` commits the graph, the manifest and the audit
+    entry; then `_cmd_enrich()` calls `_check_neo4j()`. Neo4j dropping in between
+    produced `rc=1` from a fully committed load -- the registry asserting a
+    falsehood *authoritatively*, which is worse than the bare `1` it replaced,
+    because a constant invites citation and a literal claims nothing.
+
+    Found by Alejandra Reyes-Fuentes on da#387. The remedy is NOT a parameter:
+    `on_failure: ExitCode` would turn four call sites into a hand-maintained
+    mapping from caller to exit code (da#384 Amendment R).
+    """
+
+    def test_it_takes_no_exit_code_parameter(self) -> None:
+        """A parameter would be a hand-maintained caller->code mapping."""
+        params = inspect.signature(cli._check_neo4j).parameters
+        assert not params, f"_check_neo4j must take no arguments; got {list(params)}"
+
+    def test_an_unreachable_database_exits_db_unreachable(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Driven, not read. Every caller gets the same code, because the helper
+        knows the same one fact at every call site."""
+        import neo4j
+
+        class _Unreachable:
+            @staticmethod
+            def driver(*_a: object, **_k: object) -> None:
+                raise OSError("connection refused")
+
+        monkeypatch.setattr(neo4j, "GraphDatabase", _Unreachable)
+        monkeypatch.setattr(
+            "src.config.get_settings",
+            lambda: SimpleNamespace(
+                neo4j=SimpleNamespace(uri="bolt://nope:7687", user="u", password="p")
+            ),
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            cli._check_neo4j()
+
+        # INSTRUMENT GUARD: it must have REACHED the connectivity guard, not died
+        # on the way in. Without this, any early failure would satisfy the raise.
+        assert "Cannot connect to Neo4j" in capsys.readouterr().out
+        assert exc.value.code == ExitCode.DB_UNREACHABLE
+        assert exc.value.code != ExitCode.LOAD_FAILED
+
+    def test_the_helper_has_more_than_one_caller(self) -> None:
+        """The premise. If it had one caller, naming that caller's stage would be fine."""
+        tree = ast.parse(_registry_path().parent.joinpath("cli.py").read_text(encoding="utf-8"))
+        callers = {
+            fn.name
+            for fn in ast.walk(tree)
+            if isinstance(fn, ast.FunctionDef)
+            for n in ast.walk(fn)
+            if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "_check_neo4j"
+        }
+        assert len(callers) > 1, f"only {callers} call it; the premise no longer holds"
+        assert "_cmd_enrich" in callers, "the caller that made the old code a falsehood"
 
 
 class TestRegistryIsTheSoleDeclarer:

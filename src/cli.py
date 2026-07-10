@@ -31,12 +31,17 @@ def _check_neo4j() -> None:
         driver.verify_connectivity()
         driver.close()
     except Exception as exc:
-        # At THIS call site the load did not happen: nothing was written (da#384 §4).
-        # Locally true here; NOT a specification of what rc=1 means everywhere --
-        # _cmd_enrich still exits a bare 1 after the load has committed. See
-        # src/exit_codes.py, "Call sites still emitting a bare integer".
+        # This helper has FOUR callers (_cmd_load, _cmd_validate,
+        # _cmd_migrate_transmitted_hadith_ids, _cmd_enrich) and knows exactly one
+        # fact, identical at every one of them: the database is not there. It
+        # must not name a stage it cannot know it is in -- it exited LOAD_FAILED,
+        # which was true for one caller of four, and under `pipeline` that meant
+        # rc=1 from a fully committed load (da#384 Amendment R).
+        #
+        # Taking the code as a parameter would not fix this: it would turn the
+        # call sites into a hand-maintained mapping from caller to exit code.
         print(f"ERROR: Cannot connect to Neo4j at {settings.neo4j.uri}: {exc}")
-        sys.exit(ExitCode.LOAD_FAILED)
+        sys.exit(ExitCode.DB_UNREACHABLE)
     print("  Neo4j is reachable.")
 
 
