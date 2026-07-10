@@ -20,7 +20,7 @@ than overwritten, so the bio-direct and mention-driven outputs compose.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -54,6 +54,26 @@ _BACKFILL_FIELDS = (
 )
 
 
+class _AliasMergeStats(NamedTuple):
+    """Per-run alias-merge accounting (da#389).
+
+    Every alias row lands in exactly one bucket, so
+    ``added + skipped_duplicate + skipped_empty + skipped_source +
+    unmatched_pollution + unmatched_no_bio`` equals the alias-row count — no alias
+    is ever silently dropped again. ``unmatched_pollution`` (the alias's bio was
+    itself cleaner-dropped, so no canonical node was minted to anchor to) and
+    ``skipped_source`` are *explained* non-attachments; ``unmatched_no_bio`` is the
+    one that warrants a look and is logged at warning level when non-zero.
+    """
+
+    added: int
+    unmatched_pollution: int
+    unmatched_no_bio: int
+    skipped_source: int
+    skipped_duplicate: int
+    skipped_empty: int
+
+
 def _load_existing_canonical(path: Path) -> dict[str, dict[str, Any]]:
     """Load an existing narrators_canonical.parquet into a canonical_id -> row map."""
     if not path.exists():
@@ -75,37 +95,77 @@ def _load_existing_canonical(path: Path) -> dict[str, dict[str, Any]]:
 def _merge_aliases(
     staging_dir: Path,
     canonical_map: dict[str, dict[str, Any]],
+    promoted_cids: set[str],
     *,
     sources: set[str] | None,
-) -> int:
+) -> _AliasMergeStats:
     """Union name-variant aliases from ``narrator_aliases_*.parquet`` (da#94).
 
-    Each alias row carries ``canonical_name_ar_normalized`` — the SAME normalized
-    name the bio mints its ``nar:`` id from — so a variant attaches to exactly the
-    canonical record the matching bio produced. Variants are only attached to
-    records that already exist (an alias never *creates* a narrator: a profile
-    with variants but no promotable bio has no canonical identity to anchor them).
-    Duplicates and the primary spelling are skipped. Returns the number of new
-    alias strings added.
+    Each alias row carries ``canonical_name_ar_normalized`` — the bio's **raw**
+    normalized name. The promoter mints the canonical node under
+    ``make_canonical_id(clean_narrator_name(name))``, not under the raw name, so the
+    alias must be re-keyed through the SAME cleaner before the id is computed
+    (da#389). It previously keyed on ``make_canonical_id(norm)`` with the raw
+    ``norm``, so any bio whose cleaner rewrote its name — a benediction suffix, a
+    ``، ويقال :`` variant list, a truncated head — was minted under an id this
+    lookup never reproduced, and its aliases attached to nothing. That silently
+    dropped **34,046 / 154,328 itqan aliases (22.1%)** with no counter and no log.
+
+    Variants attach only to a canonical id a bio actually **promoted into**
+    (``promoted_cids``) — the precise mirror of the promotion decision. An alias
+    never *creates* a narrator, and never attaches to a node its own bio did not
+    promote into: a bio the cleaner dropped as pollution mints no node, and a
+    truncated-residue bio the da#379 guard refused to merge onto an attested
+    narrator must not smuggle that narrator an alias through this pass either.
+    Duplicates and the primary spelling are skipped. Returns a full accounting
+    (:class:`_AliasMergeStats`) so every non-attachment is counted, not silent.
     """
     alias_files = sorted(staging_dir.glob("narrator_aliases_*.parquet"))
     added = 0
+    unmatched_pollution = 0
+    unmatched_no_bio = 0
+    skipped_source = 0
+    skipped_duplicate = 0
+    skipped_empty = 0
     for af in alias_files:
         for row in pq.read_table(af).to_pylist():
             if sources is not None and safe_str(row.get("source")) not in sources:
+                skipped_source += 1
                 continue
             norm = safe_str(row.get("canonical_name_ar_normalized"))
             variant = safe_str(row.get("alias_normalized"))
             if not norm or not variant:
+                skipped_empty += 1
                 continue
-            rec = canonical_map.get(make_canonical_id(norm))
-            if rec is None:
-                continue  # no promoted bio for this name — nothing to anchor to
+            # Re-key on the cleaned form the promoter minted the node under (da#389).
+            cleaned = clean_narrator_name(norm)
+            if not cleaned:
+                # The alias's own bio was pollution-dropped by this same cleaner
+                # (returned None) — no canonical node exists to anchor to. Legitimate,
+                # and now counted instead of silently lost.
+                unmatched_pollution += 1
+                continue
+            cid = make_canonical_id(cleaned)
+            if cid not in promoted_cids:
+                # No bio promoted this name into the table (a truncated-residue bio
+                # the da#379 guard refused, or a name absent from this source's bios).
+                unmatched_no_bio += 1
+                continue
+            rec = canonical_map[cid]  # promoted_cids ⊆ canonical_map keys
             aliases = rec.setdefault("aliases", [])
             if variant != rec.get("name_ar_normalized") and variant not in aliases:
                 aliases.append(variant)
                 added += 1
-    return added
+            else:
+                skipped_duplicate += 1
+    return _AliasMergeStats(
+        added=added,
+        unmatched_pollution=unmatched_pollution,
+        unmatched_no_bio=unmatched_no_bio,
+        skipped_source=skipped_source,
+        skipped_duplicate=skipped_duplicate,
+        skipped_empty=skipped_empty,
+    )
 
 
 def promote_bios_to_canonical(
@@ -152,6 +212,10 @@ def promote_bios_to_canonical(
     skipped_source = 0
     skipped_pollution = 0
     skipped_truncated_merge = 0
+    # Canonical ids a bio actually promoted into this run — the anchor set aliases
+    # attach to (da#389). Excludes pollution-drops and truncation-skips, which mint
+    # no node (or refuse the merge), so their aliases have nothing to anchor to.
+    promoted_cids: set[str] = set()
 
     for bf in bio_files:
         table = pq.read_table(bf)
@@ -259,6 +323,7 @@ def promote_bios_to_canonical(
                     if rec.get(field_name) in (None, "") and row.get(field_name) not in (None, ""):
                         rec[field_name] = row.get(field_name)
             promoted += 1
+            promoted_cids.add(cid)
 
     # Finalize sect/corpus provenance from the accumulated corpora set (da#103).
     for rec in canonical_map.values():
@@ -276,7 +341,7 @@ def promote_bios_to_canonical(
         rec["sect_affiliation"] = derive_sect_affiliation(corpora)
 
     # Attach name-variant aliases onto the canonical records the bios produced.
-    aliases_added = _merge_aliases(staging_dir, canonical_map, sources=sources)
+    alias_stats = _merge_aliases(staging_dir, canonical_map, promoted_cids, sources=sources)
 
     table_rows = list(canonical_map.values())
     arrays = {f.name: [r.get(f.name) for r in table_rows] for f in NARRATORS_CANONICAL_SCHEMA}
@@ -288,6 +353,16 @@ def promote_bios_to_canonical(
     out_table = pa.table(arrays, schema=NARRATORS_CANONICAL_SCHEMA)
     write_parquet(out_table, canonical_path, schema=NARRATORS_CANONICAL_SCHEMA)
 
+    # An alias that matched no promoted bio (and was not a cleaner-dropped-bio case)
+    # is the one non-attachment worth investigating — surface it loudly so the
+    # da#389 drop can never again be silent.
+    if alias_stats.unmatched_no_bio:
+        logger.warning(
+            "bio_promote_aliases_unmatched_no_bio",
+            unmatched_no_bio=alias_stats.unmatched_no_bio,
+            note="aliases whose cleaned canonical name matched no promoted bio",
+        )
+
     logger.info(
         "bio_promote_complete",
         bio_files=len(bio_files),
@@ -298,6 +373,11 @@ def promote_bios_to_canonical(
         skipped_source=skipped_source,
         skipped_pollution=skipped_pollution,
         skipped_truncated_merge=skipped_truncated_merge,
-        aliases_added=aliases_added,
+        aliases_added=alias_stats.added,
+        aliases_unmatched_pollution=alias_stats.unmatched_pollution,
+        aliases_unmatched_no_bio=alias_stats.unmatched_no_bio,
+        aliases_skipped_source=alias_stats.skipped_source,
+        aliases_skipped_duplicate=alias_stats.skipped_duplicate,
+        aliases_skipped_empty=alias_stats.skipped_empty,
     )
     return canonical_path
