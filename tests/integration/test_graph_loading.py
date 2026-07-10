@@ -10,6 +10,7 @@ import pyarrow.parquet as pq
 import pytest
 import yaml
 
+from src.graph import TOPOLOGY_DERIVED_NARRATOR_PROPERTIES, load_all
 from src.graph.load_edges import load_all_edges
 from src.graph.load_nodes import load_all_nodes
 from src.graph.validate import run_validation
@@ -630,3 +631,73 @@ class TestPostLoadValidationAgainstRealFiles:
             assert result.passed is True
             assert result.status == "PASS"
             assert result.warning is False
+
+
+class TestStaleEnrichMetricsAreInvalidatedByLoad:
+    """da#351, against a real Neo4j.
+
+    `load_all` is MERGE-only: it never deletes, so metrics an earlier `enrich`
+    wrote survive a reload and read as current. Cypher has no strict-property
+    mode -- a stale `betweenness_centrality` is indistinguishable from a fresh
+    one. This test plants a stale value, reloads, and asserts it is gone.
+    """
+
+    QUERIES_DIR = Path(__file__).resolve().parents[2] / "queries"
+
+    def _load(self, neo4j_client: Neo4jClient, staging: Path, curated: Path) -> Any:
+        return load_all(
+            neo4j_client,
+            staging,
+            curated,
+            self.QUERIES_DIR,
+            strict=False,
+            skip_validation=True,
+        )
+
+    def _enrich_like_write(self, neo4j_client: Neo4jClient) -> None:
+        """Stand in for `enrich`: write every GDS metric onto every Narrator."""
+        sets = ", ".join(f"n.{p} = 99.5" for p in TOPOLOGY_DERIVED_NARRATOR_PROPERTIES)
+        neo4j_client.execute_write(f"MATCH (n:Narrator) SET {sets}")
+
+    def test_stale_centrality_does_not_survive_a_reload(
+        self, neo4j_client: Neo4jClient, tmp_path: Path
+    ) -> None:
+        staging, curated = _write_staging_data(tmp_path)
+        self._load(neo4j_client, staging, curated)
+        self._enrich_like_write(neo4j_client)
+
+        # Instrument check: the probe CAN see a nonzero count right now, so the
+        # zero we expect after the reload is a measurement, not a silent zero.
+        before = neo4j_client.execute_read(
+            "MATCH (n:Narrator) RETURN count(n.betweenness_centrality) AS c"
+        )[0]["c"]
+        assert before > 0, (
+            "fixture did not plant any centrality; the assertion below would be inert"
+        )
+
+        summary = self._load(neo4j_client, staging, curated)
+
+        after = neo4j_client.execute_read(
+            "MATCH (n:Narrator) RETURN count(n.betweenness_centrality) AS c"
+        )[0]["c"]
+        assert after == 0, f"stale centrality survived the reload on {after} narrator(s)"
+        assert summary.invalidated_narrators == before
+
+        # Enumerate keys rather than probing a name: a misspelled property
+        # returns NULL for every row and never errors (reference_graph_ops).
+        keys = {
+            row["k"]
+            for row in neo4j_client.execute_read(
+                "MATCH (n:Narrator) UNWIND keys(n) AS k RETURN DISTINCT k AS k"
+            )
+        }
+        assert keys.isdisjoint(TOPOLOGY_DERIVED_NARRATOR_PROPERTIES)
+        # The load's own data survives untouched -- invalidation is surgical.
+        assert "name_ar" in keys and "id" in keys
+
+    def test_invalidation_is_idempotent_on_an_unenriched_graph(
+        self, neo4j_client: Neo4jClient, tmp_path: Path
+    ) -> None:
+        staging, curated = _write_staging_data(tmp_path)
+        summary = self._load(neo4j_client, staging, curated)
+        assert summary.invalidated_narrators == 0

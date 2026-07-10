@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from src.graph.invalidate import (
+    TOPOLOGY_DERIVED_NARRATOR_PROPERTIES,
+    invalidate_topology_derived_properties,
+)
 from src.graph.load_edges import EdgeLoadResult, load_all_edges
 from src.graph.load_nodes import LoadResult, load_all_nodes
 from src.graph.validate import (
@@ -34,10 +38,12 @@ logger = get_logger(__name__)
 # the registry exists to abolish.
 
 __all__ = [
+    "TOPOLOGY_DERIVED_NARRATOR_PROPERTIES",
     "EdgeLoadResult",
     "LoadResult",
     "LoadSummary",
     "ValidationResult",
+    "invalidate_topology_derived_properties",
     "load_all",
     "load_all_edges",
     "load_all_nodes",
@@ -47,7 +53,7 @@ __all__ = [
 
 @dataclass(frozen=True)
 class LoadSummary:
-    """Full pipeline outcome: nodes + edges + validation."""
+    """Full pipeline outcome: nodes + edges + invalidation + validation."""
 
     node_results: list[LoadResult]
     edge_results: list[EdgeLoadResult] = field(default_factory=list)
@@ -55,6 +61,8 @@ class LoadSummary:
     total_nodes: int = 0
     total_edges: int = 0
     validation_passed: bool = True
+    #: Narrators whose stale enrich metrics were removed by this load (da#351).
+    invalidated_narrators: int = 0
 
     @property
     def total_malformed_ids(self) -> int:
@@ -145,7 +153,20 @@ def load_all(
         total_edges = sum(r.created for r in edge_results)
         logger.info("load_all_edges_done", total_edges=total_edges)
 
-    # 3. Validate (unless skipped or nodes_only)
+    # 3. Invalidate stale enrich metrics (da#351).
+    #
+    # The load has just changed the topology, so every GDS-derived property an
+    # earlier enrich wrote is now false. `load_all` is MERGE-only and never
+    # deletes, so without this those values survive and read as current. Removing
+    # them is what makes a stale reading impossible rather than merely
+    # detectable -- see src/graph/invalidate.py for why removal beats a stamp.
+    #
+    # Runs for nodes_only too: adding nodes changes centrality just as edges do.
+    # It cannot run if the load raised, because we never reach here.
+    invalidated_narrators = invalidate_topology_derived_properties(client)
+    logger.info("load_all_invalidation_done", invalidated_narrators=invalidated_narrators)
+
+    # 4. Validate (unless skipped or nodes_only)
     validation_results: list[ValidationResult] = []
     validation_passed = True
     if not skip_validation and not nodes_only:
@@ -171,11 +192,13 @@ def load_all(
         total_nodes=total_nodes,
         total_edges=total_edges,
         validation_passed=validation_passed,
+        invalidated_narrators=invalidated_narrators,
     )
     logger.info(
         "load_all_complete",
         total_nodes=total_nodes,
         total_edges=total_edges,
         validation_passed=validation_passed,
+        invalidated_narrators=invalidated_narrators,
     )
     return summary
