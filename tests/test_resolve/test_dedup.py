@@ -153,34 +153,40 @@ class TestWriteEmptyOutput:
 # ---------------------------------------------------------------------------
 # Tests: canonical pair ordering (integration)
 # ---------------------------------------------------------------------------
+@ml
 class TestCanonicalPairOrdering:
     def test_output_pairs_are_canonically_ordered(self, tmp_path: Path) -> None:
         """Verify that run_dedup produces output with hadith_id_a < hadith_id_b
         and that the output conforms to PARALLEL_LINKS_SCHEMA.
 
         Uses intentionally reversed IDs (z-id before a-id) so the ordering logic
-        in run_dedup is exercised even without ML deps.
+        in run_dedup is exercised.
+
+        This test previously wrote ``hadith_test.parquet`` (singular), which the
+        stage's ``**/hadiths_*.parquet`` glob never matched: the run found zero
+        input files, returned an empty table, and the ordering assertion below —
+        guarded by ``if table.num_rows > 0`` — never executed. It asserted nothing.
+        Fixed to the plural filename and marked ``@ml``, because real pairs require
+        the embedder (da#309).
         """
         rows = [
             _make_hadith("z-id", "Actions are judged by intentions"),
             _make_hadith("a-id", "Actions are judged by intentions"),
         ]
-        write_hadiths(tmp_path / "hadith_test.parquet", rows)
+        write_hadiths(tmp_path / "hadiths_test.parquet", rows)
 
-        # run_dedup will produce empty output when ML deps are absent,
-        # or real pairs when they are present -- either way the schema must match.
         output_path = run_dedup(tmp_path, threshold=0.70)
         assert output_path.exists()
 
         table = pq.read_table(output_path)
         assert table.schema.equals(PARALLEL_LINKS_SCHEMA)
 
-        # When pairs are found, verify canonical ordering.
-        if table.num_rows > 0:
-            ids_a = table.column("hadith_id_a").to_pylist()
-            ids_b = table.column("hadith_id_b").to_pylist()
-            for a, b in zip(ids_a, ids_b):
-                assert a < b, f"Expected {a!r} < {b!r} (canonical ordering)"
+        # Identical matn -> the pair must be found, so the ordering below is reached.
+        assert table.num_rows >= 1
+        ids_a = table.column("hadith_id_a").to_pylist()
+        ids_b = table.column("hadith_id_b").to_pylist()
+        for a, b in zip(ids_a, ids_b):
+            assert a < b, f"Expected {a!r} < {b!r} (canonical ordering)"
 
 
 # ---------------------------------------------------------------------------
@@ -246,18 +252,43 @@ class TestEmbeddingPipeline:
 
         output_path = run_dedup(tmp_path, threshold=0.70)
         table = pq.read_table(output_path)
-        if table.num_rows > 0:
-            cross_flags = table.column("cross_sect").to_pylist()
-            assert any(cross_flags), "Expected at least one cross-sect pair"
+        # Identical matn across corpora: the pair must exist, so the cross-sect
+        # assertion below is reached rather than vacuously skipped (da#309).
+        assert table.num_rows >= 1
+        cross_flags = table.column("cross_sect").to_pylist()
+        assert any(cross_flags), "Expected at least one cross-sect pair"
 
 
 # ---------------------------------------------------------------------------
-# Tests: graceful fallback when ML libs missing
+# Tests: empty inputs
+#
+# There is no longer a "graceful fallback when ML libs are missing": an enabled
+# stage whose declared dep is absent raises (da#309, see test_dedup_fail_loud.py).
+# What remains here are the genuinely-empty-input paths, kept distinct because
+# they are NOT the same condition:
+#   Case A -- no hadith_*.parquet files at all (upstream defect, see below)
+#   Case B -- files present, but no row carries a non-empty English matn
+# Both are @ml: without the embedder the stage exits at the dependency guard
+# before it ever reads its input.
 # ---------------------------------------------------------------------------
-class TestGracefulFallback:
-    def test_empty_output_on_no_texts(self, tmp_path: Path) -> None:
-        # No hadith files -> empty output regardless of ML availability.
+@ml
+class TestEmptyInput:
+    def test_empty_output_on_no_hadith_files(self, tmp_path: Path) -> None:
+        """Case A. Still non-fatal, but no longer conflated with Case B.
+
+        Zero input files means the upstream parse stage produced nothing — an
+        upstream defect rather than a true negative. Making it fatal is a
+        behaviour change tracked as a follow-up, not folded into da#309.
+        """
         path = run_dedup(tmp_path)
         assert path.exists()
-        table = pq.read_table(path)
-        assert table.num_rows == 0
+        assert pq.read_table(path).num_rows == 0
+
+    def test_empty_output_when_no_row_has_english_matn(self, tmp_path: Path) -> None:
+        """Case B: a legitimate empty input for an English-matn semantic detector."""
+        rows = [_make_hadith("h-1", ""), _make_hadith("h-2", "")]
+        write_hadiths(tmp_path / "hadiths_test.parquet", rows)
+
+        path = run_dedup(tmp_path)
+        assert path.exists()
+        assert pq.read_table(path).num_rows == 0

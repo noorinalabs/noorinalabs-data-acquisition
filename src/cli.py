@@ -119,7 +119,12 @@ def _cmd_resolve(
     from pathlib import Path
 
     from src.config import get_settings
-    from src.resolve import EXIT_STOPPED_AT_LIMIT, StopAfterReached
+    from src.resolve import (
+        EXIT_MISSING_DEPENDENCY,
+        EXIT_STOPPED_AT_LIMIT,
+        MissingDependencyError,
+        StopAfterReached,
+    )
     from src.resolve import run_all as resolve_all
 
     settings = get_settings()
@@ -144,6 +149,12 @@ def _cmd_resolve(
         # summary and exit with a status distinct from completion/crash (da#276).
         print(f"\n{stopped.summary()}")
         sys.exit(EXIT_STOPPED_AT_LIMIT)
+    except MissingDependencyError as missing:
+        # An enabled stage is missing a declared dependency. Halt loudly rather
+        # than emit a zero-row output that downstream reads as a true negative
+        # (da#309).
+        print(f"\nERROR: {missing}", file=sys.stderr)
+        sys.exit(EXIT_MISSING_DEPENDENCY)
     total = sum(len(v) for v in results.values())
     print(f"\nResolution complete. {total} output files.")
 
