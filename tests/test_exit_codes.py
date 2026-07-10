@@ -364,37 +364,12 @@ _BINDING_FORMS: dict[str, tuple[str, str]] = {
 }
 
 
-def _bare_int_exits(tree: ast.AST) -> list[tuple[int, int]]:
-    """``(lineno, value)`` for every ``sys.exit(<int literal>)`` where the literal is not ``0``.
-
-    ``@enum.unique`` makes a duplicate *declaration* inexpressible. Nothing makes a
-    duplicate *emission* inexpressible: ``sys.exit(7)`` names no constant, so it is
-    invisible to any name-keyed scan, and the registry would be the whole truth
-    about which codes EXIST while saying nothing about which the process EMITS.
-
-    ``0`` is exempt: it is success, it is not a member (see
-    :data:`~src.exit_codes.RESERVED_BY_RUNTIME`), and there is nothing to name.
-    ``True``/``False`` are ``int`` subclasses and are not exit codes.
-    """
-    found: list[tuple[int, int]] = []
-    for n in ast.walk(tree):
-        if not isinstance(n, ast.Call) or len(n.args) != 1:
-            continue
-        fname = getattr(n.func, "attr", None) or getattr(n.func, "id", None)
-        if fname not in ("exit", "SystemExit"):
-            continue
-        arg = n.args[0]
-        if (
-            isinstance(arg, ast.Constant)
-            and isinstance(arg.value, int)
-            and not isinstance(arg.value, bool)
-            and arg.value != 0
-        ):
-            found.append((n.lineno, arg.value))
-    return found
+def _unnamed_exits(tree: ast.AST) -> list[tuple[int, str]]:
+    """Every exit in *tree* whose argument is not provably a named code."""
+    return [hit for n in ast.walk(tree) for hit in _unnamed_exit_at(n)]
 
 
-def _bare_int_exits_by_scope(tree: ast.AST) -> dict[str, list[int]]:
+def _unnamed_exits_by_scope(tree: ast.AST) -> dict[str, list[str]]:
     """Every bare-int exit in *tree*, attributed to its NEAREST enclosing function.
 
     Do not ask which containers can hold the thing; ask where the thing is.
@@ -427,93 +402,162 @@ def _bare_int_exits_by_scope(tree: ast.AST) -> dict[str, list[int]]:
     owner[tree] = "<module>"
     descend(tree, "<module>")
 
-    found: dict[str, list[int]] = {}
-    for node, value in ((n, v) for n in ast.walk(tree) for _l, v in _bare_int_exits_node(n)):
+    found: dict[str, list[str]] = {}
+    for node, value in ((n, v) for n in ast.walk(tree) for _l, v in _unnamed_exit_at(n)):
         found.setdefault(owner.get(node, "<module>"), []).append(value)
     return found
 
 
-def _bare_int_exits_node(node: ast.AST) -> list[tuple[int, int]]:
-    """The bare-int exit AT this node, if the node itself is one. Never descends."""
+def _exit_arg_is_named(arg: ast.expr) -> bool:
+    """Is this exit argument PROVABLY a named code?
+
+    An ALLOWLIST, not a blacklist, and that inversion is the whole point.
+
+    Enumerating the bad shapes was a hand-maintained list -- the fourth in this
+    PR, after the reserved values, the AST node types, and the permitted bare
+    exits. It shipped blind to ``sys.exit(1 if x else 2)``: a bare integer at
+    runtime, an ``ast.IfExp`` statically, and invisible to a check that looked
+    only for ``ast.Constant``. Extending it to ``IfExp`` would have been the
+    fifth list.
+
+    So: stop asking which shapes are bad; ask which are provably good. Exactly
+    two are.
+
+    * ``Constant 0`` -- success. Not a member, nothing to name.
+    * ``Name`` or ``Attribute`` -- ``EXIT_REFUSED_ROWS``, ``ExitCode.LOAD_FAILED``.
+      The sole-declarer machinery already resolves these against the registry.
+
+    Everything else is an offender, **including shapes nobody has thought of**.
+    Fail-closed: a novel shape is refused, not waved through.
+
+    ``bool`` is deliberately NOT permitted, and this is a behaviour change from
+    the blacklist. ``sys.exit(True)`` exits ``1``. It is a bare emission wearing
+    a different type, and under an allowlist it has no business passing.
+
+    Out of reach of ANY static check on the call, and documented rather than
+    chased:
+
+    * ``globals()["EXIT_X"] = 4`` -- the *name* is a string literal.
+    * ``os._exit(3)`` -- a different function entirely; it bypasses ``SystemExit``.
+      Alejandra Reyes-Fuentes flagged it. ``src/`` contains none.
+    """
+    if isinstance(arg, ast.Constant):
+        return arg.value == 0 and not isinstance(arg.value, bool)
+    return isinstance(arg, ast.Name | ast.Attribute)
+
+
+def _unnamed_exit_at(node: ast.AST) -> list[tuple[int, str]]:
+    """The unnamed exit AT this node, if the node itself is one. Never descends."""
     if not isinstance(node, ast.Call) or len(node.args) != 1:
         return []
     fname = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
     if fname not in ("exit", "SystemExit"):
         return []
     arg = node.args[0]
-    if (
-        isinstance(arg, ast.Constant)
-        and isinstance(arg.value, int)
-        and not isinstance(arg.value, bool)
-        and arg.value != 0
-    ):
-        return [(node.lineno, arg.value)]
-    return []
+    if _exit_arg_is_named(arg):
+        return []
+    return [(node.lineno, ast.unparse(arg))]
 
 
-class TestNoBareIntegerExit:
+class TestNoUnnamedExit:
     """A registry of which codes EXIST says nothing about which the process EMITS.
 
     `sys.exit(7)` names no constant. It is invisible to the sole-declarer scan,
-    to `@enum.unique`, and to `__new__`. This guard is what makes a duplicate
-    *emission* inexpressible, and it is what retires a documented bare literal by
-    construction rather than by comment.
+    to `@enum.unique`, and to `__new__`. This guard is what makes an unnamed
+    *emission* inexpressible.
+
+    It is an ALLOWLIST. Blacklisting the bad shapes shipped blind to
+    `sys.exit(1 if x else 2)` -- a bare integer at runtime and an `ast.IfExp`
+    statically. Extending the list to `IfExp` would have been the fifth
+    hand-maintained list in this PR. Ask which arguments are provably good
+    instead, and there are exactly two kinds.
     """
 
-    def test_a_bare_nonzero_int_exit_is_detected(self) -> None:
-        found = _bare_int_exits(ast.parse("import sys\n\nsys.exit(7)"))
-        assert found == [(3, 7)]
+    PERMITTED = ["sys.exit(0)", "sys.exit(ExitCode.LOAD_FAILED)", "sys.exit(EXIT_REFUSED_ROWS)"]
+    OFFENDING = [
+        "sys.exit(3)",
+        "raise SystemExit(4)",
+        "sys.exit(1 if x else 2)",  # ast.IfExp -- the shape the blacklist missed
+        "sys.exit(int(cfg))",  # ast.Call
+        "sys.exit(codes[0])",  # ast.Subscript
+        "sys.exit(base + 1)",  # ast.BinOp
+        "sys.exit(True)",  # bool is an int subclass; exits 1
+    ]
 
-    def test_exit_zero_is_allowed(self) -> None:
-        """`0` is success; it is not a member and there is nothing to name."""
-        assert _bare_int_exits(ast.parse("import sys\n\nsys.exit(0)")) == []
+    @pytest.mark.parametrize("source", PERMITTED)
+    def test_a_named_code_or_zero_is_permitted(self, source: str) -> None:
+        assert _unnamed_exits(ast.parse(source)) == [], source
 
-    def test_a_registry_member_is_allowed(self) -> None:
-        """The whole point: name the code, do not spell its value."""
-        assert _bare_int_exits(ast.parse("sys.exit(ExitCode.LOAD_FAILED)")) == []
-        assert _bare_int_exits(ast.parse("sys.exit(EXIT_REFUSED_ROWS)")) == []
+    @pytest.mark.parametrize("source", OFFENDING)
+    def test_everything_else_is_an_offender(self, source: str) -> None:
+        """Fail-closed: a novel argument shape is refused, not waved through.
 
-    def test_raise_systemexit_with_a_literal_is_detected(self) -> None:
-        """`raise SystemExit(1)` is the same emission through another door."""
-        assert _bare_int_exits(ast.parse("raise SystemExit(1)")) == [(1, 1)]
+        Four of these seven are shapes no blacklist in this PR ever enumerated.
+        """
+        assert _unnamed_exits(ast.parse(source)) != [], source
 
-    def test_a_bool_is_not_an_exit_code(self) -> None:
-        """`bool` is an `int` subclass. `sys.exit(True)` is not a code claim."""
-        assert _bare_int_exits(ast.parse("sys.exit(True)")) == []
+    def test_the_allowlist_is_not_vacuous(self) -> None:
+        """INSTRUMENT GUARD. A detector that flags everything is not a detector.
 
-    def test_the_live_tree_has_exactly_one_bare_exit_and_da372_owns_it(self) -> None:
+        Both halves must be non-empty, or one of the two lists above is proving
+        nothing: an allowlist that permits nothing reds on the whole tree, and one
+        that permits everything reds on none of it.
+        """
+        assert self.PERMITTED and self.OFFENDING
+        permitted_hits = [s for s in self.PERMITTED if _unnamed_exits(ast.parse(s))]
+        offending_misses = [s for s in self.OFFENDING if not _unnamed_exits(ast.parse(s))]
+        assert not permitted_hits, f"allowlist too tight: {permitted_hits}"
+        assert not offending_misses, f"allowlist too loose: {offending_misses}"
+
+    def test_a_call_that_is_not_an_exit_is_ignored(self) -> None:
+        """`os._exit(3)` is a DIFFERENT FUNCTION and bypasses `SystemExit`.
+
+        Out of reach of any check on `sys.exit`/`SystemExit`, documented rather
+        than chased -- as with `globals()["EXIT_X"] = 4`, where the name itself is
+        a string literal. `src/` contains neither.
+        """
+        assert _unnamed_exits(ast.parse("os._exit(3)")) == []
+        assert _unnamed_exits(ast.parse("print(3)")) == []
+
+    def test_the_live_tree_has_exactly_two_unnamed_exits_and_neither_is_mine(self) -> None:
         """The whole of `src/`, attributed by scope, not by line number.
 
-        `@enum.unique` makes a duplicate DECLARATION inexpressible; this makes a
-        duplicate EMISSION inexpressible. A new `sys.exit(7)` anywhere reds here
-        immediately -- including in an `async def` and at module scope, which the
-        first version of this test could not see.
+        TRANSITIONAL, AND SELF-EXPIRING. Two unnamed exits survive, neither
+        this PR's to fix, and both PINNED rather than exempted:
 
-        TRANSITIONAL, AND SELF-EXPIRING. One bare literal survives at this head:
-        `_cmd_load`'s findings exit. It is da#372's diff (da#384 Amendment I) and
-        must not be touched here. So this test PINS it rather than exempting it:
+        * `_cmd_load`'s findings exit -- `sys.exit(1)`. It is da#372's diff
+          (da#384 Amendment I) and must not be touched here.
+        * `src/tools/duck.py`'s `raise SystemExit(main())` -- a Call argument.
+          `duck` is a SEPARATE program (`python -m src.tools.duck`); the
+          `isnad-ingest` entry point is `src.cli:main`. Its `main()` returns `0`
+          on all three paths, so it emits only `0` today -- but the allowlist
+          cannot know that, and fail-closed is the direction that survives review.
+          Routing it through the registry deletes this entry.
 
-        * a NEW bare-int exit anywhere -> RED, because the set grows;
-        * da#372 routing `_cmd_load` -> RED, because the set empties.
+        The pin reds in BOTH directions, which is what makes it a deadline rather
+        than an exemption list:
 
-        The second is the point. When da#372 lands this fails, and whoever rebases
-        must replace it with `assert not offenders`. A guard that quietly tolerates
-        its exception forever is the hand-maintained list this registry exists to
-        abolish. This one deletes itself.
+        * a NEW unnamed exit anywhere -> RED, the set grows;
+        * either of these two routed -> RED, the set shrinks.
+
+        Neither can be left behind. When one is fixed this test fails and names
+        its own edit. A guard that quietly tolerates its exception forever is the
+        hand-maintained list this registry exists to abolish.
         """
-        offenders: dict[str, list[int]] = {}
+        offenders: dict[str, list[str]] = {}
         for py in sorted(_src_root().rglob("*.py")):
-            for scope, values in _bare_int_exits_by_scope(
+            for scope, values in _unnamed_exits_by_scope(
                 ast.parse(py.read_text(encoding="utf-8"))
             ).items():
                 offenders.setdefault(scope, []).extend(values)
 
-        assert offenders == {"_cmd_load": [1]}, (
-            "the bare-integer-exit set changed.\n"
+        assert offenders == {"_cmd_load": ["1"], "<module>": ["main()"]}, (
+            "the unnamed-exit set changed.\n"
             f"  found: {offenders}\n"
-            "  If da#372 has landed and _cmd_load now exits VALIDATION_FINDINGS, this\n"
-            "  test has done its job: replace it with `assert not offenders`.\n"
-            "  If something NEW exits a bare int: name the code in src/exit_codes.py."
+            "  If da#372 routed _cmd_load, or duck.py's entry point was routed,\n"
+            "  this test has done its job: drop that entry, and when the dict is\n"
+            "  empty replace the whole assertion with `assert not offenders`.\n"
+            "  If something NEW exits unnamed: name the code in src/exit_codes.py."
         )
 
     def test_the_scope_walk_sees_async_and_module_scope(self) -> None:
@@ -523,25 +567,15 @@ class TestNoBareIntegerExit:
         satisfied by a neighbouring statement.
         """
         cases = {
-            "def f():\n    sys.exit(7)": {"f": [7]},
-            "async def f():\n    sys.exit(7)": {"f": [7]},
-            "sys.exit(7)": {"<module>": [7]},
-            "class C:\n    def m(self):\n        sys.exit(7)": {"m": [7]},
+            "def f():\n    sys.exit(7)": {"f": ["7"]},
+            "async def f():\n    sys.exit(7)": {"f": ["7"]},
+            "sys.exit(7)": {"<module>": ["7"]},
+            "class C:\n    def m(self):\n        sys.exit(7)": {"m": ["7"]},
             # An exit in a nested function belongs to the INNER function, once.
-            "def outer():\n    def inner():\n        sys.exit(7)": {"inner": [7]},
+            "def outer():\n    def inner():\n        sys.exit(7)": {"inner": ["7"]},
         }
         for source, expected in cases.items():
-            assert _bare_int_exits_by_scope(ast.parse(source)) == expected, source
-
-    def test_the_detector_is_not_vacuous(self) -> None:
-        """INSTRUMENT GUARD. A detector that finds nothing is not a clean tree.
-
-        Each source below binds exactly one exit call, so a hit cannot be
-        attributed to a neighbouring statement.
-        """
-        for src, expected in (("sys.exit(1)", 1), ("sys.exit(6)", 6), ("sys.exit(255)", 255)):
-            got = _bare_int_exits(ast.parse(src))
-            assert [v for _, v in got] == [expected], f"{src!r} -> {got}"
+            assert _unnamed_exits_by_scope(ast.parse(source)) == expected, source
 
 
 class TestTheScanSeesEveryBindingForm:
