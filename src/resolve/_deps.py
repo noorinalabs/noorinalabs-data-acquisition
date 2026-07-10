@@ -26,17 +26,14 @@ from __future__ import annotations
 import importlib
 from collections.abc import Iterable, Sequence
 
+from src.exit_codes import EXIT_MISSING_DEPENDENCY
+
 __all__ = [
     "EXIT_MISSING_DEPENDENCY",
     "MissingDependencyError",
     "missing_dependencies",
     "require_dependencies",
 ]
-
-#: Process exit status the CLI returns when an enabled stage is missing a declared
-#: dependency. Distinct from ``EXIT_STOPPED_AT_LIMIT`` (3) so an operator — or a
-#: wrapping script — can tell an environment defect from a bounded partial run.
-EXIT_MISSING_DEPENDENCY = 4
 
 
 class MissingDependencyError(BaseException):
