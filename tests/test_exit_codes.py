@@ -409,41 +409,58 @@ def _unnamed_exits_by_scope(tree: ast.AST) -> dict[str, list[str]]:
 
 
 def _exit_arg_is_named(arg: ast.expr) -> bool:
-    """Is this exit argument PROVABLY a named code?
+    """Is this exit argument PROVABLY a code the registry names?
 
-    An ALLOWLIST, not a blacklist, and that inversion is the whole point.
+    An ALLOWLIST, and it asks the **registry**, not the syntax.
 
-    Enumerating the bad shapes was a hand-maintained list -- the fourth in this
-    PR, after the reserved values, the AST node types, and the permitted bare
-    exits. It shipped blind to ``sys.exit(1 if x else 2)``: a bare integer at
-    runtime, an ``ast.IfExp`` statically, and invisible to a check that looked
-    only for ``ast.Constant``. Extending it to ``IfExp`` would have been the
-    fifth list.
+    Enumerating the bad shapes was a hand-maintained list, and it shipped blind to
+    ``sys.exit(1 if x else 2)`` -- a bare integer at runtime, an ``ast.IfExp``
+    statically. Adding ``IfExp`` would have been the next list.
 
-    So: stop asking which shapes are bad; ask which are provably good. Exactly
-    two are.
+    But a first inversion -- *permit any ``Name`` or ``Attribute``* -- is also
+    incomplete, and this is the correction Alejandra Reyes-Fuentes' argument
+    forces even though her counterexample did not::
 
-    * ``Constant 0`` -- success. Not a member, nothing to name.
-    * ``Name`` or ``Attribute`` -- ``EXIT_REFUSED_ROWS``, ``ExitCode.LOAD_FAILED``.
-      The sole-declarer machinery already resolves these against the registry.
+        x = 7
+        sys.exit(x)        # a Name. A bare integer reaches the OS.
+        sys.exit(Other.THING)   # an Attribute of some other enum entirely
 
-    Everything else is an offender, **including shapes nobody has thought of**.
+    Permitting a bare `Name` is permitting *any* value, so the guard would have
+    said nothing about the one thing it exists to say. Three shapes are provably
+    named, and each is checked **against the registry**:
+
+    * ``Constant 0`` -- success; not a member, nothing to name.
+    * a ``Name`` that is an ``EXIT_*`` alias or a registry member name.
+    * an ``Attribute`` ``ExitCode.<MEMBER>``, resolved through ``__members__``.
+
+    Everything else offends, **including shapes nobody has conceived of**.
     Fail-closed: a novel shape is refused, not waved through.
 
-    ``bool`` is deliberately NOT permitted, and this is a behaviour change from
-    the blacklist. ``sys.exit(True)`` exits ``1``. It is a bare emission wearing
-    a different type, and under an allowlist it has no business passing.
+    What this is NOT: a decision procedure for *"does this call site emit a bare
+    integer at runtime."* That question is undecidable statically -- ``sys.exit(rc)``
+    may or may not, and ``SystemExit(main())`` depends on ``main``. This guard
+    answers a decidable question instead: *"is the emitted code named by the
+    registry, right here, where a reader can see it."* An unnamed code is refused
+    whether or not it would have been correct. That is the property the registry
+    exists to enforce, and it is the one worth enforcing.
 
-    Out of reach of ANY static check on the call, and documented rather than
-    chased:
+    Out of reach of ANY static check on the call, documented rather than chased:
 
     * ``globals()["EXIT_X"] = 4`` -- the *name* is a string literal.
-    * ``os._exit(3)`` -- a different function entirely; it bypasses ``SystemExit``.
-      Alejandra Reyes-Fuentes flagged it. ``src/`` contains none.
+    * ``os._exit(3)`` -- a different function; it bypasses ``SystemExit`` entirely.
+      Alejandra flagged it; ``src/`` contains none.
     """
     if isinstance(arg, ast.Constant):
         return arg.value == 0 and not isinstance(arg.value, bool)
-    return isinstance(arg, ast.Name | ast.Attribute)
+    if isinstance(arg, ast.Name):
+        return _is_exit_name(arg.id)
+    if isinstance(arg, ast.Attribute):
+        return (
+            isinstance(arg.value, ast.Name)
+            and arg.value.id == ExitCode.__name__
+            and arg.attr in ExitCode.__members__
+        )
+    return False
 
 
 def _unnamed_exit_at(node: ast.AST) -> list[tuple[int, str]]:
@@ -473,7 +490,12 @@ class TestNoUnnamedExit:
     instead, and there are exactly two kinds.
     """
 
-    PERMITTED = ["sys.exit(0)", "sys.exit(ExitCode.LOAD_FAILED)", "sys.exit(EXIT_REFUSED_ROWS)"]
+    PERMITTED = [
+        "sys.exit(0)",
+        "sys.exit(ExitCode.LOAD_FAILED)",
+        "sys.exit(EXIT_REFUSED_ROWS)",
+        "sys.exit(EXIT_STOPPED_AT_LIMIT)",  # the alias src/cli.py actually uses
+    ]
     OFFENDING = [
         "sys.exit(3)",
         "raise SystemExit(4)",
@@ -482,6 +504,8 @@ class TestNoUnnamedExit:
         "sys.exit(codes[0])",  # ast.Subscript
         "sys.exit(base + 1)",  # ast.BinOp
         "sys.exit(True)",  # bool is an int subclass; exits 1
+        "sys.exit(rc)",  # a Name the registry does not name
+        "sys.exit(Other.THING)",  # an Attribute of some other enum
     ]
 
     @pytest.mark.parametrize("source", PERMITTED)
