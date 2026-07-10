@@ -784,46 +784,60 @@ def test_truncated_residue_blocked_via_canonical_fold_not_string_equality(tmp_pa
 # (`ابو عمرو` at mc=899, `عبد الله بن محمد العدوي` at mc=1,194). Leak that cut and the
 # whole tree stays green. A rule whose deletion no test notices is not under test.
 #
-# PROVENANCE — every row, stated individually.
+# PROVENANCE — every row, stated individually, with the id it came from.
 #
-# An earlier version of this block named the Thawban row as "the one fixture not drawn
-# from an artifact on disk." That was false, and the falsehood was created BY the label:
-# naming one exception silently certifies every row you did not name, and one of the
-# rows I did not name is also not on disk. A partial honesty label is worse than none.
-# It is the same defect as a claim about a set written while looking at one member.
+# This block has been wrong twice, in opposite directions, and both errors were the same
+# error: a claim about a SET, written while looking at one MEMBER.
 #
-# Measured over every `name_ar` / `name_ar_normalized` / `name_raw` / `name_normalized`
-# in all three `narrators_bio_*` and both `narrator_mentions_*` tables — 6,141,818
-# values, compared under `normalize_arabic`. The scan asserts it can find a value known
-# to be present before any zero is believed, so the zeros below are measurements and not
-# blindness (`feedback_silent_zero_is_not_a_measurement`).
+#   1. It first named the Thawban row as "the one fixture not drawn from an artifact on
+#      disk." Naming one exception silently certifies every row you did not name.
+#   2. Correcting that, it then listed `عاءشه زوج النبي` as NOT on disk. It IS on disk.
+#      My scan covered only `narrators_bio_*` and `narrator_mentions_*` — it never opened
+#      `narrator_aliases_itqan.parquet` or `narrators_canonical.parquet`. Worse, its
+#      instrument guard passed, because the control value I chose lived INSIDE the subset
+#      I was already searching. A control cannot detect an omitted scope if it is drawn
+#      from the scope you did not omit.
 #
-# ATTESTED ON DISK — verbatim, with the row they came from:
-#   `أبو عمرو الذي`                  itqan:45083   narrators_bio_itqan.parquet
-#   `عبد الله بن محمد العدوي يقال`   itqan:47593   narrators_bio_itqan.parquet
-#   `أبو نصر الذي`                   itqan:47050   narrators_bio_itqan.parquet
-#   `ابو محمد بصري عن محمد بن علي`   itqan:49877   narrators_bio_itqan.parquet
+# Re-measured across every name-bearing column of all 21 live `data/staging` +
+# `data/curated` parquet files (`name_ar`, `name_ar_normalized`, `name_raw`,
+# `name_normalized`, `alias`, `alias_normalized`, `canonical_name_ar_normalized`,
+# `aliases`) — 14,485,736 cells, compared under `normalize_arabic`. The control is now
+# read from `narrator_aliases_itqan.parquet`, a file the previous scan never opened, so
+# it can fail on scope omission and not merely on a broken matcher.
 #
-# NOT ON DISK — zero hits across all 6,141,818 values. Each pins a REACHABLE path with
-# no current instance; neither pins an unreachable branch, and neither is evidence that
-# production exercises its cut today:
-#   `عاءشه زوج النبي` — the Prophet-apposition cut (da#311). Plain Arabic, so it is
-#       reachable through `bio_promote` trivially; the corpus simply has no such row.
-#   `Thawban:The Messenger…` — the colon-prose cut (da#253), quoted verbatim from
-#       `clean_narrator_name`'s own docstring.
+# ATTESTED ON DISK — all five Arabic rows:
+#   `أبو عمرو الذي`                  itqan:45083   narrators_bio_itqan (name_ar)
+#   `عبد الله بن محمد العدوي يقال`   itqan:47593   narrators_bio_itqan (name_ar)
+#   `أبو نصر الذي`                   itqan:47050   narrators_bio_itqan (name_ar)
+#   `ابو محمد بصري عن محمد بن علي`   itqan:49877   narrators_bio_itqan (name_ar)
+#   `عاءشه زوج النبي`                itqan:342     narrator_aliases_itqan (alias
+#       `عائشة زوج النبي`), and surviving into narrators_canonical.aliases. It is an
+#       alias of `عاءشه بنت ابي بكر الصديق` — a real, canonical, on-disk narrator name.
 #
-#       This one is worth stating precisely, because the obvious argument for it is
-#       wrong. It is NOT true that `cleaner_removed_content` can only see Arabic and so
-#       merely pins an exported contract. Its ONLY caller is `bio_promote`, which passes
-#       `name_ar_normalized` verbatim (`bio_promote.py:168`), and that field is not
-#       Arabic-only: 24,326 / 24,326 kaggle bio rows carry Latin script
-#       (`Prophet Muhammad(saw) ( محمد …`), and 0 contain a colon. The colon-join is
-#       absent from the CORPUS, not excluded by the caller's TYPE. One colon-joined
-#       kaggle row and this cut fires in production, through the only call site there is.
+# NOT ON DISK — one row, `Thawban:The Messenger…`, the colon-prose cut (da#253), quoted
+# verbatim from `clean_narrator_name`'s own docstring.
+#
+#   State the zero precisely, because the obvious phrasing is false. It is NOT true that
+#   no name field contains a colon: 6,814 rows do (5,383 itqan bio, 1,426 sanadset
+#   mentions, 5 lk), and they are `، ويقال :` variant-name lists. The true claim is about
+#   the CUT, not the character — `_truncate_colon_prose` requires a colon whose following
+#   segment opens with an English non-name leader, and it fires on **0 of 140,174** bio
+#   rows. The detector was checked against the fixture before that zero was believed.
+#
+#   A reviewer auditing "zero hits" by grepping for `:` finds 6,814 and concludes the
+#   comment lied. A true conclusion resting on a false premise destroys the credibility
+#   of the thing it was defending, and this block's whole job is to be believed.
+#
+#   Nor is the fixture merely a contract guard. `cleaner_removed_content`'s ONLY caller is
+#   `bio_promote`, which passes `name_ar_normalized` verbatim (`bio_promote.py:168`), and
+#   that field is not Arabic-only: 24,326 / 24,326 kaggle bio rows carry Latin script
+#   (`Prophet Muhammad(saw) ( محمد …`). The colon-join is absent from the CORPUS, not
+#   excluded by the caller's TYPE. One colon-joined kaggle row and this cut fires in
+#   production, through the only call site there is.
 #
 # "No artifact DOES produce it" and "no artifact CAN produce it" are different sentences.
 # Only the second makes an assertion inert (`feedback_fixture_makes_guard_assertion_inert`,
-# fifth mode). Both rows above are the first sentence, not the second.
+# fifth mode). The Thawban row is the first sentence, not the second.
 @pytest.mark.parametrize(
     ("raw", "expected_cleaned", "cut"),
     [
@@ -839,7 +853,7 @@ def test_truncated_residue_blocked_via_canonical_fold_not_string_equality(tmp_pa
             "Thawban",
             "colon-joined English matn (da#253); NOT on disk — reachable, no instance",
         ),
-        ("عاءشه زوج النبي", "عاءشه", "Prophet apposition (da#311); NOT on disk — reachable"),
+        ("عاءشه زوج النبي", "عاءشه", "Prophet apposition (da#311); itqan:342, alias"),
         (
             "ابو محمد بصري عن محمد بن علي",
             "ابو محمد بصري",
