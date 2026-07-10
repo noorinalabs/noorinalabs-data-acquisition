@@ -19,68 +19,92 @@ The fix is not to renumber. It is to make a duplicate **inexpressible**:
 every ``EXIT_*`` consumer imports this module. A test that *checks* uniqueness
 is the fallback; the decorator is the mechanism.
 
-What each code means
---------------------
-Each code is defined by **what is on disk when the process exits**. There is no
-"band" claim here, deliberately -- see the warning below.
+What each code means -- a monotone on how much is on disk
+---------------------------------------------------------
+The ordering is **how much is on disk when the process exits, ascending**. Not
+"nothing ran / something ran": that framing produced two false claims in this
+registry's own ruling, one about ``4`` and one about ``1``. A monotone has a fact
+behind it at every value, rather than a story that must hold for every emitter.
 
-==========  ================================================================
-code        meaning
-==========  ================================================================
-``0``       success
-``1``       ``LOAD_FAILED`` -- the load raised; the graph was not fully written
-``2``       argparse's usage error
-``3``       ``STOPPED_AT_LIMIT`` -- a stage stopped at its ``--stop-after`` budget
-``4``       ``MISSING_DEPENDENCY`` -- ``resolve`` aborted at ``run_dedup``'s
-            entry; Steps 1-3.7 ran and their artifacts ARE ON DISK
-``5``       ``VALIDATION_FINDINGS`` -- the stage completed; validation has findings
-``6``       ``REFUSED_ROWS`` -- the load completed having REFUSED input; the
-            graph is incomplete
-==========  ================================================================
+======  =====================  ===================================================
+code    name                   on disk when it fires
+======  =====================  ===================================================
+``1``   ``LOAD_FAILED``        nothing the load would have written
+``2``   *(argparse)*           nothing
+``3``   ``STOPPED_AT_LIMIT``   partial, by request (``--stop-after``)
+``4``   ``MISSING_DEPENDENCY`` prior stages' artifacts (dedup is Step 4)
+``5``   ``VALIDATION_FINDINGS`` the graph, fully written
+``6``   ``REFUSED_ROWS``       the graph, minus the refused rows
+``7``   ``ENRICH_FAILED``      the graph and the manifest, plus a partial enrich
+======  =====================  ===================================================
 
 ``4`` sits nearer ``6`` than to argparse's ``2``. ``MissingDependencyError`` is
 raised at ``run_dedup``'s entry, and dedup is **Step 4** of ``run_all``: NER,
 disambiguation, bio-promotion, fuzzy clustering, same-name split, date
 reconciliation and the ṭabaqa fallback have all already run, and Step 3 has
 already written ``narrators_canonical.parquet``. The error subclasses
-``BaseException`` precisely so it escapes those stages' handlers. The stage-entry
-comment saying "before any input is read" is true of *dedup*, not of *resolve*.
+``BaseException`` precisely so it escapes those stages' handlers.
 
-.. warning::
+``7`` exists because **a failed enrich is not a failed load.** ``_cmd_enrich``
+runs after ``_cmd_load`` has committed the graph, the manifest and the audit
+entry. Routing it to :attr:`ExitCode.LOAD_FAILED` would have made this module
+*assert* that falsehood — and a bare ``1`` claims nothing, while a registry
+constant claims something and invites citation. Laundering a wrong code through
+the registry does not make it right; it makes it citable.
 
-   **``1`` is NOT a "nothing ran" band, and an earlier draft of this table said
-   it was.** The claim was generalized from ``_check_neo4j``'s call site, where
-   *"the load did not happen; nothing was written"* is locally true. It is not
-   true of the code. ``_cmd_enrich`` (``src/cli.py``) still exits a bare ``1``
-   **after** ``_cmd_load`` has committed the graph, written the manifest and
-   written the audit entry -- so ``isnad-ingest pipeline`` exiting ``1``
-   routinely means a fully-loaded graph plus a failed enrich.
+.. note::
 
-   This is the same error as the "before any input is read" one above, one code
-   over: **a comment that is true at one call site is not a specification of the
-   code it returns.** Both are recorded rather than quietly corrected, in the
-   artifact whose entire purpose is to stop people reasoning from a neighbouring
-   constant.
+   **Two false claims are recorded here rather than quietly corrected**, because
+   both were made in the artifact whose purpose is to stop people reasoning from
+   a neighbouring constant, and both had the same mechanism:
+
+   * ``run_dedup``'s *"checked at stage entry, before any input is read"* is true
+     of **dedup**; it was generalized to **resolve**, making ``4`` look like a
+     "nothing ran" code.
+   * ``_check_neo4j``'s *"the load did not happen"* is true of **that call
+     site**; it was generalized into a band table row, making ``1`` look like a
+     "nothing ran" band while ``_cmd_enrich`` still exited ``1`` from a fully
+     committed graph.
+
+   **A comment true at one call site is not a specification of the code it
+   returns.** ``1`` is true again now — not by rewording the row, but by giving
+   ``_cmd_enrich`` a code of its own.
 
 Call sites still emitting a bare integer
 ----------------------------------------
-The registry is only the whole truth if nothing exits a bare literal. One
-remains:
+One remains, and it is deliberately not this PR's to fix:
 
-* ``src/cli.py`` ``_cmd_enrich`` -- ``sys.exit(1)`` when ``summary.steps_failed``.
-  It runs *after* the load committed, so it is neither :attr:`ExitCode.LOAD_FAILED`
-  ("the load raised; nothing was written") nor :attr:`ExitCode.VALIDATION_FINDINGS`
-  ("the stage completed; validation has findings"). It needs a member of its own
-  (an ``ENRICH_FAILED``), and **assigning a value is the da#384 ruling's call, not
-  the implementer's** -- taking one here is precisely the "reasoned from a
-  neighbouring constant" move this module exists to prevent. It is also half of
-  the ``rc=1`` invariant leak, which is deliberately NOT in this issue's scope
-  (da#384 §5) and remains a blocker on da#372.
+* ``src/cli.py`` ``_cmd_load``, on ``not summary.validation_passed`` -- a findings
+  condition mis-emitting ``1``. It belongs to da#372, which owns ``_cmd_load``'s
+  exit codes and whose reviewers' verdicts hang on that diff (da#384 Amendment I).
+
+Once it moves to :attr:`ExitCode.VALIDATION_FINDINGS`, the only emitters of ``1``
+are ``_check_neo4j`` (fires before the load; nothing written) and ``_cmd_load``'s
+genuine failure path. Both mean the load did not happen, which is what makes
+``rc=1 implies an unwritten manifest`` true for ``load`` *and* for ``pipeline``.
+
+**This registry cannot fix a control-flow defect.** ``rc=1`` remains reachable
+from a *committed* load because ``save_manifest``/``create_audit_entry``/
+``write_audit_entry`` sit outside ``_cmd_load``'s ``try`` and ``main()`` has no
+top-level handler. That is Ivana Horvat's blocker on da#372, not a numbering
+question, and da#384 does not close it.
 
 ``0`` and ``2`` are NOT members: ``0`` is the absence of an error and ``2``
 belongs to ``argparse``. Neither is ours to declare. :data:`RESERVED_BY_RUNTIME`
 holds them, and :meth:`ExitCode.__new__` raises if a member claims one -- a test
 would be the fallback, not the mechanism.
+
+Scope of the sole-declarer guard
+--------------------------------
+``tests/test_exit_codes.py`` proves no module outside this one *declares* an
+exit-code name. It cannot see a **second** ``IntEnum`` whose members carry
+neither an ``EXIT_`` prefix nor a registry member name::
+
+    class OtherExit(enum.IntEnum):
+        SOMETHING_ELSE = 4          # invisible to the scan AND to @enum.unique
+
+The registry owns the space by convention there, not by mechanism. Cheap to say;
+expensive to discover.
 """
 
 from __future__ import annotations
@@ -88,6 +112,7 @@ from __future__ import annotations
 import enum
 
 __all__ = [
+    "EXIT_ENRICH_FAILED",
     "EXIT_LOAD_FAILED",
     "EXIT_MISSING_DEPENDENCY",
     "EXIT_REFUSED_ROWS",
@@ -111,11 +136,15 @@ class ExitCode(enum.IntEnum):
     be a no-op rather than an error. With it, the duplicate raises ``ValueError``
     **when this module is imported** -- and every ``EXIT_*`` consumer imports it.
 
-    Note the precise claim. ``src/cli.py`` imports ``src.resolve`` and
-    ``src.graph`` lazily, inside command functions, so absent an eager import a
-    duplicate would surface on first use of the offending command rather than at
-    process start. Pytest collection imports this module, so CI catches it either
-    way. "At import time" is the same imprecision this registry exists to remove.
+    Note the precise claim, and note that it CHANGED in the commit that added it.
+    ``src/cli.py`` imports this module eagerly, at module scope, so **every CLI
+    invocation raises on a duplicate** -- ``isnad-ingest --help`` included. An
+    earlier draft of this docstring hedged that "absent an eager import a
+    duplicate would surface on first use of the offending command"; the same
+    commit added that import and falsified the hedge. It understated the
+    guarantee, which is the safe direction and therefore the one that survives
+    review unchallenged. Pytest collection imports the module too, so CI catches
+    a duplicate independently of the CLI.
 
     ``__new__`` is the second half of the same posture. ``@enum.unique`` rejects a
     duplicate value *among members*; it has no opinion whatever about ``0`` or
@@ -170,11 +199,20 @@ class ExitCode(enum.IntEnum):
     the same mistake as ``total_skipped`` blending refusals with deliberate skips.
     """
 
+    ENRICH_FAILED = 7
+    """The enrich stage failed. The graph, manifest and audit entry are written (da#384).
+
+    A failed enrich is NOT a failed load. `_cmd_enrich` runs after `_cmd_load`
+    committed everything it writes, so this cannot be `LOAD_FAILED` without the
+    registry asserting a falsehood about on-disk state.
+    """
+
 
 # Module-level aliases. Consumers may import either the enum or these names; the
 # alias form keeps a migrating call site to an *import-site* change rather than a
 # value change, which is what lets an already-approved PR rebase without
 # invalidating its approvals.
+EXIT_ENRICH_FAILED = ExitCode.ENRICH_FAILED
 EXIT_LOAD_FAILED = ExitCode.LOAD_FAILED
 EXIT_STOPPED_AT_LIMIT = ExitCode.STOPPED_AT_LIMIT
 EXIT_MISSING_DEPENDENCY = ExitCode.MISSING_DEPENDENCY

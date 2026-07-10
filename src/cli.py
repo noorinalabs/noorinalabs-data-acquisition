@@ -261,12 +261,12 @@ def _cmd_load(
             print(f"  [{vr.status}] {vr.query_name}: {vr.details}")
         warned = [vr for vr in summary.validation_results if vr.warning]
         if not summary.validation_passed:
-            # The load is committed; this reports on the graph it wrote. A
-            # findings condition mis-emitting LOAD_FAILED is the bug (da#384 §4 /
-            # Amendment G) -- correcting a call site is not renumbering. The
-            # wider `rc=1` invariant leak stays da#372's blocker.
+            # NOT routed here on purpose (da#384 Amendment I). `_cmd_load`'s exit
+            # codes are da#372's diff and its reviewers' verdicts hang on it.
+            # This is a findings condition mis-emitting 1, and da#372 moves it to
+            # ExitCode.VALIDATION_FINDINGS.
             print("\nWARNING: Some validation checks failed.")
-            sys.exit(ExitCode.VALIDATION_FINDINGS)
+            sys.exit(1)
         elif warned:
             # Non-fatal: the load succeeded and no check hard-failed; one or more
             # checks were downgraded (e.g. timed out). da#259.
@@ -461,7 +461,15 @@ def _cmd_enrich(
         )
 
     if summary.steps_failed:
-        sys.exit(1)
+        # The graph, the manifest and the audit entry are all written; the
+
+        # ENRICH stage failed. Not LOAD_FAILED -- a failed enrich is not a
+
+        # failed load, and routing it through the registry would make the
+
+        # registry assert that falsehood authoritatively. da#384 Amendment I.
+
+        sys.exit(ExitCode.ENRICH_FAILED)
 
 
 def _cmd_audit(*, last_n: int = 10) -> None:

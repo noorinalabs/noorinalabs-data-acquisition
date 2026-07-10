@@ -101,23 +101,26 @@ def _is_exit_name(name: str) -> bool:
 
 
 def _exit_name_assignments(tree: ast.AST) -> list[str]:
-    """Every exit-code name assigned anywhere in *tree*, at any nesting depth.
+    """Every exit-code name BOUND anywhere in *tree*, at any nesting depth.
 
-    Matches on the target NAME, so the RHS form is irrelevant: a bare int, an
-    annotated assignment, a ``Final``, a class-body member, or a computed
-    ``_BASE + 1`` are all seen.
+    Does not enumerate the statement types that can bind a name -- it asks Python
+    whether the name is being bound, via ``ast.Name`` with a ``Store`` context.
+    Alejandra Reyes-Fuentes found the enumerating version missed two forms:
+
+        EXIT_A, EXIT_B = 4, 5     # ast.Tuple target, not ast.Name
+        (EXIT_X := 4)             # ast.NamedExpr, neither Assign nor AnnAssign
+
+    The tuple form is the one that matters: it is how somebody declares two codes
+    on one line, and a `4` in it sailed past the guard that exists to catch a `4`.
+
+    Out of reach of ANY name-keyed scan, and deliberately not chased:
+    ``globals()["EXIT_X"] = 4`` -- the name is a string literal.
     """
-    found: list[str] = []
-    for node in ast.walk(tree):
-        targets: list[ast.expr] = []
-        if isinstance(node, ast.Assign):
-            targets = list(node.targets)
-        elif isinstance(node, ast.AnnAssign):
-            targets = [node.target]
-        for t in targets:
-            if isinstance(t, ast.Name) and _is_exit_name(t.id):
-                found.append(t.id)
-    return found
+    return [
+        n.id
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store) and _is_exit_name(n.id)
+    ]
 
 
 def _declarations_outside_registry() -> dict[Path, list[str]]:
@@ -235,6 +238,7 @@ class TestReservedSetIsEnumerated:
             "MISSING_DEPENDENCY": 4,
             "VALIDATION_FINDINGS": 5,
             "REFUSED_ROWS": 6,
+            "ENRICH_FAILED": 7,
         }
 
     def test_the_ruling_table_is_pinned(self) -> None:
@@ -246,6 +250,20 @@ class TestReservedSetIsEnumerated:
         assert ExitCode.MISSING_DEPENDENCY == 4  # da#309, two approvals, unchanged
         assert ExitCode.VALIDATION_FINDINGS == 5  # da#354 moves 4 -> 5
         assert ExitCode.REFUSED_ROWS == 6  # da#359 moves 5 -> 6
+        assert ExitCode.ENRICH_FAILED == 7  # da#384 Amendment I: a failed enrich != a failed load
+
+    def test_the_band_is_a_monotone_on_how_much_is_on_disk(self) -> None:
+        """The codes ascend with what the operator will find written.
+
+        Pinned because the ordering IS the specification: `1` nothing, `4` prior
+        stages' artifacts, `5` the full graph, `6` the graph minus refused rows,
+        `7` the graph plus a partial enrich. The earlier "nothing ran / something
+        ran" framing produced two false rows.
+        """
+        ascending = [c.value for c in sorted(ExitCode, key=lambda c: c.value)]
+        assert ascending == sorted(ascending)
+        assert ExitCode.LOAD_FAILED < ExitCode.MISSING_DEPENDENCY < ExitCode.VALIDATION_FINDINGS
+        assert ExitCode.VALIDATION_FINDINGS < ExitCode.REFUSED_ROWS < ExitCode.ENRICH_FAILED
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +304,63 @@ class TestRegistryIsTheSoleDeclarer:
         # Every member must be visible, not just the one asserted above.
         missing = _registry_member_names() - set(names)
         assert not missing, f"blind to members: {sorted(missing)}"
+
+    def test_every_module_that_names_an_exit_code_resolves_it_to_the_registry(self) -> None:
+        """Sole-DECLARERSHIP is not sole-SOURCE. This asserts the second clause.
+
+        The scan above proves nobody *declares* an `EXIT_*` outside the registry.
+        It says nothing about whether a module that *names* one actually got it
+        from here -- a module could bind the name from anywhere. Today every
+        namer reaches the registry (`_checkpoint` directly; `resolve/__init__`
+        and `cli` transitively), so this passes. The moment `_deps.py` and
+        `graph/__init__.py` arrive on rebase carrying `EXIT_*` names, the gap is
+        live, and this test is what closes it.
+
+        Resolution is through the IMPORT'S SOURCE MODULE at runtime, not through
+        the importing module's namespace: `src/cli.py` imports
+        `EXIT_STOPPED_AT_LIMIT` *inside* `_cmd_resolve`, so the module object
+        never binds it. An earlier version of this test asserted `hasattr(mod,
+        name)` and failed on exactly that -- the test found its own wrong
+        assumption before a reviewer did. A transitive re-export is accepted; a
+        same-named impostor is not, because identity is compared, not the value.
+        """
+        registry = importlib.import_module(ExitCode.__module__)
+        registry_path = _registry_path()
+        checked = 0
+        for py in sorted(_src_root().rglob("*.py")):
+            if py.resolve() == registry_path or py.name == "__main__.py":
+                continue
+            rel = py.resolve().relative_to(_src_root().parent)
+            own_module = str(rel.with_suffix("")).replace("/", ".").removesuffix(".__init__")
+            tree = ast.parse(py.read_text(encoding="utf-8"))
+
+            for node in ast.walk(tree):
+                # An EXIT_* pulled in by name: resolve it in the module it came from.
+                if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                    wanted = [a.name for a in node.names if _is_exit_name(a.name)]
+                    if not wanted:
+                        continue
+                    source = importlib.import_module(node.module)
+                    for name in wanted:
+                        assert getattr(source, name, None) is getattr(registry, name), (
+                            f"{rel}: {name} imported from {node.module} is not the "
+                            f"registry's object"
+                        )
+                        checked += 1
+                # An EXIT_* bound at module scope: resolve it in this module.
+                elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                    if not _is_exit_name(node.id):
+                        continue
+                    mod = importlib.import_module(own_module)
+                    assert getattr(mod, node.id, None) is getattr(registry, node.id), (
+                        f"{rel}: {node.id} does not resolve to the registry's object"
+                    )
+                    checked += 1
+
+        # Instrument guard: a scan that checked nothing is not a scan that found
+        # nothing wrong. At this head `_checkpoint`, `resolve/__init__` and `cli`
+        # all name EXIT_STOPPED_AT_LIMIT.
+        assert checked >= 3, f"only {checked} name(s) checked -- the walk found nothing"
 
     def test_no_module_outside_the_registry_declares_an_exit_code(self) -> None:
         offenders = _declarations_outside_registry()
