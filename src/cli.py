@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import sys
 
+from src.exit_codes import ExitCode
+
 
 def _mask_password(value: str) -> str:
     """Replace all but first and last character with asterisks."""
@@ -29,8 +31,17 @@ def _check_neo4j() -> None:
         driver.verify_connectivity()
         driver.close()
     except Exception as exc:
+        # This helper has FOUR callers (_cmd_load, _cmd_validate,
+        # _cmd_migrate_transmitted_hadith_ids, _cmd_enrich) and knows exactly one
+        # fact, identical at every one of them: the database is not there. It
+        # must not name a stage it cannot know it is in -- it exited LOAD_FAILED,
+        # which was true for one caller of four, and under `pipeline` that meant
+        # rc=1 from a fully committed load (da#384 Amendment R).
+        #
+        # Taking the code as a parameter would not fix this: it would turn the
+        # call sites into a hand-maintained mapping from caller to exit code.
         print(f"ERROR: Cannot connect to Neo4j at {settings.neo4j.uri}: {exc}")
-        sys.exit(1)
+        sys.exit(ExitCode.DB_UNREACHABLE)
     print("  Neo4j is reachable.")
 
 
@@ -255,6 +266,10 @@ def _cmd_load(
             print(f"  [{vr.status}] {vr.query_name}: {vr.details}")
         warned = [vr for vr in summary.validation_results if vr.warning]
         if not summary.validation_passed:
+            # NOT routed here on purpose (da#384 Amendment I). `_cmd_load`'s exit
+            # codes are da#372's diff and its reviewers' verdicts hang on it.
+            # This is a findings condition mis-emitting 1, and da#372 moves it to
+            # ExitCode.VALIDATION_FINDINGS.
             print("\nWARNING: Some validation checks failed.")
             sys.exit(1)
         elif warned:
@@ -299,8 +314,10 @@ def _cmd_validate(*, validation_timeout: float | None = None) -> None:
             warned += 1
 
     if any_fatal:
+        # `validate` only reads the graph. A finding describes the data; it is
+        # not a failure to run (da#384 §4 / Amendment G).
         print("\nWARNING: Some validation checks failed.")
-        sys.exit(1)
+        sys.exit(ExitCode.VALIDATION_FINDINGS)
     elif warned:
         # Timed-out/downgraded checks are non-fatal (da#259).
         print(f"\nValidation OK. {warned} check(s) downgraded to warning.")
@@ -449,7 +466,15 @@ def _cmd_enrich(
         )
 
     if summary.steps_failed:
-        sys.exit(1)
+        # The graph, the manifest and the audit entry are all written; the
+
+        # ENRICH stage failed. Not LOAD_FAILED -- a failed enrich is not a
+
+        # failed load, and routing it through the registry would make the
+
+        # registry assert that falsehood authoritatively. da#384 Amendment I.
+
+        sys.exit(ExitCode.ENRICH_FAILED)
 
 
 def _cmd_audit(*, last_n: int = 10) -> None:
@@ -731,8 +756,12 @@ def main() -> None:
             output_json=output_json,
         )
         if not report.passed and strictness == Strictness.STRICT:
+            # FINDINGS, not a failure to run: `validate-staging` reads the staging
+            # parquets and writes nothing. It exited a bare 1 while `validate`
+            # reports findings with its own code -- da#354's conflation, one
+            # subcommand over (da#384 §4).
             print("\nValidation FAILED in strict mode. Pipeline halted.")
-            sys.exit(1)
+            sys.exit(ExitCode.VALIDATION_FINDINGS)
     elif args.command == "migrate-transmitted-hadith-ids":
         _cmd_migrate_transmitted_hadith_ids(batch_size=args.batch_size)
     elif args.command == "audit":
