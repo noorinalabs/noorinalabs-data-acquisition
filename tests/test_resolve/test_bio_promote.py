@@ -779,28 +779,46 @@ def test_truncated_residue_blocked_via_canonical_fold_not_string_equality(tmp_pa
 # (`ابو عمرو` at mc=899, `عبد الله بن محمد العدوي` at mc=1,194). Leak that cut and the
 # whole tree stays green. A rule whose deletion no test notices is not under test.
 #
-# Provenance of every fixture:
-#   itqan:45083 / itqan:47593 / itqan:47050 — verbatim `name_ar` from
-#       data/staging/narrators_bio_itqan.parquet.
-#   `عاءشه زوج النبي` — the Prophet-apposition cut (da#311).
-#   The Thawban row is the da#253 colon-prose class, quoted verbatim from
-#       `clean_narrator_name`'s own docstring. It is the ONE fixture here not drawn from
-#       an artifact on disk: no bio or mention table in today's staging carries a
-#       colon-joined name (all three `narrators_bio_*` and both
-#       `narrator_mentions_*`: zero hits).
+# PROVENANCE — every row, stated individually.
 #
-#       Be precise about what that costs, because the two possible claims differ
-#       (`feedback_fixture_makes_guard_assertion_inert`, fifth mode):
-#         * It does NOT prove production currently exercises this cut. Nothing on disk
-#           does today.
-#         * It DOES pin a reachable contract. `cleaner_removed_content`'s only caller is
-#           `bio_promote`, which passes `name_ar_normalized` — and that field is NOT
-#           Arabic-only: 24,326 / 24,326 kaggle bio rows carry Latin script. The
-#           colon-join is absent from the corpus, not excluded by the caller's type. One
-#           colon-joined kaggle row and this cut fires in production tomorrow.
-#       So the fixture guards a live path with no current instance, not an unreachable
-#       branch. Those are different claims and the difference is the whole of da#359's
-#       fifth mode.
+# An earlier version of this block named the Thawban row as "the one fixture not drawn
+# from an artifact on disk." That was false, and the falsehood was created BY the label:
+# naming one exception silently certifies every row you did not name, and one of the
+# rows I did not name is also not on disk. A partial honesty label is worse than none.
+# It is the same defect as a claim about a set written while looking at one member.
+#
+# Measured over every `name_ar` / `name_ar_normalized` / `name_raw` / `name_normalized`
+# in all three `narrators_bio_*` and both `narrator_mentions_*` tables — 6,141,818
+# values, compared under `normalize_arabic`. The scan asserts it can find a value known
+# to be present before any zero is believed, so the zeros below are measurements and not
+# blindness (`feedback_silent_zero_is_not_a_measurement`).
+#
+# ATTESTED ON DISK — verbatim, with the row they came from:
+#   `أبو عمرو الذي`                  itqan:45083   narrators_bio_itqan.parquet
+#   `عبد الله بن محمد العدوي يقال`   itqan:47593   narrators_bio_itqan.parquet
+#   `أبو نصر الذي`                   itqan:47050   narrators_bio_itqan.parquet
+#   `ابو محمد بصري عن محمد بن علي`   itqan:49877   narrators_bio_itqan.parquet
+#
+# NOT ON DISK — zero hits across all 6,141,818 values. Each pins a REACHABLE path with
+# no current instance; neither pins an unreachable branch, and neither is evidence that
+# production exercises its cut today:
+#   `عاءشه زوج النبي` — the Prophet-apposition cut (da#311). Plain Arabic, so it is
+#       reachable through `bio_promote` trivially; the corpus simply has no such row.
+#   `Thawban:The Messenger…` — the colon-prose cut (da#253), quoted verbatim from
+#       `clean_narrator_name`'s own docstring.
+#
+#       This one is worth stating precisely, because the obvious argument for it is
+#       wrong. It is NOT true that `cleaner_removed_content` can only see Arabic and so
+#       merely pins an exported contract. Its ONLY caller is `bio_promote`, which passes
+#       `name_ar_normalized` verbatim (`bio_promote.py:168`), and that field is not
+#       Arabic-only: 24,326 / 24,326 kaggle bio rows carry Latin script
+#       (`Prophet Muhammad(saw) ( محمد …`), and 0 contain a colon. The colon-join is
+#       absent from the CORPUS, not excluded by the caller's TYPE. One colon-joined
+#       kaggle row and this cut fires in production, through the only call site there is.
+#
+# "No artifact DOES produce it" and "no artifact CAN produce it" are different sentences.
+# Only the second makes an assertion inert (`feedback_fixture_makes_guard_assertion_inert`,
+# fifth mode). Both rows above are the first sentence, not the second.
 @pytest.mark.parametrize(
     ("raw", "expected_cleaned", "cut"),
     [
@@ -814,13 +832,13 @@ def test_truncated_residue_blocked_via_canonical_fold_not_string_equality(tmp_pa
         (
             "Thawban:The Messenger of Allah (ﷺ) sacrificed during a journey and then",
             "Thawban",
-            "colon-joined English matn (da#253)",
+            "colon-joined English matn (da#253); NOT on disk — reachable, no instance",
         ),
-        ("عاءشه زوج النبي", "عاءشه", "Prophet apposition (da#311)"),
+        ("عاءشه زوج النبي", "عاءشه", "Prophet apposition (da#311); NOT on disk — reachable"),
         (
             "ابو محمد بصري عن محمد بن علي",
             "ابو محمد بصري",
-            "isnad/matn boundary (da#258)",
+            "isnad/matn boundary (da#258); itqan:49877",
         ),
     ],
 )
