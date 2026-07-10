@@ -104,10 +104,19 @@ def _cmd_parse() -> None:
     from pathlib import Path
 
     from src.config import get_settings
+    from src.exit_codes import ExitCode
+    from src.parse import ParseProducerError
     from src.parse import run_all as parse_all
 
     settings = get_settings()
-    results = parse_all(Path(settings.data_raw_dir), Path(settings.data_staging_dir))
+    try:
+        results = parse_all(Path(settings.data_raw_dir), Path(settings.data_staging_dir))
+    except ParseProducerError as defect:
+        # da#386: a producer-defect gate fired. parse must NOT report success and
+        # exit 0 with a stale/partial staging artifact in place — that made da#359's
+        # "re-run parse" remediation a silent no-op. Fail loud with a named code.
+        print(f"\nERROR: {defect}", file=sys.stderr)
+        sys.exit(ExitCode.PARSE_PRODUCER_DEFECT)
     total_files = sum(len(v) for v in results.values())
     print(f"Parsing complete. {total_files} staging files produced.")
 

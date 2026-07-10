@@ -308,6 +308,7 @@ class TestReservedSetIsEnumerated:
             "ENRICH_FAILED": 7,
             "DB_UNREACHABLE": 8,
             "UNROUTED_CORPUS": 9,
+            "PARSE_PRODUCER_DEFECT": 10,
         }
 
     def test_the_ruling_table_is_pinned(self) -> None:
@@ -324,6 +325,9 @@ class TestReservedSetIsEnumerated:
             ExitCode.DB_UNREACHABLE == 8
         )  # da#384 Amendment R: the helper names only what it knows
         assert ExitCode.UNROUTED_CORPUS == 9  # da#369: NER Step-1 abort, next free code
+        assert (
+            ExitCode.PARSE_PRODUCER_DEFECT == 10
+        )  # da#386: parse fails loud on the da#355 gate (9 taken by da#369 UNROUTED_CORPUS)
 
     def test_every_member_documents_what_is_on_disk(self) -> None:
         """The DOCSTRINGS are the specification. There is no ordering claim.
