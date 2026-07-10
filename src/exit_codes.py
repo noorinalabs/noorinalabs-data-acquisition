@@ -74,22 +74,48 @@ already written ``narrators_canonical.parquet``. The error subclasses
 
 Call sites still emitting a bare integer
 ----------------------------------------
-One remains, and it is deliberately not this PR's to fix:
+None. da#372 routed ``_cmd_load``'s findings condition to
+:attr:`ExitCode.VALIDATION_FINDINGS`, and ``TestNoUnnamedExit`` now asserts the
+set is empty rather than pinning a survivor.
 
-* ``src/cli.py`` ``_cmd_load``, on ``not summary.validation_passed`` -- a findings
-  condition mis-emitting ``1``. It belongs to da#372, which owns ``_cmd_load``'s
-  exit codes and whose reviewers' verdicts hang on that diff (da#384 Amendment I).
+Who emits ``1``
+---------------
+Exactly one call site, read from the tree rather than reasoned about::
 
-Once it moves to :attr:`ExitCode.VALIDATION_FINDINGS`, the only emitters of ``1``
-are ``_check_neo4j`` (fires before the load; nothing written) and ``_cmd_load``'s
-genuine failure path. Both mean the load did not happen, which is what makes
-``rc=1 implies an unwritten manifest`` true for ``load`` *and* for ``pipeline``.
+    src/cli.py   sys.exit(ExitCode.LOAD_FAILED)   # _cmd_load, in the except around load_all
 
-**This registry cannot fix a control-flow defect.** ``rc=1`` remains reachable
-from a *committed* load because ``save_manifest``/``create_audit_entry``/
-``write_audit_entry`` sit outside ``_cmd_load``'s ``try`` and ``main()`` has no
-top-level handler. That is Ivana Horvat's blocker on da#372, not a numbering
-question, and da#384 does not close it.
+Named by function and enclosing block, never by line number. The first version of
+this paragraph wrote ``src/cli.py:258`` -- true of the tree the walk ran against,
+false by the time that same commit landed, because rewriting the comment block
+directly above the call moved it six lines down. The call has sat at ``252``,
+``258`` and ``264`` across the three commits of da#372: it drifted at every one.
+
+A line number in prose is a hand-maintained fact about a file, unguarded, in the
+module whose whole argument is that hand-maintained facts rot and that the
+mechanism must be the guard rather than the test. Nothing here can red on a stale
+line number. Nothing should have to.
+
+``_check_neo4j`` is **not** among them; it exits :attr:`ExitCode.DB_UNREACHABLE`
+(da#384 Amendment R). An earlier version of this paragraph named it, which is the
+defect da#392 exists to catch: prose describing a call site it no longer matches.
+
+That single emitter fires from inside ``_cmd_load``'s ``except`` around
+``load_all`` -- before any manifest is written -- so for ``isnad-ingest load``,
+``rc=1 implies an unwritten manifest`` holds.
+
+It does **not** hold for ``isnad-ingest pipeline``. ``pipeline`` runs
+``_cmd_enrich`` after the load has committed, and enrich's audit write sits
+outside any handler while neither ``main()`` nor ``_cmd_pipeline`` has a
+top-level one -- so an escaping exception reaches CPython's default handler and
+exits ``1`` (da#394). ``sys.exit`` is not the only route to a process status, and
+enumerating ``sys.exit`` call sites cannot see the other one.
+
+**This registry cannot fix a control-flow defect.** Ivana Horvat's blocker on
+da#372 -- that ``save_manifest``/``create_audit_entry``/``write_audit_entry`` sat
+outside ``_cmd_load``'s ``try``, so a committed load could exit ``1`` -- was a
+control-flow question, not a numbering one, and da#384 did not close it. da#372
+closes it for ``load`` by wrapping that bookkeeping. da#394 tracks the same shape
+in ``_cmd_enrich``.
 
 ``0`` and ``2`` are NOT members: ``0`` is the absence of an error and ``2``
 belongs to ``argparse``. Neither is ours to declare. :data:`RESERVED_BY_RUNTIME`

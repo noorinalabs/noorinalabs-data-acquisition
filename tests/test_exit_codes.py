@@ -644,37 +644,46 @@ class TestNoUnnamedExit:
         assert _unnamed_exits(ast.parse("os._exit(3)")) == []
         assert _unnamed_exits(ast.parse("print(3)")) == []
 
-    def test_the_live_tree_has_exactly_one_unnamed_exit_and_da372_owns_it(self) -> None:
+    def test_the_live_tree_has_no_unnamed_exit(self) -> None:
         """The whole of `src/`, attributed by scope, not by line number.
 
-        TRANSITIONAL, AND SELF-EXPIRING. One unnamed exit survives -- `_cmd_load`'s
-        findings exit, `sys.exit(1)`. It is da#372's diff (da#384 Amendment I) and
-        must not be touched here. It is PINNED, not exempted:
-
-        * a NEW unnamed exit anywhere -> RED, the set grows;
-        * da#372 routing `_cmd_load` -> RED, the set empties.
-
-        When da#372 lands, this fails and names its own edit. An exception list
-        permits, silently, forever. A pin refuses, loudly, with a deadline.
+        The pin this replaces was TRANSITIONAL AND SELF-EXPIRING. It asserted
+        ``offenders == {"_cmd_load": ["1"]}`` -- one surviving unnamed exit, held
+        for da#372 (da#384 Amendment I) -- and promised to red the moment da#372
+        routed it. da#372 routed it, this reded, and it is renamed in the same
+        commit that falsifies it. An exception list permits, silently, forever. A
+        pin refuses, loudly, with a deadline, and then names its own successor.
 
         `src/tools/duck.py`'s `raise SystemExit(main())` was pinned here until the
         guard learned to follow the value one hop. It is green now, untouched.
         Scoping around it would have been a module list; exempting it, an
         exception list. Following the value is neither.
+
+        **`assert not offenders` is the weakest possible assertion**: an empty set
+        is what a scan that read nothing also produces. Both halves are therefore
+        asserted -- that the walker read the tree, and that it can still see an
+        offender -- so a pass means the tree is clean rather than that the
+        instrument was silent.
         """
         offenders: dict[str, list[str]] = {}
+        scanned = 0
         for py in sorted(_src_root().rglob("*.py")):
+            scanned += 1
             for scope, values in _unnamed_exits_by_scope(
                 ast.parse(py.read_text(encoding="utf-8"))
             ).items():
                 offenders.setdefault(scope, []).extend(values)
 
-        assert offenders == {"_cmd_load": ["1"]}, (
-            "the unnamed-exit set changed.\n"
+        # INSTRUMENT GUARD, half one: the scan actually read a source tree.
+        assert scanned > 20, f"the scan read {scanned} files; `src/` cannot be that small"
+        # INSTRUMENT GUARD, half two: the detector still reds on a planted offender.
+        planted = _unnamed_exits_by_scope(ast.parse("def f():\n    sys.exit(9)\n"))
+        assert planted == {"f": ["9"]}, f"the detector has gone blind; saw {planted}"
+
+        assert not offenders, (
+            "an unnamed exit appeared.\n"
             f"  found: {offenders}\n"
-            "  If da#372 routed _cmd_load, this test has done its job: replace it\n"
-            "  with `assert not offenders`.\n"
-            "  If something NEW exits unnamed: name the code in src/exit_codes.py."
+            "  Name the code in src/exit_codes.py and exit the member, not the int."
         )
 
     def test_the_hop_follows_the_value_into_ducks_real_idiom(self) -> None:

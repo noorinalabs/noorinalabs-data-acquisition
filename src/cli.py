@@ -16,7 +16,7 @@ def _mask_password(value: str) -> str:
 
 
 def _check_neo4j() -> None:
-    """Pre-flight Neo4j connectivity check. Exits with code 1 on failure."""
+    """Pre-flight Neo4j connectivity check. Exits ``ExitCode.DB_UNREACHABLE`` on failure."""
     from neo4j import GraphDatabase
 
     from src.config import get_settings
@@ -168,6 +168,7 @@ def _cmd_load(
 ) -> None:
     """Run the Phase 3 graph loading pipeline."""
     import time
+    import traceback
     from pathlib import Path
 
     from src.config import get_settings
@@ -226,36 +227,83 @@ def _cmd_load(
         else _DEFAULT_VALIDATION_TIMEOUT_SECONDS
     )
 
-    with Neo4jClient() as client:
-        summary = load_all(
-            client,
-            staging_dir,
-            curated_dir,
-            queries_dir,
-            strict=False,
-            skip_validation=skip_validation,
-            nodes_only=nodes_only,
-            skip_files=skipped_files if incremental else None,
-            validation_timeout_seconds=timeout_seconds,
+    try:
+        with Neo4jClient() as client:
+            summary = load_all(
+                client,
+                staging_dir,
+                curated_dir,
+                queries_dir,
+                strict=False,
+                skip_validation=skip_validation,
+                nodes_only=nodes_only,
+                skip_files=skipped_files if incremental else None,
+                validation_timeout_seconds=timeout_seconds,
+            )
+    except Exception:
+        # A genuine load failure (da#354). Exits LOAD_FAILED, distinct from the
+        # code used for validation findings, and reaches neither the manifest
+        # write nor the audit entry below -- a load that raised did not happen.
+        #
+        # That invariant is scoped to `isnad-ingest load`. It does NOT hold for
+        # `isnad-ingest pipeline`, which goes on to run `_cmd_enrich`. Enrich's
+        # own audit write sits outside any handler, and neither `main()` nor
+        # `_cmd_pipeline` has a top-level one, so an escaping exception reaches
+        # CPython's default handler and exits 1 -- long after this load committed
+        # and recorded its manifest. Read rc=1 as "the load did not happen" only
+        # for the `load` command.
+        #
+        # The mechanism, not the number: enrich once exited a bare 1 here, and
+        # now exits ENRICH_FAILED (da#384 Amendment I). The leak outlived its
+        # cause because it was never about enrich's exit code (da#394).
+        traceback.print_exc()
+        print(
+            "\nLOAD FAILED: the graph was not fully written. See traceback above.",
+            file=sys.stderr,
         )
+        sys.exit(ExitCode.LOAD_FAILED)
 
     duration = time.monotonic() - start
 
-    save_manifest(current_manifest, data_dir / LAST_LOADED_MANIFEST_FILENAME)
+    # Post-load bookkeeping. `load_all` returned, so the graph is COMMITTED --
+    # the loaders write per batch with no spanning transaction. A failure to
+    # record the manifest or the audit entry is therefore not a failed load, and
+    # must not exit EXIT_LOAD_FAILED: an rc of 1 *before* the commit is safe to
+    # retry, and an rc of 1 *after* it sends the operator to re-run a load whose
+    # data is already in the graph. Nothing below may raise past this handler --
+    # `main()` has none, so an escaping exception reaches Python's default
+    # handler and exits 1, which is exactly the ambiguity this PR exists to end.
+    #
+    # Bookkeeping failure leaves the rc alone (0, or findings) rather than
+    # claiming a code of its own; the exit-code space is being consolidated into
+    # one registry (da#384) and a new value does not get minted here.
+    try:
+        save_manifest(current_manifest, data_dir / LAST_LOADED_MANIFEST_FILENAME)
 
-    audit = create_audit_entry(
-        "load",
-        duration_seconds=round(duration, 2),
-        files_changed=changed_file_details,
-        rows_affected=summary.total_nodes + summary.total_edges,
-        summary={
-            "total_nodes": summary.total_nodes,
-            "total_edges": summary.total_edges,
-            "incremental": incremental,
-            "files_skipped": len(skipped_files),
-        },
-    )
-    write_audit_entry(data_dir, audit)
+        audit = create_audit_entry(
+            "load",
+            duration_seconds=round(duration, 2),
+            files_changed=changed_file_details,
+            rows_affected=summary.total_nodes + summary.total_edges,
+            summary={
+                "total_nodes": summary.total_nodes,
+                "total_edges": summary.total_edges,
+                "incremental": incremental,
+                "files_skipped": len(skipped_files),
+            },
+        )
+        write_audit_entry(data_dir, audit)
+    except Exception:
+        traceback.print_exc()
+        print(
+            "\nWARNING: the load SUCCEEDED and is committed to the graph, but "
+            "post-load bookkeeping failed (traceback above). The last-loaded "
+            "manifest and/or the audit entry may be missing. Do NOT read this as "
+            "a load failure. A missing last-loaded manifest makes the next "
+            "--incremental load re-load every input, which is safe: every loader "
+            "is an idempotent MERGE.",
+            file=sys.stderr,
+        )
 
     print("\n=== Load Summary ===")
     print(f"  Nodes loaded : {summary.total_nodes}")
@@ -277,12 +325,19 @@ def _cmd_load(
             print(f"  [{vr.status}] {vr.query_name}: {vr.details}")
         warned = [vr for vr in summary.validation_results if vr.warning]
         if not summary.validation_passed:
-            # NOT routed here on purpose (da#384 Amendment I). `_cmd_load`'s exit
-            # codes are da#372's diff and its reviewers' verdicts hang on it.
-            # This is a findings condition mis-emitting 1, and da#372 moves it to
-            # ExitCode.VALIDATION_FINDINGS.
-            print("\nWARNING: Some validation checks failed.")
-            sys.exit(1)
+            fatal = [vr for vr in summary.validation_results if vr.is_fatal]
+            # The load is already committed to the graph. Findings are a report
+            # ABOUT that graph, not evidence the write failed -- so they get an
+            # exit code of their own (da#354). main#723 read this rc as a data
+            # defect when the load had succeeded.
+            print(
+                f"\nLOAD SUCCEEDED ({summary.total_nodes} nodes, {summary.total_edges} edges "
+                "written). Validation reported "
+                f"{len(fatal)} finding(s): {', '.join(vr.query_name for vr in fatal)}.\n"
+                f"The load did not fail. Exiting {ExitCode.VALIDATION_FINDINGS.value} "
+                f"(validation findings), not {ExitCode.LOAD_FAILED.value} (load failure)."
+            )
+            sys.exit(ExitCode.VALIDATION_FINDINGS)
         elif warned:
             # Non-fatal: the load succeeded and no check hard-failed; one or more
             # checks were downgraded (e.g. timed out). da#259.
@@ -325,9 +380,14 @@ def _cmd_validate(*, validation_timeout: float | None = None) -> None:
             warned += 1
 
     if any_fatal:
+        fatal_names = ", ".join(vr.query_name for vr in results if vr.is_fatal)
         # `validate` only reads the graph. A finding describes the data; it is
-        # not a failure to run (da#384 §4 / Amendment G).
-        print("\nWARNING: Some validation checks failed.")
+        # not a failure to run (da#384 §4 / Amendment G, da#354).
+        print(
+            f"\nVALIDATION FINDINGS: {fatal_names}.\n"
+            f"This is a report about the graph as it stands, not a load failure — "
+            f"`validate` writes nothing. Exiting {ExitCode.VALIDATION_FINDINGS.value}."
+        )
         sys.exit(ExitCode.VALIDATION_FINDINGS)
     elif warned:
         # Timed-out/downgraded checks are non-fatal (da#259).
