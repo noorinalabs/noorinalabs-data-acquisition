@@ -44,6 +44,7 @@ code    name                   what is on disk when it fires
 ``6``   ``REFUSED_ROWS``       the graph, minus the refused rows
 ``7``   ``ENRICH_FAILED``      the graph and the manifest; enrich failed
 ``8``   ``DB_UNREACHABLE``     nothing written by the command that raised it
+``9``   ``UNROUTED_CORPUS``    nothing resolve would have written (NER Step-1 abort)
 ======  =====================  ===================================================
 
 ``4`` is not a "nothing ran" code. ``MissingDependencyError`` is raised at
@@ -158,6 +159,7 @@ __all__ = [
     "EXIT_MISSING_DEPENDENCY",
     "EXIT_REFUSED_ROWS",
     "EXIT_STOPPED_AT_LIMIT",
+    "EXIT_UNROUTED_CORPUS",
     "EXIT_VALIDATION_FINDINGS",
     "ExitCode",
     "RESERVED_BY_RUNTIME",
@@ -265,6 +267,20 @@ class ExitCode(enum.IntEnum):
     the one before it.
     """
 
+    UNROUTED_CORPUS = 9
+    """``resolve`` aborted in NER (Step 1) on a staged corpus with no route (da#369).
+
+    Raised by :func:`src.resolve.ner.run` **before** any mention output is written,
+    when a corpus is present in staging but is opted in to no NER extraction route
+    (phase1 / arabic / english) and is not on the skip list. Nothing this
+    ``resolve`` invocation would have written is on disk: NER raises before
+    ``narrator_mentions_resolved.parquet``, so disambiguation, bio-promotion and
+    every later stage have not run. It replaces the removed matn fallback, which
+    silently mined ``full_text_ar`` for any unrouted or isnad-null corpus instead
+    of failing. Distinct from :attr:`MISSING_DEPENDENCY` (an absent *dependency* at
+    dedup's Step-4 entry) -- this is an unroutable *input* at NER's Step-1 entry.
+    """
+
 
 # Module-level aliases. Consumers may import either the enum or these names; the
 # alias form keeps a migrating call site to an *import-site* change rather than a
@@ -277,3 +293,4 @@ EXIT_STOPPED_AT_LIMIT = ExitCode.STOPPED_AT_LIMIT
 EXIT_MISSING_DEPENDENCY = ExitCode.MISSING_DEPENDENCY
 EXIT_VALIDATION_FINDINGS = ExitCode.VALIDATION_FINDINGS
 EXIT_REFUSED_ROWS = ExitCode.REFUSED_ROWS
+EXIT_UNROUTED_CORPUS = ExitCode.UNROUTED_CORPUS

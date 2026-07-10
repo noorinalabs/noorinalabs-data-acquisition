@@ -122,8 +122,10 @@ def _cmd_resolve(
     from src.resolve import (
         EXIT_MISSING_DEPENDENCY,
         EXIT_STOPPED_AT_LIMIT,
+        EXIT_UNROUTED_CORPUS,
         MissingDependencyError,
         StopAfterReached,
+        UnroutedCorpusError,
     )
     from src.resolve import run_all as resolve_all
 
@@ -155,6 +157,12 @@ def _cmd_resolve(
         # (da#309).
         print(f"\nERROR: {missing}", file=sys.stderr)
         sys.exit(EXIT_MISSING_DEPENDENCY)
+    except UnroutedCorpusError as unrouted:
+        # A staged corpus has no NER extraction route. Halt loudly rather than
+        # silently drop it (or, pre-da#369, matn-mine it via the full_text
+        # fallback that this guard replaces).
+        print(f"\nERROR: {unrouted}", file=sys.stderr)
+        sys.exit(EXIT_UNROUTED_CORPUS)
     total = sum(len(v) for v in results.values())
     print(f"\nResolution complete. {total} output files.")
 

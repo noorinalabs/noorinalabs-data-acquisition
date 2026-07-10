@@ -19,6 +19,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from src.exit_codes import EXIT_UNROUTED_CORPUS
 from src.parse.base import safe_str, write_parquet
 from src.parse.name_quality import clean_narrator_name, strip_markup
 from src.parse.narrator_extraction import IsnadSegmentationError, extract_narrator_mentions
@@ -28,7 +29,7 @@ from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-__all__ = ["run"]
+__all__ = ["EXIT_UNROUTED_CORPUS", "UnroutedCorpusError", "run"]
 
 # Sources that already have Phase 1 narrator_mentions Parquet files.
 _PHASE1_MENTION_SOURCES: dict[str, str] = {
@@ -57,6 +58,69 @@ _ENGLISH_SOURCES: set[str] = {"sunnah"}
 
 # Sources to skip entirely (no raw isnads).
 _SKIP_SOURCES: set[str] = {"muhaddithat"}
+
+# The union of every corpus with an explicit NER route. A staged corpus outside
+# this set has no way to have its narrators extracted and MUST fail loud (da#369)
+# rather than be silently dropped or (pre-da#369) matn-mined via the removed
+# full_text fallback. da#365 layers the correct per-corpus routing on top of this
+# guard; the guard is what makes an unrouted corpus impossible to miss until then.
+_ROUTED_CORPORA: frozenset[str] = frozenset(
+    set(_PHASE1_MENTION_SOURCES) | _ARABIC_SOURCES | _ENGLISH_SOURCES | _SKIP_SOURCES
+)
+
+
+class UnroutedCorpusError(BaseException):
+    """A corpus is staged for resolution but has no NER extraction route (da#369).
+
+    Subclasses ``BaseException`` (not ``Exception``) **on purpose**, exactly like
+    :class:`~src.resolve._deps.MissingDependencyError` and
+    :class:`~src.resolve._checkpoint.StopAfterReached`: :func:`src.resolve.run_all`
+    wraps every stage in ``except Exception`` and logs-and-continues, so an
+    ``Exception`` raised here would be swallowed as a failed NER step and the
+    pipeline would march on and report success on a resolve that silently omitted
+    the corpus. Raised as a ``BaseException`` so it sails through those guards and
+    surfaces to the CLI, which maps it to :data:`EXIT_UNROUTED_CORPUS`.
+
+    Before da#369, an unrouted (or isnad-null) corpus did not raise: the extractor
+    fell back to mining ``full_text_ar`` (isnad+matn), producing 380,771
+    matn-derived pseudo-narrator mentions (11.7% of all mentions) and 38,262
+    narrators that existed ONLY in matn text. That fallback is removed; NER
+    extraction is per-corpus opt-in and an unrouted staged corpus fails loud so a
+    proper route is added (da#365) rather than silently matn-mined.
+    """
+
+    def __init__(self, unrouted: set[str], routed: frozenset[str]) -> None:
+        self.unrouted = sorted(unrouted)
+        self.routed = sorted(routed)
+        super().__init__(
+            f"staged corpora with no NER extraction route: {self.unrouted}. "
+            f"Routed corpora: {self.routed}. Every staged corpus must be explicitly "
+            "opted in to a NER route (phase1 / arabic / english) or the skip list "
+            "(add per-corpus routing — da#365). NER never falls back to mining "
+            "full_text_ar (matn) for an unrouted or isnad-null corpus (da#369)."
+        )
+
+
+def _discover_staged_corpora(staging_dir: Path) -> set[str]:
+    """Enumerate the corpora actually present in staging.
+
+    Reads each staged Parquet's ``source_corpus`` column rather than parsing the
+    filename, so a mis-named file cannot hide an unrouted corpus. NER's own
+    resolved output is excluded, and a file without a ``source_corpus`` column is
+    skipped (it carries no corpus claim to route).
+    """
+    corpora: set[str] = set()
+    for pattern in ("hadiths_*.parquet", "narrator_mentions_*.parquet"):
+        for path in sorted(staging_dir.glob(pattern)):
+            if path.name == "narrator_mentions_resolved.parquet":
+                continue  # NER's own output, not a staged input
+            if "source_corpus" not in pq.read_schema(path).names:
+                continue
+            table = pq.read_table(path, columns=["source_corpus"])
+            for value in table.column("source_corpus").to_pylist():
+                if value:
+                    corpora.add(str(value))
+    return corpora
 
 
 def _load_phase1_mentions(
@@ -134,15 +198,18 @@ def _extract_from_hadiths(
         total_hadiths += table.num_rows
 
         isnad_col = "isnad_raw_ar" if language == "ar" else "isnad_raw_en"
-        text_col = "full_text_ar" if language == "ar" else "full_text_en"
 
         for i in range(table.num_rows):
             hadith_id = table.column("source_id")[i].as_py()
             isnad_text = safe_str(table.column(isnad_col)[i].as_py())
 
-            # Fall back to full text if isnad is missing.
-            if not isnad_text:
-                isnad_text = safe_str(table.column(text_col)[i].as_py())
+            # da#369: NER extracts ONLY from the dedicated isnad column. It no
+            # longer falls back to mining ``full_text_ar`` (isnad+matn) when the
+            # isnad is null — that path produced 380,771 matn-derived pseudo-
+            # narrator mentions (11.7% of all mentions) and 38,262 narrators that
+            # existed ONLY in matn text. A null isnad is skip-and-counted here; a
+            # corpus whose isnad column is genuinely empty must be given a proper
+            # per-corpus route (da#365), never silently matn-mined.
             if not isnad_text:
                 null_isnad_count += 1
                 continue
@@ -252,6 +319,17 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
     checkpoint keyed off it) is reused verbatim. See ``run_all(from_step=...)``.
     """
     logger.info("ner_run_start", staging_dir=str(staging_dir), output_dir=str(output_dir))
+
+    # da#369: hard-fail on a staged corpus that has no NER extraction route,
+    # BEFORE any extraction or output is written. This replaces the removed
+    # full_text (matn) fallback: rather than silently mining ``full_text_ar`` for
+    # an unrouted or isnad-null corpus, resolution aborts loudly so the corpus is
+    # given a proper per-corpus route (da#365). Raised as a ``BaseException`` so it
+    # sails through ``run_all``'s per-stage ``except Exception`` to the CLI.
+    staged = _discover_staged_corpora(staging_dir)
+    unrouted = staged - _ROUTED_CORPORA
+    if unrouted:
+        raise UnroutedCorpusError(unrouted, _ROUTED_CORPORA)
 
     all_rows: list[dict[str, str | int | None]] = []
 
