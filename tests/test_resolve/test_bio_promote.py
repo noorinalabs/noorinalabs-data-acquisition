@@ -895,3 +895,213 @@ def test_every_truncation_reads_as_removed_content(
     assert cleaner_removed_content(normalized, cleaned), f"truncation read as an affix: {cut}"
     # And the dual of the dual: the residue is strictly shorter than what was asserted.
     assert len(cleaned.split()) < len(asserted_name_tokens(normalized)), cut
+
+
+# da#389 — verbatim from data/staging/narrators_bio_itqan.parquet +
+# narrator_aliases_itqan.parquet, bio_id itqan:635. The bio name is a `، ويقال :`
+# variant-list that `clean_narrator_name` truncates to its head nasab, so the node is
+# minted under make_canonical_id(CLEANED) while the alias carried the RAW name — the
+# exact shape of the 34,046 / 154,328 (22.1%) itqan aliases the pre-da#389 raw-key
+# lookup silently dropped. A synthetic name that survived the cleaner unchanged would
+# not exercise the re-key at all (raw-key == cleaned-key) and the test could not go red
+# (feedback_fixture_makes_guard_assertion_inert).
+_ITQAN_635_BIO_NAME = "هشام بن زياد بن أبي يزيد ، وهو هشام بن أبي هشام ، ويقال : هشام بن أبي الوليد"
+_ITQAN_635_CLEANED = "هشام بن زياد بن ابي يزيد"
+_ITQAN_635_ALIAS = "أبو المقدام"
+
+# bio_id itqan:7532 — verbatim `name_ar`; a `، ويقال : / وقيل :` chain with no
+# extractable head, so `clean_narrator_name` returns None (the bio is pollution-dropped
+# and mints NO canonical node). Its alias therefore has nothing to anchor to — a
+# LEGITIMATE non-attachment that must be *counted*, not silently lost.
+_ITQAN_7532_POLLUTION = (
+    "صرمة بن أنس ، ويقال : ابن أبي أنس ، ويقال :  ابن مالك ، ويقال : ابن قيس بن مالك بن "
+    "عدي بن عامر بن غنم بن عدي بن النجار ،  وقيل : قيس بن صرمة ، وقيل : أبو قيس بن صرمة ، "
+    "وقيل : أبو قيس بن عمرو"
+)
+
+
+def test_alias_rekeyed_to_cleaned_form_attaches(tmp_path: Path) -> None:
+    """da#389: an alias whose bio-name the cleaner rewrote must still attach.
+
+    RED on pre-da#389 code: the alias lookup keyed on make_canonical_id(RAW name), but
+    the node was minted under make_canonical_id(clean_narrator_name(name)) — different
+    ids — so the alias attached to nothing and was silently dropped.
+    """
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+
+    raw_norm = normalize_arabic(_ITQAN_635_BIO_NAME)
+    # The premise: the cleaner rewrites this name, and the raw vs cleaned forms mint
+    # DIFFERENT ids — otherwise the raw-key lookup would already work and there is no
+    # bug for this test to catch.
+    assert clean_narrator_name(raw_norm) == _ITQAN_635_CLEANED
+    assert make_canonical_id(raw_norm) != make_canonical_id(_ITQAN_635_CLEANED)
+
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:635",
+                "source": "itqan",
+                "name_ar": _ITQAN_635_BIO_NAME,
+                "name_ar_normalized": raw_norm,
+            }
+        ],
+    )
+    _write_aliases(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:635",
+                "source": "itqan",
+                "canonical_name_ar_normalized": raw_norm,
+                "alias": _ITQAN_635_ALIAS,
+                "alias_normalized": normalize_arabic(_ITQAN_635_ALIAS),
+            }
+        ],
+    )
+    path = promote_bios_to_canonical(staging, out_dir)
+    assert path is not None
+    rec = next(
+        r
+        for r in pq.read_table(path).to_pylist()
+        if r["canonical_id"] == make_canonical_id(_ITQAN_635_CLEANED)
+    )
+    assert rec["aliases"] == [normalize_arabic(_ITQAN_635_ALIAS)]
+
+
+def test_merge_aliases_counts_recovered_and_pollution_dropped(tmp_path: Path) -> None:
+    """da#389: both classes measured in one run — recovery AND the explained residual.
+
+    The recovered alias attaches (``added == 1``); the alias whose bio the cleaner
+    dropped is counted as ``unmatched_pollution`` (== 1) rather than vanishing; and no
+    alias falls into the investigate bucket (``unmatched_no_bio == 0``). RED on
+    pre-da#389 code: ``_AliasMergeStats`` does not exist and ``_merge_aliases`` returns
+    a bare int with no drop accounting at all.
+    """
+    from src.resolve.bio_promote import _AliasMergeStats, _merge_aliases
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    pollution_norm = normalize_arabic(_ITQAN_7532_POLLUTION)
+    assert clean_narrator_name(pollution_norm) is None  # bio mints no node
+
+    _write_aliases(
+        staging,
+        "itqan",
+        [
+            # recovered: bio itqan:635 promoted under its CLEANED id → alias attaches
+            {
+                "bio_id": "itqan:635",
+                "source": "itqan",
+                "canonical_name_ar_normalized": normalize_arabic(_ITQAN_635_BIO_NAME),
+                "alias": _ITQAN_635_ALIAS,
+                "alias_normalized": normalize_arabic(_ITQAN_635_ALIAS),
+            },
+            # pollution: bio itqan:7532 was cleaner-dropped → counted, not silent
+            {
+                "bio_id": "itqan:7532",
+                "source": "itqan",
+                "canonical_name_ar_normalized": pollution_norm,
+                "alias": "صرمة بن مالك",
+                "alias_normalized": normalize_arabic("صرمة بن مالك"),
+            },
+        ],
+    )
+
+    cleaned_635 = clean_narrator_name(normalize_arabic(_ITQAN_635_BIO_NAME))
+    assert cleaned_635 is not None
+    cid_635 = make_canonical_id(cleaned_635)
+    canonical_map: dict[str, dict[str, Any]] = {
+        cid_635: {"canonical_id": cid_635, "name_ar_normalized": cleaned_635, "aliases": []}
+    }
+
+    stats = _merge_aliases(staging, canonical_map, {cid_635}, sources={"itqan"})
+    assert isinstance(stats, _AliasMergeStats)
+    assert stats.added == 1
+    assert stats.unmatched_pollution == 1
+    assert stats.unmatched_no_bio == 0
+    assert canonical_map[cid_635]["aliases"] == [normalize_arabic(_ITQAN_635_ALIAS)]
+
+
+def test_unmatched_no_bio_is_counted_and_warns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """da#389: the `unmatched_no_bio` bucket AND the WARN it gates must be witnessed.
+
+    The "never silent again" guarantee rests on this bucket and its warning, but every
+    other test only asserts it is ZERO. An unwitnessed counter/branch can be deleted and
+    leave the suite green — the silent-zero failure mode this program exists to kill
+    (`feedback_silent_zero_is_not_a_measurement`). So drive it POSITIVE: an alias whose
+    cleaned canonical name is a valid narrator name (NOT pollution) that simply no bio
+    promoted — distinct from the `unmatched_pollution` case — and assert both the exact
+    count and that the WARN actually fires.
+
+    `مالك بن انس` and `سعيد بن جبير` are real attested narrators (used as fixtures across
+    this module) and survive `clean_narrator_name` unchanged, so the non-attach here is
+    "no promoted bio", never "cleaner-dropped".
+    """
+    from src.resolve import bio_promote as bp
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+
+    promoted_name = "سعيد بن جبير"
+    orphan_alias_name = "مالك بن انس"  # cleans to itself; no bio promotes it below
+    assert clean_narrator_name(normalize_arabic(orphan_alias_name)) == orphan_alias_name
+
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:1",
+                "source": "itqan",
+                "name_ar": promoted_name,
+                "name_ar_normalized": normalize_arabic(promoted_name),
+            }
+        ],
+    )
+    _write_aliases(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:1",
+                "source": "itqan",
+                "canonical_name_ar_normalized": normalize_arabic(orphan_alias_name),
+                "alias": "أبو عبد الله",
+                "alias_normalized": normalize_arabic("أبو عبد الله"),
+            }
+        ],
+    )
+
+    # Direct-call witness of the exact buckets: the orphan alias lands in
+    # unmatched_no_bio, NOT unmatched_pollution, and nothing attaches.
+    promoted_cid = make_canonical_id(normalize_arabic(promoted_name))
+    stats = bp._merge_aliases(staging, {}, {promoted_cid}, sources={"itqan"})
+    assert stats.unmatched_no_bio == 1
+    assert stats.unmatched_pollution == 0
+    assert stats.added == 0
+
+    # End-to-end witness that the WARN branch actually fires (with the count). The
+    # module logger is a structlog PrintLogger; spy on `.warning` directly so the
+    # assertion does not depend on stdout-capture cache semantics.
+    warnings_seen: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        bp.logger,
+        "warning",
+        lambda event, **kw: warnings_seen.append((event, kw)),
+    )
+    assert bp.promote_bios_to_canonical(staging, out_dir) is not None
+    assert any(
+        event == "bio_promote_aliases_unmatched_no_bio" and kw.get("unmatched_no_bio") == 1
+        for event, kw in warnings_seen
+    ), warnings_seen
