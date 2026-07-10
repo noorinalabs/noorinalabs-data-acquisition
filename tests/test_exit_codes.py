@@ -43,7 +43,6 @@ nothing is not a scan that found no collisions.
 from __future__ import annotations
 
 import ast
-import enum
 import importlib
 import inspect
 import sys
@@ -144,35 +143,39 @@ def _declarations_outside_registry() -> dict[Path, list[str]]:
 
 
 class TestDuplicateValueIsInexpressible:
-    def test_registry_has_no_aliases(self) -> None:
-        """`IntEnum` accepts a duplicate as a silent ALIAS. `@enum.unique` does not."""
-        values = [c.value for c in ExitCode]
-        assert len(values) == len(set(values))
-        # Instrument guard: an empty enum would satisfy the above vacuously.
-        assert len(values) >= 5, f"registry looks empty: {values}"
+    def test_the_registry_has_no_aliases(self) -> None:
+        """`@enum.unique`'s REMOVAL must be detectable. Two earlier tests could not see it.
 
-    def test_the_decorator_is_actually_applied(self) -> None:
-        """Without `@enum.unique` the aliasing check above passes for a DIFFERENT reason.
+        `IntEnum` accepts a duplicate value as a silent **alias**. The obvious
+        check is blind to exactly that::
 
-        `@enum.unique` sets no public marker, so prove it by construction: build
-        an enum carrying the registry's real members plus a planted duplicate,
-        apply the same decorator, and require it to raise.
+            values = [c.value for c in ExitCode]
+            assert len(values) == len(set(values))    # PASSES on the mutant
+
+        because **iteration does not yield aliases** -- the very mechanism this
+        module's docstring names as the hazard, defeating the test that names it.
+        Verified: strip the decorator, plant `PLANTED_DUPLICATE = 4`, and
+        iteration yields `[1, 4]` while `__members__` yields three names.
+
+        And its companion `len(values) >= 5` guarded against an *empty* enum, not
+        an *aliased* one -- an instrument guard for a failure mode nobody feared.
+
+        `__members__` includes aliases; iteration does not. The blind spot and the
+        fix are the same fact read in two directions. (Ivana Horvat.)
         """
-        members = {c.name: c.value for c in ExitCode}
-        victim = ExitCode.MISSING_DEPENDENCY
-        # Proof the plant applied: the planted value collides with a real member.
-        assert victim.value in members.values()
-        members["PLANTED_DUPLICATE"] = victim.value
+        aliases = set(ExitCode.__members__) - {c.name for c in ExitCode}
+        assert aliases == set(), f"aliased members (is @enum.unique applied?): {sorted(aliases)}"
 
-        with pytest.raises(ValueError, match="duplicate values"):
-            enum.unique(enum.IntEnum("_Planted", members))  # type: ignore[arg-type]
+        # INSTRUMENT GUARD: `__members__` must actually contain the members, or
+        # the difference above is empty for the wrong reason.
+        assert set(ExitCode.__members__) == {c.name for c in ExitCode}
+        assert len(ExitCode.__members__) >= 6, f"registry looks empty: {list(ExitCode.__members__)}"
 
     def test_importing_the_registry_is_what_raises(self) -> None:
         """The precise claim: it raises when the registry is IMPORTED.
 
-        Not "at process start" -- `src/cli.py` imports `src.resolve` and
-        `src.graph` lazily inside command functions. Pytest collection imports
-        this module, which is why CI catches a duplicate either way.
+        `src/cli.py` imports this module eagerly at module scope, so every CLI
+        invocation raises on a duplicate. Pytest collection imports it too.
         """
         module = importlib.import_module(ExitCode.__module__)
         assert module.ExitCode is ExitCode  # a clean import, no ValueError
@@ -302,9 +305,14 @@ class TestReservedSetIsEnumerated:
             ):
                 documented.add(target.id)
 
-        # INSTRUMENT GUARD: the walk must have found the members at all. An empty
-        # `documented` would otherwise satisfy nothing and look like agreement.
-        assert documented, "the AST walk found no documented members -- it is blind"
+        # INSTRUMENT GUARD: the walk must be shown to see EVERY existing member
+        # before it is trusted to notice a missing seventh. `assert documented`
+        # alone would pass while the walk saw one member of eight.
+        assert documented == _registry_member_names(), (
+            "the AST walk does not see every member -- it cannot be trusted to "
+            f"notice a missing docstring.\n  saw: {sorted(documented)}\n"
+            f"  members: {sorted(_registry_member_names())}"
+        )
         missing = _registry_member_names() - documented
         assert not missing, (
             f"members with no docstring: {sorted(missing)}.\n"
