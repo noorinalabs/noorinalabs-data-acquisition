@@ -293,6 +293,26 @@ class TestEveryLoaderThatQuarantinesAlsoReports:
     all 650,986 sanadset rows are malformed, so `batch` is empty and the edge
     loaders return through `if not batch:` -- never reaching the normal return.
     `_load_chains` reaches its normal return and needs the count there.
+
+    WHAT THESE MUTANTS PROVE, PRECISELY. Killing a mutant on an early-return path
+    proves the RETURN is reachable from the test. It does not, by itself, prove
+    the INPUT SHAPE that reaches it is reachable from production. The two claims
+    come apart, and only the second one matters:
+
+    * The input shape IS production-reachable. `REAL_DOUBLED_SOURCE_ID` is
+      copied verbatim from `data/staging/hadiths_sanadset.parquet` row 0, and all
+      650,986 rows share the prefix -- so an all-malformed file is not a
+      contrived edge case, it is what the loader is handed today.
+    * The empty-batch return is therefore not a corner the fixture invented. It
+      is the path the production artifact takes.
+
+    The discriminator is `_load_chains`'s positive control: a well-formed chain
+    loads alongside the malformed one, so `malformed_ids == 1` cannot be
+    satisfied by a loader that refused everything. Without that, an all-malformed
+    fixture proves a count, not a distinction. See
+    `feedback_fixture_makes_guard_assertion_inert` -- an assertion that cannot
+    fail proves nothing, and a fixture that cannot occur proves nothing about
+    production. Same family, opposite sign.
     """
 
     def _resolved_mentions(self, d: Path, hadith_ids: list[str]) -> None:

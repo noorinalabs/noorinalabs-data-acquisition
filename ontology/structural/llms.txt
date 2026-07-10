@@ -1933,30 +1933,30 @@ imports: __future__, re, pathlib, types, typing, pytest, src.cli, src.graph, src
   - method test_appears_in_empty_batch_still_reports_malformed(self, tmp_path) @260
   - method test_a_load_of_only_malformed_rows_exits_nonzero(self, tmp_path) @268
 - class TestEveryLoaderThatQuarantinesAlsoReports @282
-  - method _resolved_mentions(self, d, hadith_ids) @298
-  - method test_transmitted_to_reports_malformed_on_the_empty_pair_path(self, tmp_path) @314
-  - method test_narrated_reports_malformed_on_the_empty_batch_path(self, tmp_path) @325
-  - method test_parallel_of_reports_malformed_on_the_empty_batch_path(self, tmp_path) @336
-  - method test_chains_reports_malformed_on_its_normal_return(self, tmp_path) @350
-- class TestLoadSummaryAggregation @366
-  - method test_total_counts_both_node_and_edge_results(self) @367
-  - method test_total_is_zero_on_a_clean_load(self) @375
-  - method test_total_refused_counts_both_classes_and_both_result_kinds(self) @383
-  - method test_deliberate_skips_never_reach_total_refused(self) @392
-- class _StubClient @398
-  - method __enter__(self) @399
-  - method __exit__(self, *exc) @402
-- func _install_load_stubs(monkeypatch, tmp_path, summary) @406
-- func _summary_from_the_real_loader(tmp_path) @426
-- class TestCmdLoadExitCode @447
-  - method test_quarantined_ids_exit_nonzero(self, tmp_path, monkeypatch) @448
-  - method test_clean_load_still_exits_zero(self, tmp_path, monkeypatch) @459
-  - method test_fires_even_when_validation_is_skipped(self, tmp_path, monkeypatch) @468
-  - method test_blank_source_id_alone_exits_nonzero(self, tmp_path, monkeypatch) @483
-  - method test_malformed_ids_outrank_validation_findings(self, tmp_path, monkeypatch) @511
-- func _declared_exit_codes() @537
-- func test_declared_exit_codes_are_unique() @557
-- func test_malformed_ids_code_is_not_reserved() @575
+  - method _resolved_mentions(self, d, hadith_ids) @318
+  - method test_transmitted_to_reports_malformed_on_the_empty_pair_path(self, tmp_path) @334
+  - method test_narrated_reports_malformed_on_the_empty_batch_path(self, tmp_path) @345
+  - method test_parallel_of_reports_malformed_on_the_empty_batch_path(self, tmp_path) @356
+  - method test_chains_reports_malformed_on_its_normal_return(self, tmp_path) @370
+- class TestLoadSummaryAggregation @386
+  - method test_total_counts_both_node_and_edge_results(self) @387
+  - method test_total_is_zero_on_a_clean_load(self) @395
+  - method test_total_refused_counts_both_classes_and_both_result_kinds(self) @403
+  - method test_deliberate_skips_never_reach_total_refused(self) @412
+- class _StubClient @418
+  - method __enter__(self) @419
+  - method __exit__(self, *exc) @422
+- func _install_load_stubs(monkeypatch, tmp_path, summary) @426
+- func _summary_from_the_real_loader(tmp_path) @446
+- class TestCmdLoadExitCode @467
+  - method test_quarantined_ids_exit_nonzero(self, tmp_path, monkeypatch) @468
+  - method test_clean_load_still_exits_zero(self, tmp_path, monkeypatch) @479
+  - method test_fires_even_when_validation_is_skipped(self, tmp_path, monkeypatch) @488
+  - method test_blank_source_id_alone_exits_nonzero(self, tmp_path, monkeypatch) @503
+  - method test_malformed_ids_outrank_validation_findings(self, tmp_path, monkeypatch) @531
+- func _declared_exit_codes() @557
+- func test_declared_exit_codes_are_unique() @577
+- func test_malformed_ids_code_is_not_reserved() @595
 
 ## tests/test_graph/test_migrate.py [python]
 Tests for src.graph.migrate — in-place TRANSMITTED_TO.hadith_id remediation (da#325).
