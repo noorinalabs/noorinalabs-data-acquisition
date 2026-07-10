@@ -57,7 +57,7 @@ from __future__ import annotations
 
 import hashlib
 
-from src.parse.identity import ID_DELIMITER, bare_source_id
+from src.parse.identity import HADITH_ID_PREFIX, ID_DELIMITER
 from src.utils.arabic import is_arabic, normalize_arabic
 
 # source_corpus -> allowed collection slugs.
@@ -141,8 +141,20 @@ def is_canonical_hadith_id(hadith_id: str) -> bool:
     segment (a bare corpus, or a toy/id-less value) defers to
     :func:`is_canonical_hadith`, which keeps any corpus not named in the
     composition map — the conservative, irreversible-load-friendly default.
+
+    This is a **total** predicate: it strips the ``hdt:`` prefix inline rather
+    than via :func:`~src.parse.identity.bare_source_id`, which raises
+    :exc:`~src.parse.identity.DoubledCorpusPrefixError` on a malformed id (da#355).
+    A composition gate that contracts to return a ``bool`` must not throw — and a
+    malformed id is not this function's decision to make. It reports whether the
+    hadith *would be* canonical; the loader's quarantine then rejects the id and
+    counts the row, so the failure is recorded once, at one place, rather than
+    silently dropping the edge here.
     """
-    segments = bare_source_id(hadith_id).split(ID_DELIMITER)
+    body = (
+        hadith_id[len(HADITH_ID_PREFIX) :] if hadith_id.startswith(HADITH_ID_PREFIX) else hadith_id
+    )
+    segments = body.split(ID_DELIMITER)
     corpus = segments[0] if segments else ""
     collection = segments[1] if len(segments) > 1 else ""
     return is_canonical_hadith(corpus, collection)

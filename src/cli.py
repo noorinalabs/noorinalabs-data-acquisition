@@ -312,11 +312,15 @@ def _cmd_load(
         print(f"  Files skipped: {len(skipped_files)}")
 
     for nr in summary.node_results:
-        print(f"    {nr.node_type}: created={nr.created} merged={nr.merged} skipped={nr.skipped}")
+        print(
+            f"    {nr.node_type}: created={nr.created} merged={nr.merged} skipped={nr.skipped}"
+            f" refused={nr.refused} (malformed_ids={nr.malformed_ids}"
+            f" invalid_source_ids={nr.invalid_source_ids})"
+        )
     for er in summary.edge_results:
         print(
             f"    {er.edge_type}: created={er.created} skipped={er.skipped}"
-            f" missing_endpoints={er.missing_endpoints}"
+            f" missing_endpoints={er.missing_endpoints} malformed_ids={er.malformed_ids}"
         )
 
     if summary.validation_results:
@@ -324,26 +328,55 @@ def _cmd_load(
         for vr in summary.validation_results:
             print(f"  [{vr.status}] {vr.query_name}: {vr.details}")
         warned = [vr for vr in summary.validation_results if vr.warning]
-        if not summary.validation_passed:
-            fatal = [vr for vr in summary.validation_results if vr.is_fatal]
-            # The load is already committed to the graph. Findings are a report
-            # ABOUT that graph, not evidence the write failed -- so they get an
-            # exit code of their own (da#354). main#723 read this rc as a data
-            # defect when the load had succeeded.
-            print(
-                f"\nLOAD SUCCEEDED ({summary.total_nodes} nodes, {summary.total_edges} edges "
-                "written). Validation reported "
-                f"{len(fatal)} finding(s): {', '.join(vr.query_name for vr in fatal)}.\n"
-                f"The load did not fail. Exiting {ExitCode.VALIDATION_FINDINGS.value} "
-                f"(validation findings), not {ExitCode.LOAD_FAILED.value} (load failure)."
-            )
-            sys.exit(ExitCode.VALIDATION_FINDINGS)
-        elif warned:
+        if summary.validation_passed and warned:
             # Non-fatal: the load succeeded and no check hard-failed; one or more
             # checks were downgraded (e.g. timed out). da#259.
             print(f"\nLoad OK. {len(warned)} validation check(s) downgraded to warning.")
-        else:
+        elif summary.validation_passed:
             print("\nAll validation checks passed.")
+
+    # da#359. Deliberately OUTSIDE the `if summary.validation_results:` block: a
+    # --nodes-only or --skip-validation load produces no validation results, and
+    # would otherwise fall off the end with rc=0 having refused every row.
+    #
+    # Checked BEFORE the validation verdict because absent input is the stronger
+    # statement. Validation reports on what landed; it cannot report on what was
+    # never offered to it, which is why `collection_coverage` called a graph
+    # missing 650,986 hadiths "all within threshold" (da#382).
+    refused = summary.total_refused
+    if refused:
+        malformed = summary.total_malformed_ids
+        print(
+            f"\nREFUSED INPUT: {refused} row(s)/edge(s) were quarantined because their "
+            f"source_id was defective ({malformed} violate the id grammar, "
+            f"{refused - malformed} are absent/blank/non-string).\n"
+            "The load ran to completion and committed what it accepted, but the graph is "
+            "INCOMPLETE. This is a producer defect: re-run `parse` to regenerate the "
+            "staging artifact, then re-load.\n"
+            "CHECK THE PARSE SUMMARY. `parse` exits 0 even when an adapter raises: "
+            "`src.parse.run_all` catches the exception, logs `parse_failed`, and leaves "
+            "the previous staging file on disk untouched (da#382). A `parse` that prints "
+            "`[FAIL]` for the offending source has regenerated nothing, and the next "
+            "`load` will refuse exactly these rows again.\n"
+            f"Exiting {ExitCode.REFUSED_ROWS.value}.",
+            file=sys.stderr,
+        )
+        sys.exit(ExitCode.REFUSED_ROWS)
+
+    if summary.validation_results and not summary.validation_passed:
+        fatal = [vr for vr in summary.validation_results if vr.is_fatal]
+        # The load is already committed to the graph. Findings are a report
+        # ABOUT that graph, not evidence the write failed -- so they get an
+        # exit code of their own (da#354). main#723 read this rc as a data
+        # defect when the load had succeeded.
+        print(
+            f"\nLOAD SUCCEEDED ({summary.total_nodes} nodes, {summary.total_edges} edges "
+            "written). Validation reported "
+            f"{len(fatal)} finding(s): {', '.join(vr.query_name for vr in fatal)}.\n"
+            f"The load did not fail. Exiting {ExitCode.VALIDATION_FINDINGS.value} "
+            f"(validation findings), not {ExitCode.LOAD_FAILED.value} (load failure)."
+        )
+        sys.exit(ExitCode.VALIDATION_FINDINGS)
 
 
 def _cmd_validate(*, validation_timeout: float | None = None) -> None:

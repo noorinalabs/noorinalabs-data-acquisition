@@ -33,8 +33,21 @@ Two historical identity hazards this module designs out
    corpus a second time (``hdt:sunnah:sunnah:...``) while the batch loader did
    not, so the *same* hadith became two graph nodes (toy ``h-1`` fixtures masked
    it). :func:`hadith_node_id` is the ONE prefixing rule both paths call: it is
-   idempotent on the ``hdt:`` prefix **and** collapses an accidentally doubled
-   leading corpus, so both paths converge on exactly one id per hadith.
+   idempotent on the ``hdt:`` prefix, so both paths converge on exactly one id
+   per hadith. A doubled leading corpus is **asserted against, never repaired**
+   (:exc:`DoubledCorpusPrefixError`): ``collection == corpus`` is FORBIDDEN as a
+   producer output precisely because it is ambiguous — ``lk:lk:1`` could be read
+   either as corpus ``lk`` doubled or as corpus ``lk`` with a collection named
+   ``lk``, and nothing in the id distinguishes them. That ambiguity is exactly
+   why the old collapse could never be safe: it resolved the ambiguity by fiat
+   and silently dropped a segment. It did so for **650,986 distinct hadiths** —
+   every ``sanadset`` row, 76.3% of staging — which is the number that matters;
+   the 16M+ figure quoted elsewhere counts id-canonicalization *calls* across
+   hadiths, chains, gradings and ``PARALLEL_OF`` pairs, not distinct hadiths
+   (da#355). Since da#353 no producer emits the shape at all, so any occurrence
+   at load time is a producer defect and exits non-zero (da#359, see
+   ``src.exit_codes.ExitCode.REFUSED_ROWS``). Legacy ids already persisted in a graph are
+   canonicalized one-shot by :mod:`src.graph.migrate`.
 2. **collection-ref vs in-book-ordinal** (da#77): ``source_id``'s positional
    tail is a stable within-collection key. The *in-book ordinal* that flows to
    ``APPEARS_IN.hadith_number_in_book`` is the staging ``hadith_number`` column —
@@ -63,12 +76,10 @@ import uuid
 
 from src.models.enums import SourceCorpus
 from src.utils.arabic import canonical_surface
-from src.utils.logging import get_logger
-
-logger = get_logger(__name__)
 
 __all__ = [
     "SOURCE_CORPORA",
+    "DoubledCorpusPrefixError",
     "HADITH_ID_PREFIX",
     "COLLECTION_ID_PREFIX",
     "NARRATOR_ID_PREFIX",
@@ -113,11 +124,6 @@ SOURCE_CORPORA: frozenset[str] = frozenset(c.value for c in SourceCorpus)
 
 ID_DELIMITER = ":"
 
-# Running count of double-corpus-prefix collapses this process, used to SAMPLE the
-# per-collapse warning in ``_collapse_double_corpus`` (it fires on a path called
-# millions of times; #723). Process-local; not reset between calls by design.
-_double_corpus_collapse_count = 0
-
 HADITH_ID_PREFIX = "hdt:"
 COLLECTION_ID_PREFIX = "col:"
 NARRATOR_ID_PREFIX = "nar:"
@@ -134,6 +140,20 @@ _TYPE_PREFIXES = (
 )
 
 
+class DoubledCorpusPrefixError(ValueError):
+    """A ``source_id`` arrived with a doubled leading corpus (``sanadset:sanadset:1``).
+
+    Raised by :func:`bare_source_id` — and so by every hadith-derived node-id
+    constructor — and by ``generate_source_id`` at the producer boundary.
+    Subclasses :exc:`ValueError` so existing broad handlers and the
+    ``generate_source_id`` fail-fast family stay uniform.
+
+    Loaders catch this *specifically* (never bare :exc:`ValueError`, which would
+    also swallow ``safe_int``) and quarantine the offending row rather than abort
+    a multi-hour, non-atomic load. See :mod:`src.graph.load_nodes`.
+    """
+
+
 def apply_prefix(value: str, prefix: str) -> str:
     """Idempotently prepend *prefix* to *value*.
 
@@ -144,52 +164,42 @@ def apply_prefix(value: str, prefix: str) -> str:
     return value if value.startswith(prefix) else f"{prefix}{value}"
 
 
-def _collapse_double_corpus(body: str) -> str:
-    """Collapse a doubled (or N-times repeated) leading corpus segment.
-
-    ``"sunnah:sunnah:bukhari:1"`` -> ``"sunnah:bukhari:1"``. Only collapses when
-    the repeated leading segment is a *known* corpus, so legitimate repeated
-    slugs deeper in an id (or a non-corpus first segment) are never touched.
-    Emits a warning when it collapses — a collapse means an upstream producer
-    bypassed the canonical builder (the main#139 streaming-path bug), which the
-    operator should still see.
-    """
-    segments = body.split(ID_DELIMITER)
-    collapsed = 0
-    while len(segments) >= 2 and segments[0] in SOURCE_CORPORA and segments[0] == segments[1]:
-        segments.pop(0)
-        collapsed += 1
-    if collapsed:
-        global _double_corpus_collapse_count
-        _double_corpus_collapse_count += 1
-        # This fires on the hot id-canonicalization path — every hadith/chain/
-        # grading id build, and the PARALLEL_OF loader calls it 13M+ times. The
-        # sanadset double-prefix bug (main#139) trips it on millions of rows: the
-        # #723 stage reload emitted 8.45M of these warnings (a 4.3 GB container
-        # log) and the per-call structlog rendering measurably slowed the load.
-        # Sample it — surface the condition once, then every 100k-th, with the
-        # running magnitude in ``occurrences`` — instead of one line per record.
-        if _double_corpus_collapse_count == 1 or _double_corpus_collapse_count % 100_000 == 0:
-            logger.warning(
-                "collapsed_double_corpus_prefix",
-                original=body,
-                canonical=ID_DELIMITER.join(segments),
-                collapsed_segments=collapsed,
-                occurrences=_double_corpus_collapse_count,
-            )
-    return ID_DELIMITER.join(segments)
-
-
 def bare_source_id(value: str) -> str:
     """Return the canonical *bare* ``source_id`` for *value*.
 
-    Strips a leading ``hdt:`` graph prefix if present, then collapses any
-    doubled leading corpus. This is the single canonicalization point shared by
-    :func:`hadith_node_id`, :func:`chain_node_id` and :func:`grading_node_id`,
-    so every hadith-derived id agrees on one identity for a given hadith.
+    Strips a leading ``hdt:`` graph prefix if present — genuine, unambiguous
+    prefix-stripping, and idempotent. This is the single canonicalization point
+    shared by :func:`hadith_node_id`, :func:`chain_node_id` and
+    :func:`grading_node_id`, so every hadith-derived id agrees on one identity
+    for a given hadith.
+
+    Raises :exc:`DoubledCorpusPrefixError` if *value* carries a doubled leading
+    corpus, and does **not** repair one. In the grammar ``<corpus>:<collection>``
+    a ``collection`` equal to its ``corpus`` is forbidden as a producer output,
+    because such an id is ambiguous: ``lk:lk:1`` admits no reading that
+    distinguishes a doubled corpus from a corpus-named collection. A collapse
+    must therefore *guess*, and the guess this function used to make silently
+    dropped the collection segment (da#355). No producer emits the shape — across
+    all 9 staged corpora only ``sanadset`` does, on 100% of its rows with exactly
+    one distinct collection, which is the da#353 CSV-stem fallback, not a real
+    collection. Its arrival is a producer defect and must fail loudly. Ids already
+    in a graph are migrated one-shot by :mod:`src.graph.migrate`, where the
+    resolution of the ambiguity is a deliberate, scoped decision rather than a
+    guess made silently on the hot path.
     """
     body = value[len(HADITH_ID_PREFIX) :] if value.startswith(HADITH_ID_PREFIX) else value
-    return _collapse_double_corpus(body)
+    if is_double_prefixed(body):
+        msg = (
+            f"source_id has a doubled leading corpus: {value!r}. This is a producer "
+            f"defect — no producer emits this shape (da#353). It is NOT repaired here: "
+            f"in the '<corpus>:<collection>' grammar a collection equal to its corpus "
+            f"is forbidden precisely because it is ambiguous — nothing distinguishes a "
+            f"doubled corpus from a corpus-named collection — so collapsing would have "
+            f"to guess, and guessing silently drops a segment (da#355). To canonicalize "
+            f"ids already in a graph, use src.graph.migrate."
+        )
+        raise DoubledCorpusPrefixError(msg)
+    return body
 
 
 def hadith_node_id(source_id: str) -> str:
@@ -197,7 +207,8 @@ def hadith_node_id(source_id: str) -> str:
 
     THE one prefixing rule for Hadith nodes — every ingest path (batch loaders,
     streaming normalize) must route through this so the same hadith yields
-    exactly one node id. Idempotent, and collapses the main#139 double-prefix.
+    exactly one node id. Idempotent on the ``hdt:`` prefix; raises
+    :exc:`DoubledCorpusPrefixError` on a main#139 double-prefixed id.
     """
     return f"{HADITH_ID_PREFIX}{bare_source_id(source_id)}"
 

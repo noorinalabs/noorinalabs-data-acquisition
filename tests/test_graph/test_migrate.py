@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.graph.migrate import (
     MigrationResult,
+    canonicalize_legacy_hadith_id,
     compute_rewrites,
     migrate_transmitted_hadith_ids,
 )
+from src.parse.identity import DoubledCorpusPrefixError, hadith_node_id
 from tests.test_graph.conftest import MockNeo4jClient
 
 
@@ -30,6 +34,35 @@ class TestComputeRewrites:
             [{"hadith_id": ""}, {"hadith_id": None}, {}, {"hadith_id": "sanadset:0:0:1"}]
         )
         assert rewrites == [{"raw": "sanadset:0:0:1", "canon": "hdt:sanadset:0:0:1"}]
+
+    def test_migration_repairs_what_the_id_constructor_now_rejects(self) -> None:
+        """da#355: the doubled-corpus repair lives HERE and only here.
+
+        ``hadith_node_id`` raises on the legacy shape, so the migration must not
+        depend on it; ``canonicalize_legacy_hadith_id`` is the explicit, one-shot
+        counterpart. Without this the migration would abort on exactly the ids it
+        exists to fix.
+        """
+        legacy = "sanadset:sanadset:0:0:2326"
+        with pytest.raises(DoubledCorpusPrefixError):
+            hadith_node_id(legacy)
+        assert canonicalize_legacy_hadith_id(legacy) == "hdt:sanadset:0:0:2326"
+
+
+class TestCanonicalizeLegacyHadithId:
+    def test_idempotent_on_canonical_id(self) -> None:
+        canon = "hdt:sanadset:0:0:2326"
+        assert canonicalize_legacy_hadith_id(canon) == canon
+        assert canonicalize_legacy_hadith_id(canonicalize_legacy_hadith_id(canon)) == canon
+
+    def test_collapses_triple_corpus(self) -> None:
+        assert canonicalize_legacy_hadith_id("sanadset:sanadset:sanadset:1") == "hdt:sanadset:1"
+
+    def test_leaves_non_corpus_lead_alone(self) -> None:
+        assert canonicalize_legacy_hadith_id("h-1:h-1:x") == "hdt:h-1:h-1:x"
+
+    def test_leaves_repeated_deeper_segment_alone(self) -> None:
+        assert canonicalize_legacy_hadith_id("lk:bukhari:bukhari:1") == "hdt:lk:bukhari:bukhari:1"
 
 
 class TestMigrateTransmittedHadithIds:

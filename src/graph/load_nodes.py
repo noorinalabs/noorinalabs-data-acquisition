@@ -40,6 +40,7 @@ from src.parse.composition import (
     is_cross_edition_dedup_source,
 )
 from src.parse.identity import (
+    DoubledCorpusPrefixError,
     chain_node_id,
     collection_node_id,
     grading_node_id,
@@ -64,6 +65,42 @@ class LoadResult:
     merged: int
     skipped: int
     validation_errors: list[str] = field(default_factory=list)
+    # --- Refusals (da#359) -------------------------------------------------
+    # A REFUSAL is a row the loader declined because its input was defective.
+    # It is categorically different from a *deliberate* skip -- a non-canonical
+    # edition (da#191) or a cross-edition dedup drop (da#220) -- which is the
+    # loader doing its job. ``skipped`` counts both kinds and so cannot answer
+    # "did every loader accept every input row"; that is what ``refused`` is for.
+    #
+    # Each refusal class gets its own counter, because "attributable to a cause"
+    # is the whole point: ``skipped`` meant three things at once, which is how
+    # 650,986 absent hadiths hid behind it.
+    malformed_ids: int = 0  # source_id violates the id grammar
+    # In production this counts a BLANK ``source_id``, and only that. The guard
+    # is ``not sid or not isinstance(sid, str)``, but ``HADITH_SCHEMA`` declares
+    # ``source_id`` as ``string not null``, so through a conformant parquet the
+    # column yields only ``str`` -- the ``None`` and non-``str`` arms cannot fire.
+    # They stay as defence against a non-conformant file. Do not go looking for a
+    # null the schema already forbids.
+    #
+    # Note for future fixtures: ``pa.table(..., schema=...)`` ACCEPTS a null into
+    # a non-nullable field, and ``table.validate(full=True)`` passes it. Only
+    # ``pq.write_table`` and ``Table.cast`` reject it. A test that builds a table
+    # in memory and hands it straight to a loader would therefore exercise a
+    # branch production cannot reach -- a green test for an unreachable state,
+    # the mirror image of an assertion that can never go red.
+    invalid_source_ids: int = 0  # source_id blank (or, defensively, absent/non-str)
+
+    @property
+    def refused(self) -> int:
+        """Rows declined because the input was defective, by any cause.
+
+        Keyed on the concept, not on today's instance: a fifth ``continue`` that
+        refuses a row for a new reason must be added here, and then every
+        consumer -- the exit code, the last-loaded manifest (da#374) -- follows
+        without being touched.
+        """
+        return self.malformed_ids + self.invalid_source_ids
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +353,8 @@ def _load_hadiths(
     total_created = 0
     total_skipped = 0
     total_deduped = 0
+    total_malformed = 0
+    total_invalid_sid = 0
     all_errors: list[str] = []
     total_batch = 0
 
@@ -334,6 +373,7 @@ def _load_hadiths(
             if not sid or not isinstance(sid, str):
                 all_errors.append(f"{fp.name} row {i}: invalid source_id={sid!r}")
                 total_skipped += 1
+                total_invalid_sid += 1
                 continue
             source_corpus = _val(row, "source_corpus", "")
             # Canonical corpus composition (da#191): skip Hadith whose
@@ -360,7 +400,21 @@ def _load_hadiths(
                     total_skipped += 1
                     total_deduped += 1
                     continue
-            hid = hadith_node_id(sid)
+            # Quarantine, never abort (da#355). ``strict`` governs missing *files*,
+            # so it cannot be relied on to make a malformed row fatal-or-not; the
+            # production path (``cli._cmd_load``) passes strict=False. A single bad
+            # id must not kill a multi-hour, non-atomic load — the batches already
+            # committed would stay in Neo4j. Mirrors the null-``source_id`` handling
+            # five lines up: record it, count it, keep going.
+            try:
+                hid = hadith_node_id(sid)
+            except DoubledCorpusPrefixError as exc:
+                if strict:
+                    raise
+                all_errors.append(f"{fp.name} row {i}: {exc}")
+                total_skipped += 1
+                total_malformed += 1
+                continue
             batch.append(
                 {
                     "id": hid,
@@ -391,10 +445,20 @@ def _load_hadiths(
         created=total_created,
         merged=merged,
         skipped=total_skipped,
+        malformed_ids=total_malformed,
+        invalid_source_ids=total_invalid_sid,
         cross_edition_deduped=total_deduped,
         curated_identities=len(curated_identities),
     )
-    return LoadResult("Hadith", total_created, merged, total_skipped, all_errors)
+    return LoadResult(
+        "Hadith",
+        total_created,
+        merged,
+        total_skipped,
+        all_errors,
+        malformed_ids=total_malformed,
+        invalid_source_ids=total_invalid_sid,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -563,14 +627,26 @@ def _load_chains(
     batch: list[dict[str, Any]] = []
     errors: list[str] = []
     skipped = 0
+    malformed = 0
 
     for hid, mentions in seen_hadiths.items():
-        chn_id = chain_node_id(hid, 0)
+        # da#355: both constructors route through ``bare_source_id``, so a malformed
+        # hadith id raises here too. Quarantine the chain rather than abort the load.
+        try:
+            chn_id = chain_node_id(hid, 0)
+            chain_hadith_id = hadith_node_id(hid)
+        except DoubledCorpusPrefixError as exc:
+            if strict:
+                raise
+            errors.append(f"chain for hadith_id={hid!r}: {exc}")
+            skipped += 1
+            malformed += 1
+            continue
         narrator_ids = [nid for _pos, nid in sorted(mentions, key=lambda pair: pair[0])]
         batch.append(
             {
                 "id": chn_id,
-                "hadith_id": hadith_node_id(hid),
+                "hadith_id": chain_hadith_id,
                 "chain_index": 0,
                 "full_chain_text_ar": None,
                 "full_chain_text_en": None,
@@ -584,8 +660,10 @@ def _load_chains(
 
     created = client.execute_write_batch(_CHAIN_MERGE, batch) if batch else 0
     merged = len(batch) - created
-    logger.info("chains_loaded", created=created, merged=merged, skipped=skipped)
-    return LoadResult("Chain", created, merged, skipped, errors)
+    logger.info(
+        "chains_loaded", created=created, merged=merged, skipped=skipped, malformed_ids=malformed
+    )
+    return LoadResult("Chain", created, merged, skipped, errors, malformed_ids=malformed)
 
 
 # ---------------------------------------------------------------------------
@@ -628,6 +706,8 @@ def _load_gradings(
     batch: list[dict[str, Any]] = []
     errors: list[str] = []
     skipped = 0
+    malformed = 0
+    invalid_sid = 0
 
     for fp in files:
         rows = _read_parquet_rows(fp)
@@ -639,12 +719,23 @@ def _load_gradings(
             if not sid:
                 errors.append(f"{fp.name} row {i}: grade present but no source_id")
                 skipped += 1
+                invalid_sid += 1
                 continue
-            gid = grading_node_id(sid)
+            # da#355: quarantine a malformed id, never abort the load.
+            try:
+                gid = grading_node_id(sid)
+                grading_hadith_id = hadith_node_id(sid)
+            except DoubledCorpusPrefixError as exc:
+                if strict:
+                    raise
+                errors.append(f"{fp.name} row {i}: {exc}")
+                skipped += 1
+                malformed += 1
+                continue
             batch.append(
                 {
                     "id": gid,
-                    "hadith_id": hadith_node_id(sid),
+                    "hadith_id": grading_hadith_id,
                     "scholar_name": _val(row, "collection_name", "unknown"),
                     "grade": grade,
                     # Normalized display grade (da#148): the raw ``grade`` may be
@@ -658,8 +749,23 @@ def _load_gradings(
 
     created = client.execute_write_batch(_GRADING_MERGE, batch) if batch else 0
     merged = len(batch) - created
-    logger.info("gradings_loaded", created=created, merged=merged, skipped=skipped)
-    return LoadResult("Grading", created, merged, skipped, errors)
+    logger.info(
+        "gradings_loaded",
+        created=created,
+        merged=merged,
+        skipped=skipped,
+        malformed_ids=malformed,
+        invalid_source_ids=invalid_sid,
+    )
+    return LoadResult(
+        "Grading",
+        created,
+        merged,
+        skipped,
+        errors,
+        malformed_ids=malformed,
+        invalid_source_ids=invalid_sid,
+    )
 
 
 # ---------------------------------------------------------------------------

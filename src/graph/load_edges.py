@@ -18,6 +18,7 @@ import pyarrow.parquet as pq
 
 from src.parse.composition import is_canonical_hadith_id
 from src.parse.identity import (
+    DoubledCorpusPrefixError,
     collection_node_id,
     grading_node_id,
     hadith_node_id,
@@ -44,6 +45,19 @@ class EdgeLoadResult:
     created: int
     skipped: int
     missing_endpoints: int
+    # Edges refused because an endpoint id violates the id grammar (da#359).
+    malformed_ids: int = 0
+
+    @property
+    def refused(self) -> int:
+        """Edges declined because the input was defective, by any cause.
+
+        The edge loaders' only input-defect refusal is a malformed endpoint id;
+        a missing endpoint is counted separately as ``missing_endpoints``,
+        because a Hadith node that was never loaded is a *consequence* of a
+        refusal upstream rather than a defect in the edge row itself.
+        """
+        return self.malformed_ids
 
 
 # ---------------------------------------------------------------------------
@@ -273,14 +287,28 @@ def _load_transmitted_to(
                 continue  # curated NARRATED-only link — never a transmission pair
             by_hadith.setdefault(hid, []).append(row)
 
-    # Build all chain pairs
+    # Build all chain pairs. Validate the group's hadith id ONCE up front: every
+    # pair _build_chain_pairs emits re-derives it, so a malformed id would raise
+    # from inside the builder. Quarantine the whole group instead (da#355) — this
+    # loader commits per batch inside the streaming loop, so an escaping exception
+    # leaves batches 1..N-1 already written to Neo4j.
     all_pairs: list[dict[str, Any]] = []
+    malformed_ids = 0
     for hid, mentions in by_hadith.items():
+        try:
+            hadith_node_id(hid)
+        except DoubledCorpusPrefixError:
+            if strict:
+                raise
+            malformed_ids += 1
+            continue
         all_pairs.extend(_build_chain_pairs(mentions))
+    if malformed_ids:
+        logger.warning("transmitted_to_malformed_ids_quarantined", hadiths=malformed_ids)
 
     if not all_pairs:
         logger.info("transmitted_to_no_pairs", dropped_noncanonical=dropped_noncanonical)
-        return EdgeLoadResult("TRANSMITTED_TO", 0, 0, 0)
+        return EdgeLoadResult("TRANSMITTED_TO", 0, 0, 0, malformed_ids=malformed_ids)
 
     # Check for missing endpoints
     check_results = _chunked_read(client, _TRANSMITTED_TO_CHECK, all_pairs, batch_size)
@@ -308,7 +336,7 @@ def _load_transmitted_to(
         total_pairs=len(all_pairs),
         dropped_noncanonical=dropped_noncanonical,
     )
-    return EdgeLoadResult("TRANSMITTED_TO", created, 0, missing)
+    return EdgeLoadResult("TRANSMITTED_TO", created, 0, missing, malformed_ids=malformed_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -387,13 +415,22 @@ def _load_narrated(
                 first_narrators[hid] = (pos, nid, row.get("provenance"))
 
     batch: list[dict[str, Any]] = []
+    malformed_ids = 0
     for hid, (_pos, nid, provenance) in first_narrators.items():
-        full_hid = hadith_node_id(hid)
+        try:
+            full_hid = hadith_node_id(hid)
+        except DoubledCorpusPrefixError:
+            if strict:
+                raise
+            malformed_ids += 1
+            continue
         batch.append({"narrator_id": nid, "hadith_id": full_hid, "provenance": provenance})
+    if malformed_ids:
+        logger.warning("narrated_malformed_ids_quarantined", hadiths=malformed_ids)
 
     if not batch:
         logger.info("narrated_no_edges")
-        return EdgeLoadResult("NARRATED", 0, 0, 0)
+        return EdgeLoadResult("NARRATED", 0, 0, 0, malformed_ids=malformed_ids)
 
     # Check endpoints
     check_results = _chunked_read(client, _NARRATED_CHECK, batch, batch_size)
@@ -416,7 +453,7 @@ def _load_narrated(
         missing_endpoints=missing,
         dropped_noncanonical=dropped_noncanonical,
     )
-    return EdgeLoadResult("NARRATED", created, 0, missing)
+    return EdgeLoadResult("NARRATED", created, 0, missing, malformed_ids=malformed_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +513,7 @@ def _load_appears_in(
 
     batch: list[dict[str, Any]] = []
     skipped = 0
+    malformed_ids = 0
 
     for fp in files:
         rows = _read_parquet_rows(fp)
@@ -485,7 +523,14 @@ def _load_appears_in(
             if not sid or not cname:
                 skipped += 1
                 continue
-            hid = hadith_node_id(sid)
+            try:
+                hid = hadith_node_id(sid)
+            except DoubledCorpusPrefixError:
+                if strict:
+                    raise
+                skipped += 1
+                malformed_ids += 1
+                continue
             # Collection IDs in staging use "{corpus}:{name}" format (e.g. "lk:bukhari").
             # Build the same key so we match the Collection nodes that were loaded.
             corpus = row.get("source_corpus", "")
@@ -501,9 +546,12 @@ def _load_appears_in(
                 }
             )
 
+    if malformed_ids:
+        logger.warning("appears_in_malformed_ids_quarantined", rows=malformed_ids)
+
     if not batch:
         logger.info("appears_in_no_edges")
-        return EdgeLoadResult("APPEARS_IN", 0, skipped, 0)
+        return EdgeLoadResult("APPEARS_IN", 0, skipped, 0, malformed_ids=malformed_ids)
 
     # Check endpoints
     check_results = _chunked_read(client, _APPEARS_IN_CHECK, batch, batch_size)
@@ -521,7 +569,7 @@ def _load_appears_in(
         else 0
     )
     logger.info("appears_in_loaded", created=created, skipped=skipped, missing_endpoints=missing)
-    return EdgeLoadResult("APPEARS_IN", created, skipped, missing)
+    return EdgeLoadResult("APPEARS_IN", created, skipped, missing, malformed_ids=malformed_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +630,7 @@ def _load_parallel_of(
     skipped = 0
     missing = 0
     created = 0
+    malformed_ids = 0
     for rows in _iter_parquet_row_batches(path):
         batch: list[dict[str, Any]] = []
         for row in rows:
@@ -590,9 +639,19 @@ def _load_parallel_of(
             if not id_a or not id_b:
                 skipped += 1
                 continue
-            # Ensure lower ID -> higher ID for consistent directionality
-            full_a = hadith_node_id(id_a)
-            full_b = hadith_node_id(id_b)
+            # da#355: this loop commits each batch via execute_write_batch BEFORE
+            # reading the next one — there is no spanning transaction. An exception
+            # escaping here would leave batches 1..N-1 in Neo4j and abort with a
+            # traceback, hours into the load. Quarantine the pair instead.
+            try:
+                full_a = hadith_node_id(id_a)
+                full_b = hadith_node_id(id_b)
+            except DoubledCorpusPrefixError:
+                if strict:
+                    raise
+                skipped += 1
+                malformed_ids += 1
+                continue
             if full_a > full_b:
                 full_a, full_b = full_b, full_a
             batch.append(
@@ -623,6 +682,9 @@ def _load_parallel_of(
                 _PARALLEL_OF_QUERY, valid_batch, batch_size=batch_size
             )
 
+    if malformed_ids:
+        logger.warning("parallel_of_malformed_ids_quarantined", pairs=malformed_ids)
+
     if candidates == 0:
         # An empty parallel_links.parquet means the dedup / parallel-detection
         # stage produced nothing — /compare Browse Parallels will be empty. Surface
@@ -631,7 +693,7 @@ def _load_parallel_of(
             "parallel_of_no_edges",
             msg="parallel_links.parquet has no usable rows — /compare will be empty",
         )
-        return EdgeLoadResult("PARALLEL_OF", 0, skipped, 0)
+        return EdgeLoadResult("PARALLEL_OF", 0, skipped, 0, malformed_ids=malformed_ids)
 
     # Detected links that resolved to zero loaded edges is a silent-failure mode
     # (every endpoint missing — e.g. an id-scheme mismatch): warn, do not pass it
@@ -648,7 +710,7 @@ def _load_parallel_of(
         logger.info(
             "parallel_of_loaded", created=created, skipped=skipped, missing_endpoints=missing
         )
-    return EdgeLoadResult("PARALLEL_OF", created, skipped, missing)
+    return EdgeLoadResult("PARALLEL_OF", created, skipped, missing, malformed_ids=malformed_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -832,6 +894,7 @@ def _load_graded_by(
     client: Neo4jClient,
     staging_dir: Path,
     *,
+    strict: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> EdgeLoadResult:
     """Load GRADED_BY edges from hadith staging data.
@@ -845,6 +908,7 @@ def _load_graded_by(
 
     batch: list[dict[str, Any]] = []
     skipped = 0
+    malformed_ids = 0
 
     for fp in files:
         rows = _read_parquet_rows(fp)
@@ -856,13 +920,23 @@ def _load_graded_by(
             if not sid:
                 skipped += 1
                 continue
-            hid = hadith_node_id(sid)
-            gid = grading_node_id(sid)
+            try:
+                hid = hadith_node_id(sid)
+                gid = grading_node_id(sid)
+            except DoubledCorpusPrefixError:
+                if strict:
+                    raise
+                skipped += 1
+                malformed_ids += 1
+                continue
             batch.append({"hadith_id": hid, "grading_id": gid})
+
+    if malformed_ids:
+        logger.warning("graded_by_malformed_ids_quarantined", rows=malformed_ids)
 
     if not batch:
         logger.info("graded_by_no_edges")
-        return EdgeLoadResult("GRADED_BY", 0, skipped, 0)
+        return EdgeLoadResult("GRADED_BY", 0, skipped, 0, malformed_ids=malformed_ids)
 
     # Check endpoints
     check_results = _chunked_read(client, _GRADED_BY_CHECK, batch, batch_size)
@@ -880,7 +954,7 @@ def _load_graded_by(
         else 0
     )
     logger.info("graded_by_loaded", created=created, skipped=skipped, missing_endpoints=missing)
-    return EdgeLoadResult("GRADED_BY", created, skipped, missing)
+    return EdgeLoadResult("GRADED_BY", created, skipped, missing, malformed_ids=malformed_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -930,7 +1004,7 @@ def load_all_edges(
     results.append(_load_appears_in(client, staging_dir, strict=strict, batch_size=batch_size))
     results.append(_load_parallel_of(client, staging_dir, strict=strict, batch_size=batch_size))
     results.append(_load_studied_under(client, staging_dir, batch_size=batch_size))
-    results.append(_load_graded_by(client, staging_dir, batch_size=batch_size))
+    results.append(_load_graded_by(client, staging_dir, strict=strict, batch_size=batch_size))
 
     total_created = sum(r.created for r in results)
     total_missing = sum(r.missing_endpoints for r in results)
