@@ -278,7 +278,30 @@ def _cmd_load(
     # claiming a code of its own; the exit-code space is being consolidated into
     # one registry (da#384) and a new value does not get minted here.
     try:
-        save_manifest(current_manifest, data_dir / LAST_LOADED_MANIFEST_FILENAME)
+        # Record as "last loaded" only what was actually loaded (da#350).
+        #
+        # `current_manifest` covers every input file. A --nodes-only run loads none
+        # of the edge inputs, so writing that manifest claims they were loaded; the
+        # next --incremental run then diffs against the claim, finds nothing
+        # changed, prints "No changes detected. Skipping incremental load." and
+        # returns -- the edges are never loaded and nothing says so.
+        #
+        # There is no honest "fully loaded" file set for a partial run, so a partial
+        # run records nothing and leaves the previous full load's manifest in place.
+        # The next incremental then re-diffs against that older, truthful baseline.
+        # Worst case it re-loads work already done, which is free: every loader is
+        # an idempotent MERGE. Skipping something never loaded is not free.
+        if nodes_only:
+            print(
+                "\nnodes-only run: last-loaded manifest NOT updated (edges were not "
+                "loaded, so no complete load happened). The next --incremental load "
+                "will diff against the last complete load."
+            )
+        elif save_manifest(current_manifest, data_dir / LAST_LOADED_MANIFEST_FILENAME) is None:
+            print(
+                "\nWARNING: could not record the last-loaded manifest. The load "
+                "succeeded; the next --incremental load will re-load every input."
+            )
 
         audit = create_audit_entry(
             "load",
