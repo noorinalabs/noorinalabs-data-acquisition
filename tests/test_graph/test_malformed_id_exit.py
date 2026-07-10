@@ -25,7 +25,6 @@ produce the failing state proves nothing.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -34,7 +33,8 @@ import pytest
 
 import src.cli as cli
 import src.graph as graph
-from src.graph import EXIT_MALFORMED_IDS, EdgeLoadResult, LoadResult, LoadSummary
+from src.exit_codes import ExitCode
+from src.graph import EdgeLoadResult, LoadResult, LoadSummary
 from src.graph.load_edges import (
     _load_appears_in,
     _load_graded_by,
@@ -44,7 +44,6 @@ from src.graph.load_edges import (
 )
 from src.graph.load_nodes import _load_chains, _load_hadiths
 from src.graph.validate import ValidationResult
-from src.resolve._checkpoint import EXIT_STOPPED_AT_LIMIT
 
 from .conftest import (
     MockNeo4jClient,
@@ -474,7 +473,7 @@ class TestCmdLoadExitCode:
         with pytest.raises(SystemExit) as exc:
             cli._cmd_load(skip_validation=True)
 
-        assert exc.value.code == EXIT_MALFORMED_IDS
+        assert exc.value.code == ExitCode.REFUSED_ROWS
 
     def test_clean_load_still_exits_zero(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -498,7 +497,7 @@ class TestCmdLoadExitCode:
         with pytest.raises(SystemExit) as exc:
             cli._cmd_load(nodes_only=True)
 
-        assert exc.value.code == EXIT_MALFORMED_IDS
+        assert exc.value.code == ExitCode.REFUSED_ROWS
 
     def test_blank_source_id_alone_exits_nonzero(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -526,7 +525,7 @@ class TestCmdLoadExitCode:
         with pytest.raises(SystemExit) as exc:
             cli._cmd_load(skip_validation=True)
 
-        assert exc.value.code == EXIT_MALFORMED_IDS
+        assert exc.value.code == ExitCode.REFUSED_ROWS
 
     def test_malformed_ids_outrank_validation_findings(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -551,53 +550,4 @@ class TestCmdLoadExitCode:
         with pytest.raises(SystemExit) as exc:
             cli._cmd_load()
 
-        assert exc.value.code == EXIT_MALFORMED_IDS
-
-
-def _declared_exit_codes() -> dict[str, int]:
-    """Every ``EXIT_* = <int>`` constant declared anywhere under ``src/``.
-
-    DERIVED by scanning the tree, not a hand-written tuple. A literal reserved
-    set only pins the members somebody remembered to name, and is blind to every
-    sibling constant added later -- which is exactly how `EXIT_VALIDATION_FINDINGS
-    = 4` (da#372) and `EXIT_MISSING_DEPENDENCY = 4` (da#362) were each written
-    past a non-collision test that could not see the other. `_cmd_pipeline` runs
-    resolve and load in ONE process, so the exit-code space is global and a
-    double-booking is a real ambiguity, not a theoretical one.
-    """
-    src = Path(__file__).resolve().parents[2] / "src"
-    pattern = re.compile(r"^(EXIT_[A-Z_]+)\s*=\s*(\d+)\s*$", re.MULTILINE)
-    codes: dict[str, int] = {}
-    for py in src.rglob("*.py"):
-        for name, value in pattern.findall(py.read_text(encoding="utf-8")):
-            codes[name] = int(value)
-    return codes
-
-
-def test_declared_exit_codes_are_unique() -> None:
-    """No two CLI-reachable exit constants may share a value.
-
-    Reddens on the NEXT collision rather than the one after it.
-    """
-    codes = _declared_exit_codes()
-    # Guard the instrument: a scan that silently found nothing would pass
-    # vacuously. See feedback_silent_zero_is_not_a_measurement.
-    assert "EXIT_MALFORMED_IDS" in codes, f"scan found no EXIT_MALFORMED_IDS: {codes}"
-    assert "EXIT_STOPPED_AT_LIMIT" in codes, f"scan missed resolve's constant: {codes}"
-
-    by_value: dict[int, list[str]] = {}
-    for name, value in codes.items():
-        by_value.setdefault(value, []).append(name)
-    collisions = {v: sorted(n) for v, n in by_value.items() if len(n) > 1}
-    assert not collisions, f"exit codes double-booked: {collisions}"
-
-
-def test_malformed_ids_code_is_not_reserved() -> None:
-    """`0` success, `2` argparse usage, `3` resolve's stop-at-limit.
-
-    `1` and `4` are claimed by da#354/da#372. Checked against the derived set so
-    a constant added elsewhere in `src/` cannot slip past this.
-    """
-    reserved = {0, 2} | set(_declared_exit_codes().values()) - {EXIT_MALFORMED_IDS}
-    assert EXIT_MALFORMED_IDS not in reserved
-    assert EXIT_MALFORMED_IDS != EXIT_STOPPED_AT_LIMIT
+        assert exc.value.code == ExitCode.REFUSED_ROWS

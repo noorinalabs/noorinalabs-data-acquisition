@@ -17,7 +17,7 @@ from src.utils.neo4j_client import Neo4jClient
 
 logger = get_logger(__name__)
 
-# --- Exit codes (da#359) ----------------------------------------------------
+# --- Why quarantine, not abort (da#359) --------------------------------------
 # A malformed id is quarantined, never aborted: these loaders commit per batch
 # with no spanning transaction, so an escaping exception would strand batches
 # 1..N-1 in Neo4j hours into a load. But a load that ran to completion having
@@ -25,19 +25,15 @@ logger = get_logger(__name__)
 # sanadset hadiths (76.3% of staging) could be absent from the graph while
 # parse, load and validation all reported success.
 #
-# This is a third, distinct fact, not either of da#354's two:
-#   * NOT a load failure. The loaders completed and their batches are committed.
-#   * NOT a validation finding. Validation never sees a quarantined row, so it
-#     cannot report on one; the graph is not what the loader intended.
-# It means: the load completed, the graph is INCOMPLETE, and the producer
-# emitted ids that violate the grammar asserted in src/parse/identity.py.
-#
-# 0 is success; 2 is argparse's usage error; 3 is src.resolve.EXIT_STOPPED_AT_LIMIT;
-# 1 and 4 are claimed by da#354 (EXIT_LOAD_FAILED / EXIT_VALIDATION_FINDINGS).
-EXIT_MALFORMED_IDS = 5
+# The exit code that says so is `ExitCode.REFUSED_ROWS`, declared -- like every
+# other exit code this pipeline emits -- in `src/exit_codes.py` (da#384). It is
+# keyed on `LoadSummary.total_refused` below. This module deliberately declares
+# no exit constant of its own: the value it once hard-coded here was `5`, which
+# da#372 subsequently assigned to `ExitCode.VALIDATION_FINDINGS`. A comment in
+# this file claiming to track who owns which integer was exactly the artifact
+# the registry exists to abolish.
 
 __all__ = [
-    "EXIT_MALFORMED_IDS",
     "EdgeLoadResult",
     "LoadResult",
     "LoadSummary",

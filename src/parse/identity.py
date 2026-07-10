@@ -46,7 +46,7 @@ Two historical identity hazards this module designs out
    hadiths, chains, gradings and ``PARALLEL_OF`` pairs, not distinct hadiths
    (da#355). Since da#353 no producer emits the shape at all, so any occurrence
    at load time is a producer defect and exits non-zero (da#359, see
-   ``src.graph.EXIT_MALFORMED_IDS``). Legacy ids already persisted in a graph are
+   ``src.exit_codes.ExitCode.REFUSED_ROWS``). Legacy ids already persisted in a graph are
    canonicalized one-shot by :mod:`src.graph.migrate`.
 2. **collection-ref vs in-book-ordinal** (da#77): ``source_id``'s positional
    tail is a stable within-collection key. The *in-book ordinal* that flows to

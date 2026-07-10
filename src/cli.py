@@ -177,7 +177,7 @@ def _cmd_load(
 
     _check_neo4j()
 
-    from src.graph import EXIT_MALFORMED_IDS, load_all
+    from src.graph import load_all
     from src.graph.validate import _DEFAULT_VALIDATION_TIMEOUT_SECONDS
     from src.pipeline.audit import create_audit_entry, write_audit_entry
     from src.pipeline.manifest import (
@@ -352,10 +352,16 @@ def _cmd_load(
             f"{refused - malformed} are absent/blank/non-string).\n"
             "The load ran to completion and committed what it accepted, but the graph is "
             "INCOMPLETE. This is a producer defect: re-run `parse` to regenerate the "
-            f"staging artifact, then re-load. Exiting {EXIT_MALFORMED_IDS}.",
+            "staging artifact, then re-load.\n"
+            "CHECK THE PARSE SUMMARY. `parse` exits 0 even when an adapter raises: "
+            "`src.parse.run_all` catches the exception, logs `parse_failed`, and leaves "
+            "the previous staging file on disk untouched (da#382). A `parse` that prints "
+            "`[FAIL]` for the offending source has regenerated nothing, and the next "
+            "`load` will refuse exactly these rows again.\n"
+            f"Exiting {ExitCode.REFUSED_ROWS.value}.",
             file=sys.stderr,
         )
-        sys.exit(EXIT_MALFORMED_IDS)
+        sys.exit(ExitCode.REFUSED_ROWS)
 
     if summary.validation_results and not summary.validation_passed:
         fatal = [vr for vr in summary.validation_results if vr.is_fatal]
