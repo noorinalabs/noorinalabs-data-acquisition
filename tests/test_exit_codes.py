@@ -366,7 +366,8 @@ _BINDING_FORMS: dict[str, tuple[str, str]] = {
 
 def _unnamed_exits(tree: ast.AST) -> list[tuple[int, str]]:
     """Every exit in *tree* whose argument is not provably a named code."""
-    return [hit for n in ast.walk(tree) for hit in _unnamed_exit_at(n)]
+    funcs = _module_functions(tree)
+    return [hit for n in ast.walk(tree) for hit in _unnamed_exit_at(n, funcs)]
 
 
 def _unnamed_exits_by_scope(tree: ast.AST) -> dict[str, list[str]]:
@@ -403,54 +404,65 @@ def _unnamed_exits_by_scope(tree: ast.AST) -> dict[str, list[str]]:
     descend(tree, "<module>")
 
     found: dict[str, list[str]] = {}
-    for node, value in ((n, v) for n in ast.walk(tree) for _l, v in _unnamed_exit_at(n)):
+    funcs = _module_functions(tree)
+    for node, value in ((n, v) for n in ast.walk(tree) for _l, v in _unnamed_exit_at(n, funcs)):
         found.setdefault(owner.get(node, "<module>"), []).append(value)
     return found
 
 
-def _exit_arg_is_named(arg: ast.expr) -> bool:
-    """Is this exit argument PROVABLY a code the registry names?
+def _module_functions(tree: ast.AST) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Every function defined in *tree*, by name. Used for the one-hop value follow."""
+    return {
+        n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
 
-    An ALLOWLIST, and it asks the **registry**, not the syntax.
 
-    Enumerating the bad shapes was a hand-maintained list, and it shipped blind to
-    ``sys.exit(1 if x else 2)`` -- a bare integer at runtime, an ``ast.IfExp``
-    statically. Adding ``IfExp`` would have been the next list.
+def _exit_arg_is_named(
+    arg: ast.expr | None,
+    funcs: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] | None = None,
+) -> bool:
+    """Is the value this expression hands the OS provably a code the registry names?
 
-    But a first inversion -- *permit any ``Name`` or ``Attribute``* -- is also
-    incomplete, and this is the correction Alejandra Reyes-Fuentes' argument
-    forces even though her counterexample did not::
+    An ALLOWLIST that asks the **registry**, then **follows the value**, rather
+    than asking the syntax. Every hand-maintained list on this issue died the same
+    way, and this is the last of them.
 
-        x = 7
-        sys.exit(x)        # a Name. A bare integer reaches the OS.
-        sys.exit(Other.THING)   # an Attribute of some other enum entirely
-
-    Permitting a bare `Name` is permitting *any* value, so the guard would have
-    said nothing about the one thing it exists to say. Three shapes are provably
-    named, and each is checked **against the registry**:
-
-    * ``Constant 0`` -- success; not a member, nothing to name.
+    * ``None`` / absent / ``Constant 0`` -- success. Nothing to name.
     * a ``Name`` that is an ``EXIT_*`` alias or a registry member name.
     * an ``Attribute`` ``ExitCode.<MEMBER>``, resolved through ``__members__``.
+    * **a call to a module-local function all of whose returns are themselves
+      permitted** -- ONE hop. No ``return``, or a bare ``return``, yields ``None``
+      and exits ``0``.
 
-    Everything else offends, **including shapes nobody has conceived of**.
-    Fail-closed: a novel shape is refused, not waved through.
+    Everything else offends, including shapes nobody has conceived of.
 
-    What this is NOT: a decision procedure for *"does this call site emit a bare
-    integer at runtime."* That question is undecidable statically -- ``sys.exit(rc)``
-    may or may not, and ``SystemExit(main())`` depends on ``main``. This guard
-    answers a decidable question instead: *"is the emitted code named by the
-    registry, right here, where a reader can see it."* An unnamed code is refused
-    whether or not it would have been correct. That is the property the registry
-    exists to enforce, and it is the one worth enforcing.
+    Why the hop. ``raise SystemExit(main())`` is the console-script idiom, and
+    ``src/tools/duck.py`` uses it. The blacklist waved it through; permitting any
+    ``Name`` waved ``sys.exit(x)`` through; refusing every ``Call`` flagged a
+    correct program and invited a module list. **The question was never which
+    shapes are bad -- it is what integer the expression hands the OS.** So ask
+    that. Plant ``return 3`` in ``duck.main`` and the guard reds at the
+    ``SystemExit(main())`` line, naming ``main()`` -- where the code is chosen.
+
+    Two hops red, deliberately: ``sys.exit(g())`` where ``g`` returns ``f()`` is
+    refused. Fail-closed at the boundary of what the scan can see, and the
+    boundary is **stated** rather than a shape somebody forgot.
+
+    What this does NOT claim. *"Does this call site emit a bare integer at
+    runtime"* is undecidable statically. It answers a decidable question instead:
+    **is the emitted code named by the registry, right here, where a reader can
+    see it** -- and refuses an unnamed code whether or not it would be correct.
 
     Out of reach of ANY static check on the call, documented rather than chased:
 
     * ``globals()["EXIT_X"] = 4`` -- the *name* is a string literal.
-    * ``os._exit(3)`` -- a different function; it bypasses ``SystemExit`` entirely.
-      Alejandra flagged it; ``src/`` contains none.
+    * ``os._exit(3)`` -- a different function; it bypasses ``SystemExit``.
     """
+    if arg is None:
+        return True  # `sys.exit()` -- no argument, exits 0
     if isinstance(arg, ast.Constant):
+        if arg.value is None:
+            return True  # `sys.exit(None)` exits 0
         return arg.value == 0 and not isinstance(arg.value, bool)
     if isinstance(arg, ast.Name):
         return _is_exit_name(arg.id)
@@ -460,20 +472,30 @@ def _exit_arg_is_named(arg: ast.expr) -> bool:
             and arg.value.id == ExitCode.__name__
             and arg.attr in ExitCode.__members__
         )
+    if isinstance(arg, ast.Call) and funcs is not None:
+        if not isinstance(arg.func, ast.Name) or arg.func.id not in funcs:
+            return False
+        callee = funcs[arg.func.id]
+        returns = [n for n in ast.walk(callee) if isinstance(n, ast.Return)]
+        # `funcs=None` on the recursive call is what makes it ONE hop.
+        return all(_exit_arg_is_named(r.value, None) for r in returns)
     return False
 
 
-def _unnamed_exit_at(node: ast.AST) -> list[tuple[int, str]]:
+def _unnamed_exit_at(
+    node: ast.AST,
+    funcs: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] | None = None,
+) -> list[tuple[int, str]]:
     """The unnamed exit AT this node, if the node itself is one. Never descends."""
-    if not isinstance(node, ast.Call) or len(node.args) != 1:
+    if not isinstance(node, ast.Call) or len(node.args) > 1:
         return []
     fname = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
     if fname not in ("exit", "SystemExit"):
         return []
-    arg = node.args[0]
-    if _exit_arg_is_named(arg):
+    arg = node.args[0] if node.args else None
+    if _exit_arg_is_named(arg, funcs):
         return []
-    return [(node.lineno, ast.unparse(arg))]
+    return [(node.lineno, ast.unparse(arg) if arg is not None else "")]
 
 
 class TestNoUnnamedExit:
@@ -492,20 +514,36 @@ class TestNoUnnamedExit:
 
     PERMITTED = [
         "sys.exit(0)",
+        "sys.exit(None)",
+        "sys.exit()",
         "sys.exit(ExitCode.LOAD_FAILED)",
         "sys.exit(EXIT_REFUSED_ROWS)",
         "sys.exit(EXIT_STOPPED_AT_LIMIT)",  # the alias src/cli.py actually uses
+        # ONE HOP into a module-local callee whose returns are all permitted.
+        "def f():\n    pass\nraise SystemExit(f())",  # implicit None -> exit 0
+        "def f():\n    return\nsys.exit(f())",  # bare return -> None -> exit 0
+        "def f():\n    return 0\nraise SystemExit(f())",  # duck.py's idiom
+        "def f():\n    return ExitCode.LOAD_FAILED\nsys.exit(f())",
     ]
     OFFENDING = [
         "sys.exit(3)",
         "raise SystemExit(4)",
         "sys.exit(1 if x else 2)",  # ast.IfExp -- the shape the blacklist missed
-        "sys.exit(int(cfg))",  # ast.Call
+        "sys.exit(int(cfg))",  # a Call to a non-local callee
         "sys.exit(codes[0])",  # ast.Subscript
         "sys.exit(base + 1)",  # ast.BinOp
         "sys.exit(True)",  # bool is an int subclass; exits 1
         "sys.exit(rc)",  # a Name the registry does not name
         "sys.exit(Other.THING)",  # an Attribute of some other enum
+        "x = 7\nsys.exit(x)",  # a Name bound to a bare int
+        # The hop follows the VALUE, so a bad return is caught at the exit line.
+        "def main():\n    return 3\nraise SystemExit(main())",
+        "def f():\n    if x:\n        return 0\n    return 3\nsys.exit(f())",
+        # TWO hops red: fail-closed at the boundary of what the scan can see.
+        # `f` returns 0, so a TWO-hop follow would permit this. One hop refuses it:
+        # `g`'s return is a Call, and the recursion carries `funcs=None`.
+        "def f():\n    return 0\ndef g():\n    return f()\nsys.exit(g())",
+        "sys.exit(other.main())",  # not module-local; cannot follow
     ]
 
     @pytest.mark.parametrize("source", PERMITTED)
@@ -543,30 +581,23 @@ class TestNoUnnamedExit:
         assert _unnamed_exits(ast.parse("os._exit(3)")) == []
         assert _unnamed_exits(ast.parse("print(3)")) == []
 
-    def test_the_live_tree_has_exactly_two_unnamed_exits_and_neither_is_mine(self) -> None:
+    def test_the_live_tree_has_exactly_one_unnamed_exit_and_da372_owns_it(self) -> None:
         """The whole of `src/`, attributed by scope, not by line number.
 
-        TRANSITIONAL, AND SELF-EXPIRING. Two unnamed exits survive, neither
-        this PR's to fix, and both PINNED rather than exempted:
-
-        * `_cmd_load`'s findings exit -- `sys.exit(1)`. It is da#372's diff
-          (da#384 Amendment I) and must not be touched here.
-        * `src/tools/duck.py`'s `raise SystemExit(main())` -- a Call argument.
-          `duck` is a SEPARATE program (`python -m src.tools.duck`); the
-          `isnad-ingest` entry point is `src.cli:main`. Its `main()` returns `0`
-          on all three paths, so it emits only `0` today -- but the allowlist
-          cannot know that, and fail-closed is the direction that survives review.
-          Routing it through the registry deletes this entry.
-
-        The pin reds in BOTH directions, which is what makes it a deadline rather
-        than an exemption list:
+        TRANSITIONAL, AND SELF-EXPIRING. One unnamed exit survives -- `_cmd_load`'s
+        findings exit, `sys.exit(1)`. It is da#372's diff (da#384 Amendment I) and
+        must not be touched here. It is PINNED, not exempted:
 
         * a NEW unnamed exit anywhere -> RED, the set grows;
-        * either of these two routed -> RED, the set shrinks.
+        * da#372 routing `_cmd_load` -> RED, the set empties.
 
-        Neither can be left behind. When one is fixed this test fails and names
-        its own edit. A guard that quietly tolerates its exception forever is the
-        hand-maintained list this registry exists to abolish.
+        When da#372 lands, this fails and names its own edit. An exception list
+        permits, silently, forever. A pin refuses, loudly, with a deadline.
+
+        `src/tools/duck.py`'s `raise SystemExit(main())` was pinned here until the
+        guard learned to follow the value one hop. It is green now, untouched.
+        Scoping around it would have been a module list; exempting it, an
+        exception list. Following the value is neither.
         """
         offenders: dict[str, list[str]] = {}
         for py in sorted(_src_root().rglob("*.py")):
@@ -575,13 +606,36 @@ class TestNoUnnamedExit:
             ).items():
                 offenders.setdefault(scope, []).extend(values)
 
-        assert offenders == {"_cmd_load": ["1"], "<module>": ["main()"]}, (
+        assert offenders == {"_cmd_load": ["1"]}, (
             "the unnamed-exit set changed.\n"
             f"  found: {offenders}\n"
-            "  If da#372 routed _cmd_load, or duck.py's entry point was routed,\n"
-            "  this test has done its job: drop that entry, and when the dict is\n"
-            "  empty replace the whole assertion with `assert not offenders`.\n"
+            "  If da#372 routed _cmd_load, this test has done its job: replace it\n"
+            "  with `assert not offenders`.\n"
             "  If something NEW exits unnamed: name the code in src/exit_codes.py."
+        )
+
+    def test_the_hop_follows_the_value_into_ducks_real_idiom(self) -> None:
+        """`duck.py` as it stands is green; a `return 3` inside its `main` reds it.
+
+        The DISCRIMINATOR. A guard that merely permitted any `SystemExit(f())`
+        would also be green on the shipped file -- and would stay green on the
+        mutant. Both halves are asserted here, so a pass means the hop happened.
+
+        The fixture is the production file, read from disk, not a paraphrase.
+        """
+        duck = _src_root() / "tools" / "duck.py"
+        shipped = duck.read_text(encoding="utf-8")
+
+        # INSTRUMENT GUARD: the fixture must contain the idiom under test, or the
+        # green below is a statement about a file with no exit in it at all.
+        assert "SystemExit(main())" in shipped, "duck.py no longer uses the idiom"
+        assert _unnamed_exits(ast.parse(shipped)) == [], "duck.py should be green as shipped"
+
+        mutated = shipped.replace("    return 0", "    return 3", 1)
+        assert mutated != shipped, "plant did not apply"
+        hits = _unnamed_exits(ast.parse(mutated))
+        assert [v for _lineno, v in hits] == ["main()"], (
+            f"a bad return inside main() must red at the SystemExit line; got {hits}"
         )
 
     def test_the_scope_walk_sees_async_and_module_scope(self) -> None:
