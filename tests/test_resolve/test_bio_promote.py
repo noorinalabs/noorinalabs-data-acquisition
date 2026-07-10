@@ -784,35 +784,50 @@ def test_truncated_residue_blocked_via_canonical_fold_not_string_equality(tmp_pa
 # (`ابو عمرو` at mc=899, `عبد الله بن محمد العدوي` at mc=1,194). Leak that cut and the
 # whole tree stays green. A rule whose deletion no test notices is not under test.
 #
-# PROVENANCE — every row, stated individually, with the id it came from.
+# PROVENANCE — every row, with its id, and the scan's own scope stated below it.
 #
-# This block has been wrong twice, in opposite directions, and both errors were the same
-# error: a claim about a SET, written while looking at one MEMBER.
+# SCOPE OF THE SEARCH (stated because a zero whose search space is implicit cannot be
+# audited — by a reviewer, or by its author an hour later; a provenance claim must carry
+# its own provenance):
+#   searched: the 32 parquet files under `data/staging/` and `data/curated/`
+#   columns : name_ar, name_ar_normalized, name_raw, name_normalized, alias,
+#             alias_normalized, canonical_name_ar_normalized, aliases
+#   excluded: the 8 archival snapshot dirs (`data/curated.pre-da311-scrub-*`,
+#             `data/curated.run5-scrubbed`, `data/curated.pre-wave23-reload-*`, …).
+#             They are DELIBERATELY out of scope: a matn-derived name in a pre-scrub
+#             snapshot is the defect da#311 removed, so a hit there is evidence of the
+#             bug, not of the value being real. Widening to them manufactures false
+#             positives that carry the authority of an exhaustive search.
+#   control : read out of `narrator_aliases_itqan.parquet` — a file an earlier, narrower
+#             scan never opened. A control drawn from inside the scope proves only that
+#             the scan can see. It cannot prove the scope is right. The control must be a
+#             value the scan would MISS if the scope were too narrow.
 #
-#   1. It first named the Thawban row as "the one fixture not drawn from an artifact on
-#      disk." Naming one exception silently certifies every row you did not name.
-#   2. Correcting that, it then listed `عاءشه زوج النبي` as NOT on disk. It IS on disk.
-#      My scan covered only `narrators_bio_*` and `narrator_mentions_*` — it never opened
-#      `narrator_aliases_itqan.parquet` or `narrators_canonical.parquet`. Worse, its
-#      instrument guard passed, because the control value I chose lived INSIDE the subset
-#      I was already searching. A control cannot detect an omitted scope if it is drawn
-#      from the scope you did not omit.
+# This block has been wrong twice, in opposite directions, and both errors were one error:
+# a claim about a SET, written while looking at one MEMBER.
+#   1. It named the Thawban row "the one fixture not drawn from disk." Naming one
+#      exception silently certifies every row you did not name.
+#   2. Correcting that, it listed the apposition fixture as NOT on disk, from a scan that
+#      never opened the alias table — and whose instrument guard passed, because the
+#      control lived inside the subset being searched.
 #
-# Re-measured across every name-bearing column of all 21 live `data/staging` +
-# `data/curated` parquet files (`name_ar`, `name_ar_normalized`, `name_raw`,
-# `name_normalized`, `alias`, `alias_normalized`, `canonical_name_ar_normalized`,
-# `aliases`) — 14,485,736 cells, compared under `normalize_arabic`. The control is now
-# read from `narrator_aliases_itqan.parquet`, a file the previous scan never opened, so
-# it can fail on scope omission and not merely on a broken matcher.
+# ATTESTED ON DISK, AND ON THIS GUARD'S PATH — verbatim `name_ar` from
+# `data/staging/narrators_bio_itqan.parquet`, which is the column `bio_promote` feeds the
+# cleaner (`bio_promote.py:168`):
+#   `أبو عمرو الذي`                  itqan:45083
+#   `عبد الله بن محمد العدوي يقال`   itqan:47593
+#   `أبو نصر الذي`                   itqan:47050
+#   `ابو محمد بصري عن محمد بن علي`   itqan:49877
+#   `مكاتب أم سلمة زوج النبي`        itqan:70033
 #
-# ATTESTED ON DISK — all five Arabic rows:
-#   `أبو عمرو الذي`                  itqan:45083   narrators_bio_itqan (name_ar)
-#   `عبد الله بن محمد العدوي يقال`   itqan:47593   narrators_bio_itqan (name_ar)
-#   `أبو نصر الذي`                   itqan:47050   narrators_bio_itqan (name_ar)
-#   `ابو محمد بصري عن محمد بن علي`   itqan:49877   narrators_bio_itqan (name_ar)
-#   `عاءشه زوج النبي`                itqan:342     narrator_aliases_itqan (alias
-#       `عائشة زوج النبي`), and surviving into narrators_canonical.aliases. It is an
-#       alias of `عاءشه بنت ابي بكر الصديق` — a real, canonical, on-disk narrator name.
+#       The apposition row was `عاءشه زوج النبي` until this commit. That string IS on
+#       disk — itqan:342, `narrator_aliases_itqan.parquet::alias_normalized`, an alias of
+#       `عاءشه بنت ابي بكر الصديق`, and it reaches `narrators_canonical.aliases`. But it
+#       is NOT on this guard's path: no `narrators_bio_*` name column carries it, and
+#       aliases are a different pass. "On disk" alone would over-claim that the bio path
+#       sees it; "not on disk" was simply false. `itqan:70033` is both, so the ambiguity
+#       is retired rather than annotated. The cut is not hypothetical: it fires on 301
+#       rows of the bio name path today.
 #
 # NOT ON DISK — one row, `Thawban:The Messenger…`, the colon-prose cut (da#253), quoted
 # verbatim from `clean_narrator_name`'s own docstring.
@@ -853,7 +868,11 @@ def test_truncated_residue_blocked_via_canonical_fold_not_string_equality(tmp_pa
             "Thawban",
             "colon-joined English matn (da#253); NOT on disk — reachable, no instance",
         ),
-        ("عاءشه زوج النبي", "عاءشه", "Prophet apposition (da#311); itqan:342, alias"),
+        (
+            "مكاتب أم سلمة زوج النبي",
+            "مكاتب ام سلمه",
+            "Prophet apposition (da#311); itqan:70033, on the bio name path",
+        ),
         (
             "ابو محمد بصري عن محمد بن علي",
             "ابو محمد بصري",
