@@ -532,10 +532,15 @@ def test_truncated_prose_bio_dropped_for_second_real_row(tmp_path: Path) -> None
 def test_clean_bio_still_merges_onto_attested_narrator(tmp_path: Path) -> None:
     """The negative class: an untouched name still merges and back-fills as before.
 
-    `سعيد بن سماك بن حرب` (itqan:320, verbatim) survives the cleaner unchanged, so the
-    guard must not fire. Without this the guard would be indistinguishable from
-    "never merge a bio", which would silently disable da#247's merge-onto-clean-node
-    behaviour for every well-formed name in the corpus.
+    `سعيد بن سماك بن حرب` survives the cleaner unchanged, so the guard must not fire.
+    Without this the guard would be indistinguishable from "never merge a bio", which
+    would silently disable da#247's merge-onto-clean-node behaviour for every
+    well-formed name in the corpus.
+
+    Verbatim from `data/raw/itqan/profiles_abandoned.json`, id 320 — NOT
+    `profiles_companion.json`, which holds only 60592 and 58526. Its `grade_ar` is
+    `متروك الحديث`, which is where this test's `matruk` comes from (Kavitha
+    Sundaramurthy, da#379 review).
     """
     staging = tmp_path / "staging"
     staging.mkdir()
