@@ -1027,3 +1027,81 @@ def test_merge_aliases_counts_recovered_and_pollution_dropped(tmp_path: Path) ->
     assert stats.unmatched_pollution == 1
     assert stats.unmatched_no_bio == 0
     assert canonical_map[cid_635]["aliases"] == [normalize_arabic(_ITQAN_635_ALIAS)]
+
+
+def test_unmatched_no_bio_is_counted_and_warns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """da#389: the `unmatched_no_bio` bucket AND the WARN it gates must be witnessed.
+
+    The "never silent again" guarantee rests on this bucket and its warning, but every
+    other test only asserts it is ZERO. An unwitnessed counter/branch can be deleted and
+    leave the suite green — the silent-zero failure mode this program exists to kill
+    (`feedback_silent_zero_is_not_a_measurement`). So drive it POSITIVE: an alias whose
+    cleaned canonical name is a valid narrator name (NOT pollution) that simply no bio
+    promoted — distinct from the `unmatched_pollution` case — and assert both the exact
+    count and that the WARN actually fires.
+
+    `مالك بن انس` and `سعيد بن جبير` are real attested narrators (used as fixtures across
+    this module) and survive `clean_narrator_name` unchanged, so the non-attach here is
+    "no promoted bio", never "cleaner-dropped".
+    """
+    from src.resolve import bio_promote as bp
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+
+    promoted_name = "سعيد بن جبير"
+    orphan_alias_name = "مالك بن انس"  # cleans to itself; no bio promotes it below
+    assert clean_narrator_name(normalize_arabic(orphan_alias_name)) == orphan_alias_name
+
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:1",
+                "source": "itqan",
+                "name_ar": promoted_name,
+                "name_ar_normalized": normalize_arabic(promoted_name),
+            }
+        ],
+    )
+    _write_aliases(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:1",
+                "source": "itqan",
+                "canonical_name_ar_normalized": normalize_arabic(orphan_alias_name),
+                "alias": "أبو عبد الله",
+                "alias_normalized": normalize_arabic("أبو عبد الله"),
+            }
+        ],
+    )
+
+    # Direct-call witness of the exact buckets: the orphan alias lands in
+    # unmatched_no_bio, NOT unmatched_pollution, and nothing attaches.
+    promoted_cid = make_canonical_id(normalize_arabic(promoted_name))
+    stats = bp._merge_aliases(staging, {}, {promoted_cid}, sources={"itqan"})
+    assert stats.unmatched_no_bio == 1
+    assert stats.unmatched_pollution == 0
+    assert stats.added == 0
+
+    # End-to-end witness that the WARN branch actually fires (with the count). The
+    # module logger is a structlog PrintLogger; spy on `.warning` directly so the
+    # assertion does not depend on stdout-capture cache semantics.
+    warnings_seen: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        bp.logger,
+        "warning",
+        lambda event, **kw: warnings_seen.append((event, kw)),
+    )
+    assert bp.promote_bios_to_canonical(staging, out_dir) is not None
+    assert any(
+        event == "bio_promote_aliases_unmatched_no_bio" and kw.get("unmatched_no_bio") == 1
+        for event, kw in warnings_seen
+    ), warnings_seen
