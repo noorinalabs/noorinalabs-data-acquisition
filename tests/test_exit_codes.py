@@ -372,6 +372,63 @@ def _bare_int_exits(tree: ast.AST) -> list[tuple[int, int]]:
     return found
 
 
+def _bare_int_exits_by_scope(tree: ast.AST) -> dict[str, list[int]]:
+    """Every bare-int exit in *tree*, attributed to its NEAREST enclosing function.
+
+    Do not ask which containers can hold the thing; ask where the thing is.
+
+    The first version of this walked ``ast.FunctionDef`` and asked each function
+    for its exits -- **a node-type table, inside the test that abolished node-type
+    tables** (Alejandra Reyes-Fuentes). Verified blind:
+
+        async def f(): sys.exit(7)   -> INVISIBLE   (ast.AsyncFunctionDef)
+        sys.exit(7)  at module scope -> INVISIBLE   (no FunctionDef at all)
+
+    And it double-counted: an exit inside a nested function was attributed to the
+    inner function *and* to every enclosing one, because ``ast.walk`` of the outer
+    function descends into the inner.
+
+    This walks the exits and finds their owner, so a new binding container in a
+    future Python cannot hide one. Module-scope exits are attributed to
+    ``"<module>"``.
+    """
+    owner: dict[ast.AST, str] = {}
+
+    def descend(node: ast.AST, scope: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            inner = (
+                child.name if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef) else scope
+            )
+            owner[child] = inner
+            descend(child, inner)
+
+    owner[tree] = "<module>"
+    descend(tree, "<module>")
+
+    found: dict[str, list[int]] = {}
+    for node, value in ((n, v) for n in ast.walk(tree) for _l, v in _bare_int_exits_node(n)):
+        found.setdefault(owner.get(node, "<module>"), []).append(value)
+    return found
+
+
+def _bare_int_exits_node(node: ast.AST) -> list[tuple[int, int]]:
+    """The bare-int exit AT this node, if the node itself is one. Never descends."""
+    if not isinstance(node, ast.Call) or len(node.args) != 1:
+        return []
+    fname = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+    if fname not in ("exit", "SystemExit"):
+        return []
+    arg = node.args[0]
+    if (
+        isinstance(arg, ast.Constant)
+        and isinstance(arg.value, int)
+        and not isinstance(arg.value, bool)
+        and arg.value != 0
+    ):
+        return [(node.lineno, arg.value)]
+    return []
+
+
 class TestNoBareIntegerExit:
     """A registry of which codes EXIST says nothing about which the process EMITS.
 
@@ -403,36 +460,31 @@ class TestNoBareIntegerExit:
         assert _bare_int_exits(ast.parse("sys.exit(True)")) == []
 
     def test_the_live_tree_has_exactly_one_bare_exit_and_da372_owns_it(self) -> None:
-        """The whole of `src/`, and the one offender is named by FUNCTION, not line.
+        """The whole of `src/`, attributed by scope, not by line number.
 
         `@enum.unique` makes a duplicate DECLARATION inexpressible; this makes a
         duplicate EMISSION inexpressible. A new `sys.exit(7)` anywhere reds here
-        immediately -- which is the coverage da#384 Amendment J asks for.
+        immediately -- including in an `async def` and at module scope, which the
+        first version of this test could not see.
 
         TRANSITIONAL, AND SELF-EXPIRING. One bare literal survives at this head:
         `_cmd_load`'s findings exit. It is da#372's diff (da#384 Amendment I) and
-        must not be touched here. So this test pins it rather than exempting it:
+        must not be touched here. So this test PINS it rather than exempting it:
 
         * a NEW bare-int exit anywhere -> RED, because the set grows;
         * da#372 routing `_cmd_load` -> RED, because the set empties.
 
-        The second is the point. This assertion cannot be left behind: when da#372
-        lands it fails, and whoever rebases must replace it with `assert not
-        offenders`. A guard that quietly tolerates its exception forever is the
-        hand-maintained list this registry exists to abolish. This one deletes
-        itself.
+        The second is the point. When da#372 lands this fails, and whoever rebases
+        must replace it with `assert not offenders`. A guard that quietly tolerates
+        its exception forever is the hand-maintained list this registry exists to
+        abolish. This one deletes itself.
         """
         offenders: dict[str, list[int]] = {}
         for py in sorted(_src_root().rglob("*.py")):
-            tree = ast.parse(py.read_text(encoding="utf-8"))
-            # Attribute each bare exit to its enclosing function, so the pin
-            # survives any edit that moves a line number.
-            for fn in ast.walk(tree):
-                if not isinstance(fn, ast.FunctionDef):
-                    continue
-                values = [v for _lineno, v in _bare_int_exits(fn)]
-                if values:
-                    offenders.setdefault(fn.name, []).extend(values)
+            for scope, values in _bare_int_exits_by_scope(
+                ast.parse(py.read_text(encoding="utf-8"))
+            ).items():
+                offenders.setdefault(scope, []).extend(values)
 
         assert offenders == {"_cmd_load": [1]}, (
             "the bare-integer-exit set changed.\n"
@@ -441,6 +493,23 @@ class TestNoBareIntegerExit:
             "  test has done its job: replace it with `assert not offenders`.\n"
             "  If something NEW exits a bare int: name the code in src/exit_codes.py."
         )
+
+    def test_the_scope_walk_sees_async_and_module_scope(self) -> None:
+        """The node-type table this test used to contain, pinned so it cannot return.
+
+        Each source contains exactly ONE exit, so an attribution cannot be
+        satisfied by a neighbouring statement.
+        """
+        cases = {
+            "def f():\n    sys.exit(7)": {"f": [7]},
+            "async def f():\n    sys.exit(7)": {"f": [7]},
+            "sys.exit(7)": {"<module>": [7]},
+            "class C:\n    def m(self):\n        sys.exit(7)": {"m": [7]},
+            # An exit in a nested function belongs to the INNER function, once.
+            "def outer():\n    def inner():\n        sys.exit(7)": {"inner": [7]},
+        }
+        for source, expected in cases.items():
+            assert _bare_int_exits_by_scope(ast.parse(source)) == expected, source
 
     def test_the_detector_is_not_vacuous(self) -> None:
         """INSTRUMENT GUARD. A detector that finds nothing is not a clean tree.
