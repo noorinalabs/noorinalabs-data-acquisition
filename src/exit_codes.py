@@ -96,6 +96,18 @@ would be the fallback, not the mechanism.
 
 Scope of the sole-declarer guard
 --------------------------------
+The scan walks for an ``ast.Name`` in ``Store`` context rather than enumerating
+the statement types that bind a name. **A hand-maintained list of node types is
+the same defect as a hand-maintained list of reserved values** -- it was the last
+one hiding inside the fix for hand-maintained lists. The ``Store``-context walk
+enumerates *the language's* notion of a binding; the ``enum`` API enumerates
+*the enum's* notion of a member. Same move, twice.
+
+A companion guard reds on any ``sys.exit(<int literal != 0>)``: ``@enum.unique``
+makes a duplicate *declaration* inexpressible, and nothing else would make a
+duplicate *emission* inexpressible. ``sys.exit(7)`` names no constant and is
+invisible to every name-keyed check.
+
 ``tests/test_exit_codes.py`` proves no module outside this one *declares* an
 exit-code name. It cannot see a **second** ``IntEnum`` whose members carry
 neither an ``EXIT_`` prefix nor a registry member name::

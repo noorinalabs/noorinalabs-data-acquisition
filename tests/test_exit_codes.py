@@ -271,6 +271,182 @@ class TestReservedSetIsEnumerated:
 # ---------------------------------------------------------------------------
 
 
+# Each source binds its EXIT_* name EXACTLY ONCE. A setup line would answer the
+# question the assertion claims to answer: Oyunbileg Batbayar's first AugAssign
+# probe read `EXIT_AUG = 6` then `EXIT_AUG += 1`, and the plain `Assign` on the
+# setup line was what the old scan found. The `+=` contributed nothing, and
+# nothing in the output distinguished the two. Isolate the thing under test to
+# one occurrence, and prove the fixture does not already satisfy the question.
+_BINDING_FORMS: dict[str, tuple[str, str]] = {
+    "plain assign": ("EXIT_BARE = 7", "EXIT_BARE"),
+    "annotated": ("EXIT_ANN: int = 7", "EXIT_ANN"),
+    "tuple target": ("EXIT_A, _y = 4, 5", "EXIT_A"),
+    "walrus": ("(EXIT_W := 7)", "EXIT_W"),
+    "starred target": ("*EXIT_S, _y = [7, 8]", "EXIT_S"),
+    "augmented assign": ("EXIT_AUG += 1", "EXIT_AUG"),
+    "for target": ("for EXIT_L in [7]:\n    pass", "EXIT_L"),
+    "with ... as": (
+        "class _C:\n"
+        "    def __enter__(self):\n        return 7\n"
+        "    def __exit__(self, *a):\n        return None\n"
+        "with _C() as EXIT_C:\n    pass",
+        "EXIT_C",
+    ),
+}
+
+
+def _bare_int_exits(tree: ast.AST) -> list[tuple[int, int]]:
+    """``(lineno, value)`` for every ``sys.exit(<int literal>)`` where the literal is not ``0``.
+
+    ``@enum.unique`` makes a duplicate *declaration* inexpressible. Nothing makes a
+    duplicate *emission* inexpressible: ``sys.exit(7)`` names no constant, so it is
+    invisible to any name-keyed scan, and the registry would be the whole truth
+    about which codes EXIST while saying nothing about which the process EMITS.
+
+    ``0`` is exempt: it is success, it is not a member (see
+    :data:`~src.exit_codes.RESERVED_BY_RUNTIME`), and there is nothing to name.
+    ``True``/``False`` are ``int`` subclasses and are not exit codes.
+    """
+    found: list[tuple[int, int]] = []
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call) or len(n.args) != 1:
+            continue
+        fname = getattr(n.func, "attr", None) or getattr(n.func, "id", None)
+        if fname not in ("exit", "SystemExit"):
+            continue
+        arg = n.args[0]
+        if (
+            isinstance(arg, ast.Constant)
+            and isinstance(arg.value, int)
+            and not isinstance(arg.value, bool)
+            and arg.value != 0
+        ):
+            found.append((n.lineno, arg.value))
+    return found
+
+
+class TestNoBareIntegerExit:
+    """A registry of which codes EXIST says nothing about which the process EMITS.
+
+    `sys.exit(7)` names no constant. It is invisible to the sole-declarer scan,
+    to `@enum.unique`, and to `__new__`. This guard is what makes a duplicate
+    *emission* inexpressible, and it is what retires a documented bare literal by
+    construction rather than by comment.
+    """
+
+    def test_a_bare_nonzero_int_exit_is_detected(self) -> None:
+        found = _bare_int_exits(ast.parse("import sys\n\nsys.exit(7)"))
+        assert found == [(3, 7)]
+
+    def test_exit_zero_is_allowed(self) -> None:
+        """`0` is success; it is not a member and there is nothing to name."""
+        assert _bare_int_exits(ast.parse("import sys\n\nsys.exit(0)")) == []
+
+    def test_a_registry_member_is_allowed(self) -> None:
+        """The whole point: name the code, do not spell its value."""
+        assert _bare_int_exits(ast.parse("sys.exit(ExitCode.LOAD_FAILED)")) == []
+        assert _bare_int_exits(ast.parse("sys.exit(EXIT_REFUSED_ROWS)")) == []
+
+    def test_raise_systemexit_with_a_literal_is_detected(self) -> None:
+        """`raise SystemExit(1)` is the same emission through another door."""
+        assert _bare_int_exits(ast.parse("raise SystemExit(1)")) == [(1, 1)]
+
+    def test_a_bool_is_not_an_exit_code(self) -> None:
+        """`bool` is an `int` subclass. `sys.exit(True)` is not a code claim."""
+        assert _bare_int_exits(ast.parse("sys.exit(True)")) == []
+
+    def test_the_live_tree_has_exactly_one_bare_exit_and_da372_owns_it(self) -> None:
+        """The whole of `src/`, and the one offender is named by FUNCTION, not line.
+
+        `@enum.unique` makes a duplicate DECLARATION inexpressible; this makes a
+        duplicate EMISSION inexpressible. A new `sys.exit(7)` anywhere reds here
+        immediately -- which is the coverage da#384 Amendment J asks for.
+
+        TRANSITIONAL, AND SELF-EXPIRING. One bare literal survives at this head:
+        `_cmd_load`'s findings exit. It is da#372's diff (da#384 Amendment I) and
+        must not be touched here. So this test pins it rather than exempting it:
+
+        * a NEW bare-int exit anywhere -> RED, because the set grows;
+        * da#372 routing `_cmd_load` -> RED, because the set empties.
+
+        The second is the point. This assertion cannot be left behind: when da#372
+        lands it fails, and whoever rebases must replace it with `assert not
+        offenders`. A guard that quietly tolerates its exception forever is the
+        hand-maintained list this registry exists to abolish. This one deletes
+        itself.
+        """
+        offenders: dict[str, list[int]] = {}
+        for py in sorted(_src_root().rglob("*.py")):
+            tree = ast.parse(py.read_text(encoding="utf-8"))
+            # Attribute each bare exit to its enclosing function, so the pin
+            # survives any edit that moves a line number.
+            for fn in ast.walk(tree):
+                if not isinstance(fn, ast.FunctionDef):
+                    continue
+                values = [v for _lineno, v in _bare_int_exits(fn)]
+                if values:
+                    offenders.setdefault(fn.name, []).extend(values)
+
+        assert offenders == {"_cmd_load": [1]}, (
+            "the bare-integer-exit set changed.\n"
+            f"  found: {offenders}\n"
+            "  If da#372 has landed and _cmd_load now exits VALIDATION_FINDINGS, this\n"
+            "  test has done its job: replace it with `assert not offenders`.\n"
+            "  If something NEW exits a bare int: name the code in src/exit_codes.py."
+        )
+
+    def test_the_detector_is_not_vacuous(self) -> None:
+        """INSTRUMENT GUARD. A detector that finds nothing is not a clean tree.
+
+        Each source below binds exactly one exit call, so a hit cannot be
+        attributed to a neighbouring statement.
+        """
+        for src, expected in (("sys.exit(1)", 1), ("sys.exit(6)", 6), ("sys.exit(255)", 255)):
+            got = _bare_int_exits(ast.parse(src))
+            assert [v for _, v in got] == [expected], f"{src!r} -> {got}"
+
+
+class TestTheScanSeesEveryBindingForm:
+    """A hand-maintained list of node types is the same defect as a hand-maintained
+    list of reserved values.
+
+    The scan walks for an ``ast.Name`` in ``Store`` context -- it asks Python what
+    a binding is, rather than enumerating the statements that make one. The old
+    version handled ``Assign`` and ``AnnAssign`` and was blind to six forms, two
+    of them ordinary Python. It was the last hand-maintained list hiding inside
+    the fix for hand-maintained lists.
+
+    The ``Store``-context walk enumerates *the language's* notion of a binding;
+    the ``enum`` API enumerates *the enum's* notion of a member. Same move, twice.
+    """
+
+    @pytest.mark.parametrize("form", sorted(_BINDING_FORMS))
+    def test_every_binding_form_is_seen(self, form: str) -> None:
+        source, name = _BINDING_FORMS[form]
+        tree = ast.parse(source)
+
+        # INSTRUMENT GUARD: the fixture must bind the name exactly once, so a
+        # `Store` hit cannot be attributable to a setup line.
+        bindings = [
+            n for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+        ]
+        assert [n.id for n in bindings].count(name) == 1, (
+            f"{form}: fixture binds {name} {[n.id for n in bindings]} times, not once"
+        )
+
+        assert name in _exit_name_assignments(tree), f"{form}: scan is blind to {name}"
+
+    def test_a_load_is_not_a_binding(self) -> None:
+        """Reading a name is not declaring one -- otherwise every consumer is an offender."""
+        assert _exit_name_assignments(ast.parse("print(EXIT_BARE)")) == []
+        assert _exit_name_assignments(ast.parse("sys.exit(EXIT_BARE)")) == []
+
+    def test_the_class_body_member_form_is_seen(self) -> None:
+        """The form the registry itself uses, carrying no ``EXIT_`` prefix."""
+        source = "import enum\n\n\nclass _Rival(enum.IntEnum):\n    REFUSED_ROWS = 6\n"
+        assert "REFUSED_ROWS" in _exit_name_assignments(ast.parse(source))
+
+
 class TestRegistryIsTheSoleDeclarer:
     def test_the_exclusion_matches_exactly_one_file(self) -> None:
         """The exclusion is itself a reservation, so guard it too.
