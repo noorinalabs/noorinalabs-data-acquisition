@@ -10,7 +10,12 @@ import pytest
 
 from src.parse.narrator_extraction import IsnadSegmentationError, extract_narrator_mentions
 from src.parse.schemas import NARRATOR_MENTION_SCHEMA
-from src.resolve.ner import _extract_from_hadiths, _load_phase1_mentions, run
+from src.resolve.ner import (
+    UnroutedCorpusError,
+    _extract_from_hadiths,
+    _load_phase1_mentions,
+    run,
+)
 from src.resolve.schemas import NARRATOR_MENTIONS_RESOLVED_SCHEMA
 from tests.test_resolve.conftest import write_hadiths
 
@@ -162,7 +167,14 @@ class TestArabicExtraction:
         assert len(rows) > 0
         assert all(r["source_corpus"] == "thaqalayn" for r in rows)
 
-    def test_falls_back_to_full_text(self, tmp_path: Path) -> None:
+    def test_does_not_mine_full_text_when_isnad_null(self, tmp_path: Path) -> None:
+        """da#369 (red-first): a row whose ``isnad_raw_ar`` is null but whose
+        ``full_text_ar`` is populated must yield NO mentions. The old code fell
+        back to mining ``full_text_ar`` (isnad+matn) \u2014 the path that produced
+        380,771 matn-derived pseudo-narrator mentions (11.7%) and 38,262 narrators
+        that existed ONLY in matn text. That fallback is removed; NER reads only
+        the dedicated isnad column. Pre-fix this returned mentions; post-fix [].
+        """
         hadiths = [
             {
                 "source_id": "th-2",
@@ -170,7 +182,8 @@ class TestArabicExtraction:
                 "collection_name": "al-kafi",
                 "isnad_raw_ar": None,
                 "isnad_raw_en": None,
-                "full_text_ar": "\u062d\u062f\u062b\u0646\u0627 \u0623\u0646\u0633",
+                # A voweled isnad+matn blob: pre-da#369 the segmenter mined this.
+                "full_text_ar": "حدثنا أنس عن النبي",
                 "full_text_en": None,
                 "matn_ar": None,
                 "matn_en": None,
@@ -185,7 +198,7 @@ class TestArabicExtraction:
         ]
         write_hadiths(tmp_path / "hadiths_thaqalayn.parquet", hadiths)
         rows = _extract_from_hadiths(tmp_path, "thaqalayn", "ar")
-        assert len(rows) > 0
+        assert rows == []
 
     def test_unsegmentable_hadith_skipped_not_fatal(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -386,20 +399,29 @@ class TestOutputSchema:
 # Tests: fawaz Arabic extraction (da#271 cross-script fold)
 # ---------------------------------------------------------------------------
 class TestFawazArabicExtraction:
-    """da#271: fawaz is extracted from its Arabic full text, not its English
-    translation, so its narrator names share canonical identity with the Arabic
-    corpora instead of forking as romanized ("Anas bin Malik") nodes."""
+    """da#271 routed fawaz to Arabic extraction and relied on the NER full_text
+    fallback to mine fawaz's voweled ``full_text_ar`` (isnad+matn) blob, since
+    fawaz ships an empty isnad column. da#369 REMOVES that fallback (it was the
+    dominant matn-mining pollution source), so fawaz's ``full_text_ar`` is no
+    longer mined. fawaz stays *routed* to Arabic (routing is da#365's domain, not
+    touched here) but now contributes 0 mentions until da#365 gives it a surgical
+    per-corpus route that splits isnad from matn before extraction.
+    """
 
-    def test_fawaz_routed_to_arabic(self) -> None:
+    def test_fawaz_still_routed_to_arabic(self) -> None:
+        # Routing is unchanged by da#369 — fawaz remains opted in to the Arabic
+        # route (so it is not an unrouted-corpus hard-fail). da#365 owns routing.
         from src.resolve.ner import _ARABIC_SOURCES, _ENGLISH_SOURCES
 
         assert "fawaz" in _ARABIC_SOURCES
         assert "fawaz" not in _ENGLISH_SOURCES
 
-    def test_fawaz_arabic_names_not_latin(self, tmp_path: Path) -> None:
-        from src.utils.arabic import is_arabic
-
-        # fawaz ships an empty isnad column but a voweled full_text_ar (isnad + matn).
+    def test_fawaz_full_text_no_longer_mined(self, tmp_path: Path) -> None:
+        """da#369: fawaz (empty isnad column, only a voweled ``full_text_ar``
+        isnad+matn blob) now yields NO mentions — the full_text fallback da#271
+        depended on is removed. da#365 will re-enable fawaz via a surgical route
+        that isolates the isnad before extraction, rather than mining the blob.
+        """
         isnad = "حَدَّثَنَا أَنَسُ بْنُ مَالِكٍ عَنْ جَابِرِ بْنِ عَبْدِ اللَّهِ قَالَ نَهَى النَّبِيُّ"
         write_hadiths(
             tmp_path / "hadiths_fawaz.parquet",
@@ -425,76 +447,75 @@ class TestFawazArabicExtraction:
             ],
         )
         rows = _extract_from_hadiths(tmp_path, "fawaz", "ar")
-        names = [str(r["name_normalized"]) for r in rows]
-        assert names, "fawaz Arabic extraction yielded no mentions"
-        # every extracted name is Arabic script — none is a romanized "... bin ..."
-        assert all(is_arabic(n) for n in names)
-        assert not any("bin" in n.split() for n in names)
+        assert rows == []
 
-    def test_fawaz_name_folds_onto_arabic_corpus_identity(self, tmp_path: Path) -> None:
-        """The flagship: a fawaz narrator now shares a canonical id with the SAME
-        narrator extracted from a native-Arabic corpus (no cross-script fork)."""
-        from src.parse.identity import make_canonical_id
 
-        isnad = "حَدَّثَنَا أَنَسُ بْنُ مَالِكٍ عَنْ جَابِرٍ"
-        write_hadiths(
-            tmp_path / "hadiths_fawaz.parquet",
-            [
-                {
-                    "source_id": "fw-2",
-                    "source_corpus": "fawaz",
-                    "collection_name": "fawaz-collection",
-                    "isnad_raw_ar": None,
-                    "isnad_raw_en": None,
-                    "full_text_ar": isnad,
-                    "full_text_en": "Narrated Anas bin Malik ...",
-                    "matn_ar": None,
-                    "matn_en": None,
-                    "grade": None,
-                    "sect": "sunni",
-                    "book_number": 1,
-                    "chapter_number": 1,
-                    "hadith_number": 1,
-                    "chapter_name_ar": None,
-                    "chapter_name_en": None,
-                },
-            ],
-        )
-        write_hadiths(
-            tmp_path / "hadiths_thaqalayn.parquet",
-            [
-                {
-                    "source_id": "th-1",
-                    "source_corpus": "thaqalayn",
-                    "collection_name": "al-kafi",
-                    "isnad_raw_ar": isnad,
-                    "isnad_raw_en": None,
-                    "full_text_ar": isnad,
-                    "full_text_en": None,
-                    "matn_ar": None,
-                    "matn_en": None,
-                    "grade": None,
-                    "sect": "shia",
-                    "book_number": 1,
-                    "chapter_number": 1,
-                    "hadith_number": 1,
-                    "chapter_name_ar": None,
-                    "chapter_name_en": None,
-                },
-            ],
-        )
-        fawaz_names = {
-            str(r["name_normalized"]) for r in _extract_from_hadiths(tmp_path, "fawaz", "ar")
+# ---------------------------------------------------------------------------
+# Tests: unrouted-corpus hard fail (da#369)
+# ---------------------------------------------------------------------------
+class TestUnroutedCorpusHardFail:
+    """da#369: a staged corpus with no NER extraction route must raise loudly
+    (``UnroutedCorpusError``), replacing the removed matn fallback that would
+    otherwise silently drop or mine it. da#365 layers the correct routing on top.
+    """
+
+    @staticmethod
+    def _hadith(source_corpus: str, isnad: str | None) -> dict:
+        return {
+            "source_id": f"{source_corpus}-1",
+            "source_corpus": source_corpus,
+            "collection_name": f"{source_corpus}-collection",
+            "isnad_raw_ar": isnad,
+            "isnad_raw_en": None,
+            "full_text_ar": None,
+            "full_text_en": None,
+            "matn_ar": None,
+            "matn_en": None,
+            "grade": None,
+            "sect": "shia",
+            "book_number": 1,
+            "chapter_number": 1,
+            "hadith_number": 1,
+            "chapter_name_ar": None,
+            "chapter_name_en": None,
         }
-        thaq_names = {
-            str(r["name_normalized"]) for r in _extract_from_hadiths(tmp_path, "thaqalayn", "ar")
-        }
-        shared = fawaz_names & thaq_names
-        assert shared, "fawaz and thaqalayn extracted no common narrator name"
-        # a shared normalized name yields the SAME canonical id across the two
-        # corpora — fawaz merges onto Arabic identity instead of forking a Latin node.
-        fawaz_ids = {make_canonical_id(n) for n in fawaz_names}
-        thaq_ids = {make_canonical_id(n) for n in thaq_names}
-        assert fawaz_ids & thaq_ids, "no shared canonical id — fawaz still forks"
-        # the fawaz name really is the Arabic form (would have been "Anas bin Malik")
-        assert any("انس" in n or "مالك" in n for n in fawaz_names)
+
+    def test_unrouted_staged_corpus_raises(self, tmp_path: Path) -> None:
+        """RED-FIRST: 'bihar' is a valid SourceCorpus with no NER route. Staged,
+        it must raise rather than be silently dropped. Pre-da#369 run() only ever
+        iterated the fixed route sets, so a bihar hadiths file was ignored with no
+        error (and, for a routed-but-isnad-null corpus, silently matn-mined)."""
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        output = tmp_path / "output"
+        output.mkdir()
+        write_hadiths(
+            staging / "hadiths_bihar.parquet",
+            [self._hadith("bihar", "حدثنا محمد عن علي")],
+        )
+        with pytest.raises(UnroutedCorpusError) as excinfo:
+            run(staging, output)
+        assert "bihar" in excinfo.value.unrouted
+        # The hard-fail fires before any mention output is written.
+        assert not (output / "narrator_mentions_resolved.parquet").exists()
+
+    def test_unrouted_error_is_base_exception(self) -> None:
+        """It must escape ``run_all``'s per-stage ``except Exception`` — so, like
+        StopAfterReached / MissingDependencyError, it subclasses BaseException and
+        is NOT an Exception (which would be swallowed and reported as success)."""
+        assert issubclass(UnroutedCorpusError, BaseException)
+        assert not issubclass(UnroutedCorpusError, Exception)
+
+    def test_routed_corpus_does_not_raise(self, tmp_path: Path) -> None:
+        """A staged corpus that IS routed (thaqalayn → Arabic) must not raise."""
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        output = tmp_path / "output"
+        output.mkdir()
+        write_hadiths(
+            staging / "hadiths_thaqalayn.parquet",
+            [self._hadith("thaqalayn", "حدثنا محمد عن علي")],
+        )
+        # Must not raise; a routed corpus with a real isnad produces mentions.
+        paths = run(staging, output)
+        assert (output / "narrator_mentions_resolved.parquet") in paths

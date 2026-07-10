@@ -307,6 +307,7 @@ class TestReservedSetIsEnumerated:
             "REFUSED_ROWS": 6,
             "ENRICH_FAILED": 7,
             "DB_UNREACHABLE": 8,
+            "UNROUTED_CORPUS": 9,
         }
 
     def test_the_ruling_table_is_pinned(self) -> None:
@@ -322,6 +323,7 @@ class TestReservedSetIsEnumerated:
         assert (
             ExitCode.DB_UNREACHABLE == 8
         )  # da#384 Amendment R: the helper names only what it knows
+        assert ExitCode.UNROUTED_CORPUS == 9  # da#369: NER Step-1 abort, next free code
 
     def test_every_member_documents_what_is_on_disk(self) -> None:
         """The DOCSTRINGS are the specification. There is no ordering claim.

@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 
 from src.resolve._checkpoint import EXIT_STOPPED_AT_LIMIT, StopAfterReached
 from src.resolve._deps import EXIT_MISSING_DEPENDENCY, MissingDependencyError
+from src.resolve.ner import EXIT_UNROUTED_CORPUS, UnroutedCorpusError
 from src.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -38,11 +39,13 @@ logger = get_logger(__name__)
 __all__ = [
     "EXIT_MISSING_DEPENDENCY",
     "EXIT_STOPPED_AT_LIMIT",
+    "EXIT_UNROUTED_CORPUS",
     "RESOLVE_STEP_ORDER",
     "RESUMABLE_STEPS",
     "MissingDependencyError",
     "ResolveMetrics",
     "StopAfterReached",
+    "UnroutedCorpusError",
     "run_all",
 ]
 
