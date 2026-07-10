@@ -154,6 +154,8 @@ from src.utils.arabic import normalize_arabic
 __all__ = [
     "clean_narrator_name",
     "clean_narrator_name_display",
+    "asserted_name_tokens",
+    "cleaner_removed_content",
     "split_compound_narrators",
     "strip_markup",
 ]
@@ -1278,20 +1280,12 @@ def split_compound_narrators(name_normalized: str | None) -> list[str]:
     return parts or [name_normalized.strip()]
 
 
-def clean_narrator_name(name_normalized: str | None) -> str | None:
-    """Clean a normalized narrator name; return the cleaned name or ``None`` to drop.
+def _strip_markup_and_honorifics(name_normalized: str) -> str:
+    """Steps 1–2a of the cleaner: remove markup and honorific/title phrases.
 
-    Strips markup tags, the editorial ``يعني`` connective and honorific phrases,
-    truncates a colon-joined English matn (da#253) or an Arabic isnad/matn tail
-    (da#258 classes 4+5, recovering the leading narrator), then drops the span when
-    it is empty, over-long (phrase / text body), a mubham collective descriptor, an
-    English prose fragment, or a matn body. Operates in normalized-Arabic space.
-    An un-split class-6 compound (``X و Y جميعا``) is preserved, not dropped — see
-    :func:`split_compound_narrators`.
+    NORMALIZATION, not truncation — every one of these removals is an affix the
+    source wrapped around a name it still asserts in full.
     """
-    if not name_normalized:
-        return None
-
     # 1. Strip markup tags + any stray angle brackets (no markup char survives).
     text = _MARKUP_RE.sub(" ", name_normalized).replace("<", " ").replace(">", " ")
 
@@ -1313,16 +1307,16 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
     for phrase in _HONORIFIC_TITLE_PHRASES:
         if phrase in text:
             text = text.replace(phrase, " ")
+    return text
 
-    # 2b. Colon-joined English prose (da#253). Some sources emit "<name>:<matn>" —
-    #     a companion name colon-joined to a hadith body ("Thawban:The Messenger of
-    #     Allah … sacrificed …"). The colon is INTERNAL to the whitespace token
-    #     ("Thawban:The"), so it hides the prose leader "The" from step 7's tokens[0]
-    #     check, and an ~11-token body stays under the step-4 cap. Truncate at the
-    #     first colon whose tail begins with an English leader, keeping the pre-colon
-    #     name to be re-validated by every guard below (recovers "Thawban").
-    text = _truncate_colon_prose(text)
 
+def _tokenize_and_strip_affixes(text: str) -> tuple[list[str], list[str], bool]:
+    """Steps 3–3b of the cleaner: tokenize, drop connectives, pop leading ordinals.
+
+    Returns ``(raw_tokens, tokens, stripped_number)``. Like
+    :func:`_strip_markup_and_honorifics` these are all NORMALIZATIONS: the token
+    sequence that survives is still the name the source asserted, merely unwrapped.
+    """
     # 3. Tokenize: strip edge punctuation from each token, then drop the editorial
     #    connective and any pure-punctuation tokens. Without the per-token strip a
     #    stray trailing mark ("ابيه،", "ابي ،", "ابيه :") shields a mubham token
@@ -1340,7 +1334,7 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
         raw_tokens.append(t)
         tokens.append(stripped)
     if not tokens:
-        return None
+        return raw_tokens, tokens, False
 
     # 3b. Numeric-leading mis-parse (da#311). A span whose FIRST token is a bare
     #     number (ASCII or Arabic-Indic digits) is a thaqalayn parser artifact — a
@@ -1368,14 +1362,41 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
     #     its merits (dropping "و عنه"→"عنه", "و روى …"→boundary-drop) instead of the
     #     junk surfacing. Scoped to the mis-parse case (stripped_number) so ordinary
     #     compound "X و Y" spans — where the waw is MEDIAL — are never touched.
-    #     Strip a leaked SEPARATE waw the ordinal sat in front of ("5659 و روى …",
-    #     "2 و عنه") so the residue underneath is exposed to the general all-residue
-    #     guard (5b) below; scoped to the mis-parse case so a MEDIAL waw in an
-    #     ordinary compound ("X و Y") is never touched.
     if stripped_number:
         while tokens and normalize_arabic(tokens[0]) == _WAW_CONJUNCTION:
             tokens.pop(0)
             raw_tokens.pop(0)
+    return raw_tokens, tokens, stripped_number
+
+
+def clean_narrator_name(name_normalized: str | None) -> str | None:
+    """Clean a normalized narrator name; return the cleaned name or ``None`` to drop.
+
+    Strips markup tags, the editorial ``يعني`` connective and honorific phrases,
+    truncates a colon-joined English matn (da#253) or an Arabic isnad/matn tail
+    (da#258 classes 4+5, recovering the leading narrator), then drops the span when
+    it is empty, over-long (phrase / text body), a mubham collective descriptor, an
+    English prose fragment, or a matn body. Operates in normalized-Arabic space.
+    An un-split class-6 compound (``X و Y جميعا``) is preserved, not dropped — see
+    :func:`split_compound_narrators`.
+    """
+    if not name_normalized:
+        return None
+
+    text = _strip_markup_and_honorifics(name_normalized)
+
+    # 2b. Colon-joined English prose (da#253). Some sources emit "<name>:<matn>" —
+    #     a companion name colon-joined to a hadith body ("Thawban:The Messenger of
+    #     Allah … sacrificed …"). The colon is INTERNAL to the whitespace token
+    #     ("Thawban:The"), so it hides the prose leader "The" from step 7's tokens[0]
+    #     check, and an ~11-token body stays under the step-4 cap. Truncate at the
+    #     first colon whose tail begins with an English leader, keeping the pre-colon
+    #     name to be re-validated by every guard below (recovers "Thawban").
+    #     This is a TRUNCATION, not a normalization — it is deliberately applied here
+    #     and NOT in :func:`asserted_name_tokens` (da#379).
+    text = _truncate_colon_prose(text)
+
+    raw_tokens, tokens, stripped_number = _tokenize_and_strip_affixes(text)
     if not tokens:
         return None
 
@@ -1510,6 +1531,51 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
         return None
 
     return result
+
+
+def asserted_name_tokens(name_normalized: str | None) -> tuple[str, ...]:
+    """The tokens the SOURCE asserted as the name — the cleaner's normalizations, no truncation.
+
+    Runs exactly the prefix of :func:`clean_narrator_name` that *unwraps* a name
+    without cutting it: markup strip, honorific/title strip, edge-punctuation strip,
+    connective drop, and the leading-ordinal pop. Everything the cleaner does after
+    that point — colon-prose truncation, the isnad/matn boundary cut, the Prophet
+    apposition cut, the trailing-connective pop — removes name material and is
+    deliberately excluded.
+    """
+    if not name_normalized:
+        return ()
+    _raw, tokens, _stripped_number = _tokenize_and_strip_affixes(
+        _strip_markup_and_honorifics(name_normalized)
+    )
+    return tuple(tokens)
+
+
+def cleaner_removed_content(name_normalized: str | None, cleaned: str | None) -> bool:
+    """True when :func:`clean_narrator_name` cut into the name the source asserted (da#379).
+
+    ``clean_narrator_name`` does two categorically different things that its return
+    value alone does not distinguish:
+
+    * **Normalization** — markup, honorifics, editorial connectives and a bracketed
+      catalog entry number are affixes *around* a name. Stripping them leaves the
+      name the source asserted, whole: ``"( 4875 ) عبد الله بن موسى"`` →
+      ``"عبد الله بن موسى"``, still that narrator's full name.
+    * **Truncation** — an isnad/matn tail or a colon-joined body is *part of the same
+      span* as the name, and cutting it keeps only a head. The residue is not a name
+      the source asserted, and it is frequently a bare ism:
+      ``"عبيدة مولى رسول الله ذكره بن شاهين …"`` (an obscure client of the Prophet)
+      reduces to ``"عبيده"`` — the name of a different, heavily-attested narrator.
+
+    A caller that keys identity on the cleaner's output must tell these apart. An
+    affix is not a tail. Comparing against :func:`asserted_name_tokens` — rather than
+    against a re-tokenization of the raw input — is what makes that distinction; a
+    re-tokenization sees the entry number, the connective and the honorific as
+    "content removed" and refuses a merge the source fully supports.
+    """
+    if not name_normalized or not cleaned:
+        return False
+    return tuple(cleaned.split()) != asserted_name_tokens(name_normalized)
 
 
 def clean_narrator_name_display(name_ar: str | None) -> str | None:

@@ -7,9 +7,15 @@ from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from src.models.enums import DatePrecision
 from src.parse.identity import make_canonical_id
+from src.parse.name_quality import (
+    asserted_name_tokens,
+    clean_narrator_name,
+    cleaner_removed_content,
+)
 from src.parse.schemas import NARRATOR_ALIAS_SCHEMA, NARRATOR_BIO_SCHEMA
 from src.resolve.bio_promote import promote_bios_to_canonical
 from src.utils.arabic import normalize_arabic
@@ -410,3 +416,482 @@ def test_bio_promote_applies_name_quality_filter(tmp_path: Path) -> None:
     assert make_canonical_id(clean_name) in ids
     names = {r["name_ar_normalized"] for r in rows}
     assert clean_name in names
+
+
+# Verbatim `full_name` values from the acquired Itqan buckets — NOT synthetic. A
+# fabricated prose row would not exercise the truncation, and the guard could not go
+# red (feedback_fixture_makes_guard_assertion_inert). Provenance:
+#   itqan:60592 — data/raw/itqan/profiles_companion.json
+#   itqan:58526 — data/raw/itqan/profiles_companion.json
+_ITQAN_60592_PROSE = "عبيدة مولى رسول الله ذكره بن شاهين واستدركه أبو موسى وانما هو"
+_ITQAN_58526_PROSE = "سفيان يقال نفير بن مجيب الثمالي"
+
+
+def _write_attested_narrator(out_dir: Path, normalized_name: str, mentions: int) -> str:
+    """Write a pre-existing mention-driven canonical record, as the disambiguator would."""
+    from src.resolve.schemas import NARRATORS_CANONICAL_SCHEMA
+
+    cid = make_canonical_id(normalized_name)
+    existing = {f.name: [None] for f in NARRATORS_CANONICAL_SCHEMA}
+    existing["canonical_id"] = [cid]
+    existing["name_ar"] = [normalized_name]
+    existing["name_ar_normalized"] = [normalized_name]
+    existing["source_ids"] = [["sanadset:1"]]
+    existing["aliases"] = [[]]
+    existing["source_corpora"] = [[]]
+    existing["mention_count"] = [mentions]
+    pq.write_table(
+        pa.table(existing, schema=NARRATORS_CANONICAL_SCHEMA),
+        out_dir / "narrators_canonical.parquet",
+    )
+    return cid
+
+
+def test_truncated_prose_bio_does_not_claim_attested_narrator(tmp_path: Path) -> None:
+    """da#379: a prose bio truncating to a bare ism must not merge onto an attested narrator.
+
+    `clean_narrator_name` cuts `عبيدة مولى رسول الله ذكره بن شاهين …` at the narrative
+    boundary and keeps `عبيده` — the name of a *different*, heavily-attested narrator.
+    Pre-guard, bio_promote keyed the prose row to that id and back-filled the obscure
+    client's grade and death year onto him.
+    """
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+
+    truncated = clean_narrator_name(normalize_arabic(_ITQAN_60592_PROSE))
+    assert truncated == "عبيده", f"fixture no longer truncates to a bare ism: {truncated!r}"
+
+    attested_id = _write_attested_narrator(out_dir, "عبيده", mentions=1695)
+
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:60592",
+                "source": "itqan",
+                "name_ar": _ITQAN_60592_PROSE,
+                "name_ar_normalized": normalize_arabic(_ITQAN_60592_PROSE),
+                "trustworthiness": "thiqa",
+                "death_year_ah": 72,
+                "generation": "sahabi",
+                "external_id": "60592",
+            }
+        ],
+    )
+
+    path = promote_bios_to_canonical(staging, out_dir)
+    assert path is not None
+    rows = pq.read_table(path).to_pylist()
+
+    attested = next(r for r in rows if r["canonical_id"] == attested_id)
+    # The identity claim is refused: the bio never joins the attested narrator.
+    assert attested["source_ids"] == ["sanadset:1"], "prose bio claimed an attested narrator"
+    # And — the damage — the BACKFILL never fires. Asserting only on node creation
+    # would pass over a fix that still corrupts the attested narrator's scholarship.
+    assert attested["trustworthiness"] is None
+    assert attested["death_year_ah"] is None
+    assert attested["generation"] is None
+    assert attested["external_id"] is None
+    # The row is dropped, not re-keyed onto some other node.
+    assert len(rows) == 1
+    assert attested["mention_count"] == 1695
+
+
+def test_truncated_prose_bio_dropped_for_second_real_row(tmp_path: Path) -> None:
+    """Second verbatim row, different truncation path (`يقال` variant prose)."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+
+    assert clean_narrator_name(normalize_arabic(_ITQAN_58526_PROSE)) == "سفيان"
+    attested_id = _write_attested_narrator(out_dir, "سفيان", mentions=28323)
+
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:58526",
+                "source": "itqan",
+                "name_ar": _ITQAN_58526_PROSE,
+                "name_ar_normalized": normalize_arabic(_ITQAN_58526_PROSE),
+                "trustworthiness": "daif",
+            }
+        ],
+    )
+    rows = pq.read_table(promote_bios_to_canonical(staging, out_dir)).to_pylist()  # type: ignore[arg-type]
+    attested = next(r for r in rows if r["canonical_id"] == attested_id)
+    assert attested["trustworthiness"] is None
+    assert attested["source_ids"] == ["sanadset:1"]
+
+
+def test_clean_bio_still_merges_onto_attested_narrator(tmp_path: Path) -> None:
+    """The negative class: an untouched name still merges and back-fills as before.
+
+    `سعيد بن سماك بن حرب` survives the cleaner unchanged, so the guard must not fire.
+    Without this the guard would be indistinguishable from "never merge a bio", which
+    would silently disable da#247's merge-onto-clean-node behaviour for every
+    well-formed name in the corpus.
+
+    Verbatim from `data/raw/itqan/profiles_abandoned.json`, id 320 — NOT
+    `profiles_companion.json`, which holds only 60592 and 58526. Its `grade_ar` is
+    `متروك الحديث`, which is where this test's `matruk` comes from (Kavitha
+    Sundaramurthy, da#379 review).
+    """
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+
+    name = "سعيد بن سماك بن حرب"
+    normalized = normalize_arabic(name)
+    assert clean_narrator_name(normalized) == normalized  # cleaner is a no-op here
+    attested_id = _write_attested_narrator(out_dir, normalized, mentions=15)
+
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:320",
+                "source": "itqan",
+                "name_ar": name,
+                "name_ar_normalized": normalized,
+                "trustworthiness": "matruk",
+                "external_id": "320",
+            }
+        ],
+    )
+    rows = pq.read_table(promote_bios_to_canonical(staging, out_dir)).to_pylist()  # type: ignore[arg-type]
+    attested = next(r for r in rows if r["canonical_id"] == attested_id)
+    assert attested["source_ids"] == ["sanadset:1", "itqan:320"]
+    assert attested["trustworthiness"] == "matruk"  # backfill still works
+    assert attested["external_id"] == "320"
+
+
+def test_truncated_prose_bio_still_mints_when_target_unattested(tmp_path: Path) -> None:
+    """Guard is scoped to attested targets — a zero-mention collision is out of scope.
+
+    Widening it to zero-mention targets drops 12,043 kaggle rows for zero
+    mention-bearing fixes; that corpus belongs to da#299.
+    """
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+
+    _write_attested_narrator(out_dir, "عبيده", mentions=0)
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:60592",
+                "source": "itqan",
+                "name_ar": _ITQAN_60592_PROSE,
+                "name_ar_normalized": normalize_arabic(_ITQAN_60592_PROSE),
+                "trustworthiness": "thiqa",
+            }
+        ],
+    )
+    rows = pq.read_table(promote_bios_to_canonical(staging, out_dir)).to_pylist()  # type: ignore[arg-type]
+    merged = next(r for r in rows if r["canonical_id"] == make_canonical_id("عبيده"))
+    assert merged["trustworthiness"] == "thiqa"  # unchanged behaviour
+
+
+# Verbatim from data/staging/narrators_bio_itqan.parquet (bio_id itqan:25339). An
+# itqan bracketed catalog entry number, NOT prose. `عبد الله بن موسى` is an attested
+# narrator (2,712 mentions on the pre-PR#363 canonical table). da#379 review.
+_ITQAN_25339_ENTRY_NUMBER = "( 4875 ) عبد الله بن موسى"
+_ITQAN_25339_NAME = "عبد الله بن موسى"
+
+
+def test_entry_number_prefix_is_not_a_truncation(tmp_path: Path) -> None:
+    """da#379 review: a bracketed catalog entry number is an affix, not a tail.
+
+    The cleaner strips `( 4875 )` and the residue is the *complete* name the source
+    asserted. Refusing the merge here starves an attested narrator of his bio
+    enrichment — the same harm the guard exists to prevent, with the sign flipped.
+    """
+    normalized = normalize_arabic(_ITQAN_25339_ENTRY_NUMBER)
+    cleaned = clean_narrator_name(normalized)
+    assert cleaned == _ITQAN_25339_NAME, f"fixture no longer strips the entry number: {cleaned!r}"
+    assert not cleaner_removed_content(normalized, cleaned)
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+    attested_id = _write_attested_narrator(out_dir, _ITQAN_25339_NAME, mentions=2712)
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:25339",
+                "source": "itqan",
+                "name_ar": _ITQAN_25339_ENTRY_NUMBER,
+                "name_ar_normalized": normalized,
+                "trustworthiness": "daif",
+                "external_id": "25339",
+            }
+        ],
+    )
+    rows = pq.read_table(promote_bios_to_canonical(staging, out_dir)).to_pylist()  # type: ignore[arg-type]
+    attested = next(r for r in rows if r["canonical_id"] == attested_id)
+    # The merge proceeds and the back-fill lands: the bio enriches its own narrator.
+    assert attested["source_ids"] == ["sanadset:1", "itqan:25339"]
+    assert attested["trustworthiness"] == "daif"
+    assert attested["external_id"] == "25339"
+
+
+def test_honorific_suffix_is_not_a_truncation(tmp_path: Path) -> None:
+    """A clean nasab carrying a benediction must still merge onto its attested node.
+
+    No staging row exercises this today, which is exactly why it is pinned: the
+    honorific strip is a normalization, and da#247 added the bio-side cleaner call
+    *so that* "a benediction-suffixed bio merges onto the clean mention-derived node
+    instead of forking it". A predicate that re-tokenizes the raw input sees the
+    benediction as removed content and silently undoes that.
+    """
+    raw = "مالك بن انس رضي الله عنه"
+    normalized = normalize_arabic(raw)
+    cleaned = clean_narrator_name(normalized)
+    assert cleaned == "مالك بن انس"
+    assert not cleaner_removed_content(normalized, cleaned)
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+    attested_id = _write_attested_narrator(out_dir, "مالك بن انس", mentions=4000)
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:9001",
+                "source": "itqan",
+                "name_ar": raw,
+                "name_ar_normalized": normalized,
+                "trustworthiness": "thiqa",
+            }
+        ],
+    )
+    rows = pq.read_table(promote_bios_to_canonical(staging, out_dir)).to_pylist()  # type: ignore[arg-type]
+    attested = next(r for r in rows if r["canonical_id"] == attested_id)
+    assert attested["trustworthiness"] == "thiqa"
+
+
+def test_cleaner_removed_content_tracks_the_cleaners_own_tokenization() -> None:
+    """The predicate must be computed against tokens the cleaner actually produces.
+
+    This is the property, not the symptom: every transformation `clean_narrator_name`
+    applies BEFORE it starts cutting (markup, honorific, editorial connective,
+    leading ordinal) leaves the asserted name intact and must not read as removed
+    content. A re-tokenization of the raw input fails every row below.
+    """
+    normalizations = [
+        "( 4875 ) عبد الله بن موسى",  # bracketed entry number
+        "[ 969 ] احمد بن يوسف الثعلبي",  # square-bracket entry number
+        "مالك يعني بن انس",  # editorial connective
+        "مالك بن انس رضي الله عنه",  # honorific suffix
+    ]
+    for raw in normalizations:
+        normalized = normalize_arabic(raw)
+        cleaned = clean_narrator_name(normalized)
+        assert cleaned is not None, raw
+        assert not cleaner_removed_content(normalized, cleaned), f"normalization read as cut: {raw}"
+        assert tuple(cleaned.split()) == asserted_name_tokens(normalized)
+
+    truncations = [
+        "عبيده مولى رسول الله ذكره بن شاهين واستدركه ابو موسى",
+        "سفيان يقال نفير بن مجيب الثمالي",
+        "ابو هريره عن مكحول وعنه ابو المليح الرقي",
+    ]
+    for raw in truncations:
+        normalized = normalize_arabic(raw)
+        cleaned = clean_narrator_name(normalized)
+        assert cleaned is not None, raw
+        assert cleaner_removed_content(normalized, cleaned), f"truncation not detected: {raw}"
+
+
+# Verbatim from data/staging/narrators_bio_itqan.parquet (bio_id itqan:12058). The
+# residue `ابو نهشل` is NOT string-equal to the attested `ابي نهشل`, but da#376's
+# inflection fold inside make_canonical_id gives them the same canonical id.
+_ITQAN_12058_TRUNCATION = "أبو نهشل ، عن أبي وائل"
+
+
+def test_truncated_residue_blocked_via_canonical_fold_not_string_equality(tmp_path: Path) -> None:
+    """da#379 × da#376: the guard must key through `make_canonical_id`, not the raw string.
+
+    `ابو نهشل ، عن ابي واءل` truncates at the isnad connective to `ابو نهشل`. The
+    attested narrator is stored as `ابي نهشل` — a DIFFERENT string. Before da#376's
+    fold these were two nodes and the guard had nothing to refuse; after it they are
+    one, and the truncated residue would claim him. A guard that compared normalized
+    names instead of canonical ids would silently pass this through.
+    """
+    from src.parse.identity import make_canonical_id as _mcid
+
+    normalized = normalize_arabic(_ITQAN_12058_TRUNCATION)
+    cleaned = clean_narrator_name(normalized)
+    assert cleaned == "ابو نهشل"
+    assert cleaner_removed_content(normalized, cleaned)
+    # The discriminator: different strings, same identity.
+    assert "ابو نهشل" != "ابي نهشل"
+    assert _mcid("ابو نهشل") == _mcid("ابي نهشل"), "da#376 fold no longer collapses these"
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+    # The attested narrator is registered under the OTHER surface form.
+    attested_id = _write_attested_narrator(out_dir, "ابي نهشل", mentions=8)
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:12058",
+                "source": "itqan",
+                "name_ar": _ITQAN_12058_TRUNCATION,
+                "name_ar_normalized": normalized,
+                "trustworthiness": "thiqa",
+            }
+        ],
+    )
+    rows = pq.read_table(promote_bios_to_canonical(staging, out_dir)).to_pylist()  # type: ignore[arg-type]
+    attested = next(r for r in rows if r["canonical_id"] == attested_id)
+    assert attested["source_ids"] == ["sanadset:1"], "truncated residue claimed him via the fold"
+    assert attested["trustworthiness"] is None
+    assert len(rows) == 1
+
+
+# The DUAL of `test_cleaner_removed_content_tracks_the_cleaners_own_tokenization`.
+#
+# That test pins one direction: a NORMALIZATION must never read as removed content.
+# This pins the other: a TRUNCATION must always read as removed content. Without it,
+# `asserted_name_tokens` can quietly absorb one of the cleaner's four cuts — it exists
+# to mirror the cleaner's prefix, so sharing *more* of that prefix is the obvious next
+# tidy-up — and the refusals it was carrying evaporate against a green suite.
+#
+# Alejandra Reyes-Fuentes measured the exposure on the trailing-connective pop alone:
+# 991 bio rows refused solely because of it, 42 of them targeting attested narrators
+# (`ابو عمرو` at mc=899, `عبد الله بن محمد العدوي` at mc=1,194). Leak that cut and the
+# whole tree stays green. A rule whose deletion no test notices is not under test.
+#
+# PROVENANCE — every row, with its id, and the scan's own scope stated below it.
+#
+# SCOPE OF THE SEARCH (stated because a zero whose search space is implicit cannot be
+# audited — by a reviewer, or by its author an hour later; a provenance claim must carry
+# its own provenance):
+#   searched: the 32 parquet files under `data/staging/` and `data/curated/`
+#   columns : name_ar, name_ar_normalized, name_raw, name_normalized, alias,
+#             alias_normalized, canonical_name_ar_normalized, aliases
+#   excluded: the 8 archival snapshot dirs (`data/curated.pre-da311-scrub-*`,
+#             `data/curated.run5-scrubbed`, `data/curated.pre-wave23-reload-*`, …).
+#             They are DELIBERATELY out of scope: a matn-derived name in a pre-scrub
+#             snapshot is the defect da#311 removed, so a hit there is evidence of the
+#             bug, not of the value being real. Widening to them manufactures false
+#             positives that carry the authority of an exhaustive search.
+#   control : read out of `narrator_aliases_itqan.parquet` — a file an earlier, narrower
+#             scan never opened. A control drawn from inside the scope proves only that
+#             the scan can see. It cannot prove the scope is right. The control must be a
+#             value the scan would MISS if the scope were too narrow.
+#
+# This block has been wrong twice, in opposite directions, and both errors were one error:
+# a claim about a SET, written while looking at one MEMBER.
+#   1. It named the Thawban row "the one fixture not drawn from disk." Naming one
+#      exception silently certifies every row you did not name.
+#   2. Correcting that, it listed the apposition fixture as NOT on disk, from a scan that
+#      never opened the alias table — and whose instrument guard passed, because the
+#      control lived inside the subset being searched.
+#
+# ATTESTED ON DISK, AND ON THIS GUARD'S PATH — verbatim `name_ar` from
+# `data/staging/narrators_bio_itqan.parquet`, which is the column `bio_promote` feeds the
+# cleaner (`bio_promote.py:168`):
+#   `أبو عمرو الذي`                  itqan:45083
+#   `عبد الله بن محمد العدوي يقال`   itqan:47593
+#   `أبو نصر الذي`                   itqan:47050
+#   `ابو محمد بصري عن محمد بن علي`   itqan:49877
+#   `مكاتب أم سلمة زوج النبي`        itqan:70033
+#
+#       The apposition row was `عاءشه زوج النبي` until this commit. That string IS on
+#       disk — itqan:342, `narrator_aliases_itqan.parquet::alias_normalized`, an alias of
+#       `عاءشه بنت ابي بكر الصديق`, and it reaches `narrators_canonical.aliases`. But it
+#       is NOT on this guard's path: no `narrators_bio_*` name column carries it, and
+#       aliases are a different pass. "On disk" alone would over-claim that the bio path
+#       sees it; "not on disk" was simply false. `itqan:70033` is both, so the ambiguity
+#       is retired rather than annotated. The cut is not hypothetical: it fires on 301
+#       rows of the bio name path today.
+#
+# NOT ON DISK — one row, `Thawban:The Messenger…`, the colon-prose cut (da#253), quoted
+# verbatim from `clean_narrator_name`'s own docstring.
+#
+#   State the zero precisely, because the obvious phrasing is false. It is NOT true that
+#   no name field contains a colon: 6,814 rows do (5,383 itqan bio, 1,426 sanadset
+#   mentions, 5 lk), and they are `، ويقال :` variant-name lists. The true claim is about
+#   the CUT, not the character — `_truncate_colon_prose` requires a colon whose following
+#   segment opens with an English non-name leader, and it fires on **0 of 140,174** bio
+#   rows. The detector was checked against the fixture before that zero was believed.
+#
+#   A reviewer auditing "zero hits" by grepping for `:` finds 6,814 and concludes the
+#   comment lied. A true conclusion resting on a false premise destroys the credibility
+#   of the thing it was defending, and this block's whole job is to be believed.
+#
+#   Nor is the fixture merely a contract guard. `cleaner_removed_content`'s ONLY caller is
+#   `bio_promote`, which passes `name_ar_normalized` verbatim (`bio_promote.py:168`), and
+#   that field is not Arabic-only: 24,326 / 24,326 kaggle bio rows carry Latin script
+#   (`Prophet Muhammad(saw) ( محمد …`). The colon-join is absent from the CORPUS, not
+#   excluded by the caller's TYPE. One colon-joined kaggle row and this cut fires in
+#   production, through the only call site there is.
+#
+# "No artifact DOES produce it" and "no artifact CAN produce it" are different sentences.
+# Only the second makes an assertion inert (`feedback_fixture_makes_guard_assertion_inert`,
+# fifth mode). The Thawban row is the first sentence, not the second.
+@pytest.mark.parametrize(
+    ("raw", "expected_cleaned", "cut"),
+    [
+        ("أبو عمرو الذي", "ابو عمرو", "trailing isnad connective (itqan:45083, target mc=899)"),
+        (
+            "عبد الله بن محمد العدوي يقال",
+            "عبد الله بن محمد العدوي",
+            "trailing isnad connective (itqan:47593, target mc=1,194)",
+        ),
+        ("أبو نصر الذي", "ابو نصر", "trailing isnad connective (itqan:47050, target mc=589)"),
+        (
+            "Thawban:The Messenger of Allah (ﷺ) sacrificed during a journey and then",
+            "Thawban",
+            "colon-joined English matn (da#253); NOT on disk — reachable, no instance",
+        ),
+        (
+            "مكاتب أم سلمة زوج النبي",
+            "مكاتب ام سلمه",
+            "Prophet apposition (da#311); itqan:70033, on the bio name path",
+        ),
+        (
+            "ابو محمد بصري عن محمد بن علي",
+            "ابو محمد بصري",
+            "isnad/matn boundary (da#258); itqan:49877",
+        ),
+    ],
+)
+def test_every_truncation_reads_as_removed_content(
+    raw: str, expected_cleaned: str, cut: str
+) -> None:
+    """Each of the cleaner's four cuts must be visible to `cleaner_removed_content`.
+
+    The residue of a truncation is a *head*, not the name the source asserted, so the
+    guard must refuse to let it claim an attested narrator. `ابو عمرو` is a bare kunya
+    — that is the da#379 defect exactly.
+    """
+    normalized = normalize_arabic(raw)
+    cleaned = clean_narrator_name(normalized)
+    assert cleaned == expected_cleaned, f"fixture no longer truncates ({cut}): {cleaned!r}"
+    assert cleaner_removed_content(normalized, cleaned), f"truncation read as an affix: {cut}"
+    # And the dual of the dual: the residue is strictly shorter than what was asserted.
+    assert len(cleaned.split()) < len(asserted_name_tokens(normalized)), cut
