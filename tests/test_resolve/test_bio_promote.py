@@ -933,11 +933,19 @@ def test_alias_rekeyed_to_cleaned_form_attaches(tmp_path: Path) -> None:
     out_dir.mkdir()
 
     raw_norm = normalize_arabic(_ITQAN_635_BIO_NAME)
-    # The premise: the cleaner rewrites this name, and the raw vs cleaned forms mint
-    # DIFFERENT ids — otherwise the raw-key lookup would already work and there is no
-    # bug for this test to catch.
+    # Premise (updated by da#371): the cleaner still rewrites this name, but da#371
+    # centralized `clean_narrator_name` inside `make_canonical_id` (`canonical_key`), so
+    # the raw and cleaned forms now mint the SAME id at the identity layer.
+    #
+    # READ THIS BEFORE TRUSTING A GREEN RUN: because the ids are unified, this test NO
+    # LONGER proves da#389's alias re-key (`bio_promote` keying the lookup on the CLEANED
+    # form) is load-bearing — a raw-keyed lookup would now hit the same node. A green
+    # `test_alias_rekeyed_to_cleaned_form_attaches` therefore documents the unified-id
+    # behavior, NOT that the re-key is still exercised. da#389's re-key stays in the code
+    # as intended belt-and-suspenders (idempotent under the fold); do not read this test
+    # as its coverage, and do not delete the re-key on the strength of this test passing.
     assert clean_narrator_name(raw_norm) == _ITQAN_635_CLEANED
-    assert make_canonical_id(raw_norm) != make_canonical_id(_ITQAN_635_CLEANED)
+    assert make_canonical_id(raw_norm) == make_canonical_id(_ITQAN_635_CLEANED)
 
     _write_bios(
         staging,

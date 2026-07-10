@@ -75,7 +75,8 @@ from __future__ import annotations
 import uuid
 
 from src.models.enums import SourceCorpus
-from src.utils.arabic import canonical_surface
+from src.parse.name_quality import clean_narrator_name
+from src.utils.arabic import canonical_surface, normalize_arabic
 
 __all__ = [
     "SOURCE_CORPORA",
@@ -96,6 +97,7 @@ __all__ = [
     "is_double_prefixed",
     "validate_source_id",
     "CANONICAL_NAMESPACE",
+    "canonical_key",
     "make_canonical_id",
     "make_discriminated_canonical_id",
 ]
@@ -223,10 +225,42 @@ def narrator_node_id(canonical_id: str) -> str:
     return apply_prefix(canonical_id, NARRATOR_ID_PREFIX)
 
 
+def canonical_key(name: str) -> str:
+    """The exact string a canonical Narrator id is minted from.
+
+    Composes the **two** halves of the normalized-form authority that had drifted
+    apart (da#371): the da#247 name-quality trim (:func:`clean_narrator_name`) and
+    the da#376 identity fold (:func:`canonical_surface`). Before this, the column
+    ``name_ar_normalized`` was *written* as ``clean_narrator_name(normalize_arabic(x))``
+    but the id surface (``canonical_surface`` = ``normalize_arabic`` + fold) never
+    applied the trim, so any site that minted an id from a raw/uncleaned name
+    disagreed with the cleaned-column path and produced two canonical ids for one
+    name. The visible harm was silent: ``_studied_under_endpoint`` (``load_edges``)
+    resolved an endpoint via ``make_canonical_id(normalize_arabic(name))`` while the
+    node it had to match was minted by ``bio_promote`` from the cleaned form, so the
+    STUDIED_UNDER edge attached to nothing and was dropped.
+
+    Order: trim first (on normalized input, exactly as the writer does), then apply
+    ``canonical_surface`` for the da#376 fold. ``clean_narrator_name`` may reject a
+    span outright (returning ``None`` for pure honorific/eulogy pollution); when it
+    does we fall back to the pre-trim surface rather than collapsing every rejected
+    name onto a single empty-string id.
+
+    Idempotent: ``clean_narrator_name(normalize_arabic(·))`` and ``canonical_surface``
+    are each fixed points on their own output, so an already-cleaned+folded name maps
+    to itself and its id does not move — this is what makes the change align only the
+    drifting minority instead of re-keying the whole corpus.
+    """
+    if not name:
+        return ""
+    cleaned = clean_narrator_name(normalize_arabic(name))
+    return canonical_surface(cleaned if cleaned else name)
+
+
 def make_canonical_id(name_normalized: str) -> str:
     """Deterministic canonical Narrator id from a *normalized* name.
 
-    Returns ``nar:<uuid5(CANONICAL_NAMESPACE, canonical_surface(name)))>``. THE one
+    Returns ``nar:<uuid5(CANONICAL_NAMESPACE, canonical_key(name)))>``. THE one
     rule for minting a canonical narrator id — the mention-driven disambiguator
     (``src/resolve/disambiguate.py``), the bio-direct promoter
     (``src/resolve/bio_promote.py``), the da#337 splitter, the date reconciler, the
@@ -238,16 +272,18 @@ def make_canonical_id(name_normalized: str) -> str:
     **here**, rather than at each call site. ``normalize_arabic`` alone is neither
     case- nor spacing-invariant, so `ابي هريره` / `ابا هريره` / `ابو هريره` minted
     three Abū Hurayras once da#356 made identity a pure function of the mention.
-    Folding inside this function is what keeps all eight minting sites in agreement:
-    a fold applied only in ``disambiguate`` would leave the other seven minting
-    unfolded ids and reintroduce duplicates by another door.
 
-    Idempotent in the surface: ``canonical_surface`` is a fixed point, so passing an
-    already-folded name is a no-op.
+    da#371 — the input is ALSO trimmed through :func:`clean_narrator_name` here (see
+    :func:`canonical_key`), so a site that mints from a cleaned name and a site that
+    mints from the raw name can no longer disagree. Folding *and* trimming inside
+    this one function is what keeps all eight minting sites in agreement: either
+    applied only in ``disambiguate`` would leave the other seven minting mismatched
+    ids and reintroduce duplicates by another door.
+
+    Idempotent in the surface: :func:`canonical_key` is a fixed point, so passing an
+    already-cleaned+folded name is a no-op.
     """
-    return narrator_node_id(
-        str(uuid.uuid5(CANONICAL_NAMESPACE, canonical_surface(name_normalized)))
-    )
+    return narrator_node_id(str(uuid.uuid5(CANONICAL_NAMESPACE, canonical_key(name_normalized))))
 
 
 def make_discriminated_canonical_id(name_normalized: str, discriminator: str = "") -> str:
@@ -277,9 +313,11 @@ def make_discriminated_canonical_id(name_normalized: str, discriminator: str = "
     """
     if not discriminator:
         return make_canonical_id(name_normalized)
-    # da#376: fold the NAME half through the same identity surface make_canonical_id
-    # uses, so a discriminated split of `ابي هريره` and of `ابو هريره` land on one id.
-    key = canonical_surface(name_normalized) + _DISCRIMINATOR_SEP + discriminator
+    # da#376/da#371: pass the NAME half through the same identity surface
+    # make_canonical_id uses (:func:`canonical_key` = trim + fold), so a discriminated
+    # split of `ابي هريره` and of `ابو هريره`, or of a raw vs cleaned name, land on one
+    # id before the discriminator is joined.
+    key = canonical_key(name_normalized) + _DISCRIMINATOR_SEP + discriminator
     return narrator_node_id(str(uuid.uuid5(CANONICAL_NAMESPACE, key)))
 
 
