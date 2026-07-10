@@ -7,6 +7,7 @@ from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from src.models.enums import DatePrecision
 from src.parse.identity import make_canonical_id
@@ -763,3 +764,65 @@ def test_truncated_residue_blocked_via_canonical_fold_not_string_equality(tmp_pa
     assert attested["source_ids"] == ["sanadset:1"], "truncated residue claimed him via the fold"
     assert attested["trustworthiness"] is None
     assert len(rows) == 1
+
+
+# The DUAL of `test_cleaner_removed_content_tracks_the_cleaners_own_tokenization`.
+#
+# That test pins one direction: a NORMALIZATION must never read as removed content.
+# This pins the other: a TRUNCATION must always read as removed content. Without it,
+# `asserted_name_tokens` can quietly absorb one of the cleaner's four cuts — it exists
+# to mirror the cleaner's prefix, so sharing *more* of that prefix is the obvious next
+# tidy-up — and the refusals it was carrying evaporate against a green suite.
+#
+# Alejandra Reyes-Fuentes measured the exposure on the trailing-connective pop alone:
+# 991 bio rows refused solely because of it, 42 of them targeting attested narrators
+# (`ابو عمرو` at mc=899, `عبد الله بن محمد العدوي` at mc=1,194). Leak that cut and the
+# whole tree stays green. A rule whose deletion no test notices is not under test.
+#
+# Provenance of every fixture:
+#   itqan:45083 / itqan:47593 / itqan:47050 — verbatim `name_ar` from
+#       data/staging/narrators_bio_itqan.parquet.
+#   `عاءشه زوج النبي` — the Prophet-apposition cut (da#311).
+#   The Thawban row is the da#253 colon-prose class. NO bio or mention row in today's
+#       staging carries it (I searched all three bio tables and both mention tables:
+#       zero hits), so it is quoted verbatim from `clean_narrator_name`'s own docstring,
+#       which reproduces the source form. It is the one fixture here not drawn from an
+#       artifact on disk, and it is labelled as such rather than passed off as one.
+@pytest.mark.parametrize(
+    ("raw", "expected_cleaned", "cut"),
+    [
+        ("أبو عمرو الذي", "ابو عمرو", "trailing isnad connective (itqan:45083, target mc=899)"),
+        (
+            "عبد الله بن محمد العدوي يقال",
+            "عبد الله بن محمد العدوي",
+            "trailing isnad connective (itqan:47593, target mc=1,194)",
+        ),
+        ("أبو نصر الذي", "ابو نصر", "trailing isnad connective (itqan:47050, target mc=589)"),
+        (
+            "Thawban:The Messenger of Allah (ﷺ) sacrificed during a journey and then",
+            "Thawban",
+            "colon-joined English matn (da#253)",
+        ),
+        ("عاءشه زوج النبي", "عاءشه", "Prophet apposition (da#311)"),
+        (
+            "ابو محمد بصري عن محمد بن علي",
+            "ابو محمد بصري",
+            "isnad/matn boundary (da#258)",
+        ),
+    ],
+)
+def test_every_truncation_reads_as_removed_content(
+    raw: str, expected_cleaned: str, cut: str
+) -> None:
+    """Each of the cleaner's four cuts must be visible to `cleaner_removed_content`.
+
+    The residue of a truncation is a *head*, not the name the source asserted, so the
+    guard must refuse to let it claim an attested narrator. `ابو عمرو` is a bare kunya
+    — that is the da#379 defect exactly.
+    """
+    normalized = normalize_arabic(raw)
+    cleaned = clean_narrator_name(normalized)
+    assert cleaned == expected_cleaned, f"fixture no longer truncates ({cut}): {cleaned!r}"
+    assert cleaner_removed_content(normalized, cleaned), f"truncation read as an affix: {cut}"
+    # And the dual of the dual: the residue is strictly shorter than what was asserted.
+    assert len(cleaned.split()) < len(asserted_name_tokens(normalized)), cut
