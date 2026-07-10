@@ -2483,7 +2483,7 @@
 {"id":"tests/test_resolve/test_bio_promote.py::test_honorific_suffix_is_not_a_truncation","kind":"func","path":"tests/test_resolve/test_bio_promote.py","line":647,"lang":"python"},
 {"id":"tests/test_resolve/test_bio_promote.py::test_cleaner_removed_content_tracks_the_cleaners_own_tokenization","kind":"func","path":"tests/test_resolve/test_bio_promote.py","line":685,"lang":"python"},
 {"id":"tests/test_resolve/test_bio_promote.py::test_truncated_residue_blocked_via_canonical_fold_not_string_equality","kind":"func","path":"tests/test_resolve/test_bio_promote.py","line":724,"lang":"python"},
-{"id":"tests/test_resolve/test_bio_promote.py::test_every_truncation_reads_as_removed_content","kind":"func","path":"tests/test_resolve/test_bio_promote.py","line":814,"lang":"python"},
+{"id":"tests/test_resolve/test_bio_promote.py::test_every_truncation_reads_as_removed_content","kind":"func","path":"tests/test_resolve/test_bio_promote.py","line":827,"lang":"python"},
 {"id":"tests/test_resolve/test_canonical_backfill_integration.py","kind":"module","path":"tests/test_resolve/test_canonical_backfill_integration.py","line":1,"lang":"python"},
 {"id":"tests/test_resolve/test_canonical_backfill_integration.py::_write_phase1_mentions","kind":"func","path":"tests/test_resolve/test_canonical_backfill_integration.py","line":46,"lang":"python"},
 {"id":"tests/test_resolve/test_canonical_backfill_integration.py::_write_bio_candidates","kind":"func","path":"tests/test_resolve/test_canonical_backfill_integration.py","line":63,"lang":"python"},

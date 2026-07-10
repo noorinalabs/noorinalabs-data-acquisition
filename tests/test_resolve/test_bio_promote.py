@@ -783,11 +783,24 @@ def test_truncated_residue_blocked_via_canonical_fold_not_string_equality(tmp_pa
 #   itqan:45083 / itqan:47593 / itqan:47050 — verbatim `name_ar` from
 #       data/staging/narrators_bio_itqan.parquet.
 #   `عاءشه زوج النبي` — the Prophet-apposition cut (da#311).
-#   The Thawban row is the da#253 colon-prose class. NO bio or mention row in today's
-#       staging carries it (I searched all three bio tables and both mention tables:
-#       zero hits), so it is quoted verbatim from `clean_narrator_name`'s own docstring,
-#       which reproduces the source form. It is the one fixture here not drawn from an
-#       artifact on disk, and it is labelled as such rather than passed off as one.
+#   The Thawban row is the da#253 colon-prose class, quoted verbatim from
+#       `clean_narrator_name`'s own docstring. It is the ONE fixture here not drawn from
+#       an artifact on disk: no bio or mention table in today's staging carries a
+#       colon-joined name (all three `narrators_bio_*` and both
+#       `narrator_mentions_*`: zero hits).
+#
+#       Be precise about what that costs, because the two possible claims differ
+#       (`feedback_fixture_makes_guard_assertion_inert`, fifth mode):
+#         * It does NOT prove production currently exercises this cut. Nothing on disk
+#           does today.
+#         * It DOES pin a reachable contract. `cleaner_removed_content`'s only caller is
+#           `bio_promote`, which passes `name_ar_normalized` — and that field is NOT
+#           Arabic-only: 24,326 / 24,326 kaggle bio rows carry Latin script. The
+#           colon-join is absent from the corpus, not excluded by the caller's type. One
+#           colon-joined kaggle row and this cut fires in production tomorrow.
+#       So the fixture guards a live path with no current instance, not an unreachable
+#       branch. Those are different claims and the difference is the whole of da#359's
+#       fifth mode.
 @pytest.mark.parametrize(
     ("raw", "expected_cleaned", "cut"),
     [
