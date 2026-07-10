@@ -13,6 +13,7 @@ from src.graph.validate import (
     _CLASSIFIER_REGISTRY,
     ValidationResult,
     _classify,
+    _mask_line_comments,
     _split_statements,
     register_classifier,
     run_validation,
@@ -65,21 +66,65 @@ class TestOrphanCheckClassification:
         assert result.row_count == 1
 
 
+def _census(self_loops: int, reciprocal_pairs: int) -> list[dict[str, object]]:
+    """The single aggregate row ``chain_integrity.cypher`` returns."""
+    return [{"self_loops": self_loops, "reciprocal_pairs": reciprocal_pairs}]
+
+
 class TestChainIntegrityClassification:
-    """Chain integrity: 0 cycles = pass."""
+    """da#250: the gate reports a true population, never a cap.
 
-    def test_zero_cycles_is_pass(self) -> None:
-        result = _classify("chain_integrity", [])
+    ``self_loops`` is the gate (a narrator transmitting to himself is corrupt);
+    ``reciprocal_pairs`` is a metric (over-merge thermometer, da#248) and never
+    gates. Both are exact counts -- the query carries no ``LIMIT``.
+    """
+
+    def test_query_carries_no_limit_clause(self) -> None:
+        """A LIMIT makes the reported count a cap, not a measurement.
+
+        Comments are masked first: the file *discusses* the removed ``LIMIT
+        100`` in prose, which must not be mistaken for a live clause.
+        """
+        code = _mask_line_comments((QUERIES_DIR / "chain_integrity.cypher").read_text())
+        assert "LIMIT" not in code.upper(), "chain_integrity.cypher must not cap its own result"
+
+    def test_clean_census_passes_and_reports_exact_counts(self) -> None:
+        result = _classify("chain_integrity", _census(self_loops=0, reciprocal_pairs=23139))
         assert result.passed is True
-        assert result.row_count == 0
+        # The real population is reported verbatim -- not a cap, not a row count.
+        assert "23139" in result.details
+        assert result.row_count == 23139
 
-    def test_cycles_detected_is_fail(self) -> None:
-        rows: list[dict[str, object]] = [
-            {"narrator_id": "nar:cycle-node", "cycle_length": 3},
-        ]
-        result = _classify("chain_integrity", rows)
+    def test_self_loop_is_the_gate_and_is_fatal(self) -> None:
+        result = _classify("chain_integrity", _census(self_loops=1, reciprocal_pairs=0))
         assert result.passed is False
-        assert result.row_count == 1
+        assert result.is_fatal is True
+
+    def test_reciprocal_pairs_alone_never_gate(self) -> None:
+        """da#248: reciprocal pairs are manufactured upstream (resolve), not by
+        the loader. They are a metric to re-measure after da#356, not a defect
+        for this gate to fail on."""
+        result = _classify("chain_integrity", _census(self_loops=0, reciprocal_pairs=23139))
+        assert result.passed is True
+
+    def test_missing_row_is_fatal_not_a_silent_pass(self) -> None:
+        """An empty result means the census did not run. A zero you never
+        measured is not a zero -- the old classifier passed on ``[]``."""
+        result = _classify("chain_integrity", [])
+        assert result.passed is False
+        assert result.is_fatal is True
+
+    def test_malformed_row_is_fatal(self) -> None:
+        result = _classify("chain_integrity", [{"narrator_id": "nar:y", "cycle_length": 2}])
+        assert result.passed is False
+        assert result.is_fatal is True
+
+    def test_details_disclose_the_uncovered_cycle_lengths(self) -> None:
+        """A PASS must not read as 'this graph is acyclic'. Cycles of length
+        >= 3 are not measured, and the gate has to say so out loud."""
+        result = _classify("chain_integrity", _census(self_loops=0, reciprocal_pairs=0))
+        assert result.passed is True
+        assert "not measured" in result.details.lower()
 
 
 class TestTransmittedToHadithRefClassification:
@@ -168,7 +213,11 @@ class TestCypherFileLoading:
 class TestRegistryPattern:
     """Parametrized coverage: every registered classifier is tested for pass and fail."""
 
-    @pytest.mark.parametrize("name", list(_CLASSIFIER_REGISTRY.keys()))
+    # ``chain_integrity`` is deliberately excluded: its query always returns
+    # exactly one aggregate census row, so an empty result means the census did
+    # not run. Passing on `[]` is the vacuous pass da#250 removed -- the
+    # zero-rows-is-pass convention does not apply to an aggregate query.
+    @pytest.mark.parametrize("name", [n for n in _CLASSIFIER_REGISTRY if n != "chain_integrity"])
     def test_registered_classifier_pass_on_empty(self, name: str) -> None:
         result = _classify(name, [])
         assert result.passed is True
@@ -178,7 +227,7 @@ class TestRegistryPattern:
         ("name", "rows"),
         [
             ("orphan_narrators", [{"narrator_id": "nar:x"}]),
-            ("chain_integrity", [{"narrator_id": "nar:y", "cycle_length": 2}]),
+            ("chain_integrity", [{"self_loops": 1, "reciprocal_pairs": 0}]),
             (
                 "collection_coverage",
                 [{"collection_id": "col:z", "expected": 100, "actual": 10, "deviation_pct": 90.0}],
@@ -262,10 +311,20 @@ class _FakeNeo4jTimeout(Exception):
 
 
 def _write_query(queries_dir: Path, name: str = "chain_integrity") -> None:
+    """Write a single-statement validation query mirroring the shipped census.
+
+    Kept in step with ``queries/validation/chain_integrity.cypher``: one
+    statement, no ``LIMIT``, returning one aggregate row.
+    """
     validation = queries_dir / "validation"
     validation.mkdir(parents=True, exist_ok=True)
     (validation / f"{name}.cypher").write_text(
-        "MATCH (n:Narrator)-[:TRANSMITTED_TO*1..20]->(n) RETURN n.id LIMIT 100",
+        "CALL { MATCH (n:Narrator)-[:TRANSMITTED_TO]->(n) "
+        "RETURN count(DISTINCT n.id) AS self_loops }\n"
+        "CALL { MATCH (a:Narrator)-[:TRANSMITTED_TO]->(b:Narrator) "
+        "WHERE a.id < b.id AND EXISTS { MATCH (b)-[:TRANSMITTED_TO]->(a) } "
+        "RETURN count(DISTINCT [a.id, b.id]) AS reciprocal_pairs }\n"
+        "RETURN self_loops, reciprocal_pairs",
         encoding="utf-8",
     )
 
@@ -295,7 +354,8 @@ class TestBoundedValidation:
 
     def test_fast_graph_validates_normally(self, tmp_path: Path) -> None:
         _write_query(tmp_path)
-        client = _FakeClient(rows=[])  # 0 cycles -> chain_integrity passes
+        # A clean census row -- 0 self-loops -> chain_integrity passes.
+        client = _FakeClient(rows=[{"self_loops": 0, "reciprocal_pairs": 0}])
         results = run_validation(client, tmp_path, timeout_seconds=5.0)  # type: ignore[arg-type]
         assert len(results) == 1
         assert results[0].query_name == "chain_integrity"
@@ -599,7 +659,7 @@ class TestMultiStatementExecution:
     def test_single_statement_file_still_executes_exactly_once(self, tmp_path: Path) -> None:
         """Backward-compat: pre-da#319 single-statement files are untouched."""
         _write_query(tmp_path, name="chain_integrity")
-        client = _SequencedClient(rows_per_call=[[]])
+        client = _SequencedClient(rows_per_call=[[{"self_loops": 0, "reciprocal_pairs": 0}]])
         results = run_validation(client, tmp_path, timeout_seconds=5.0)  # type: ignore[arg-type]
 
         assert len(client.queries_seen) == 1

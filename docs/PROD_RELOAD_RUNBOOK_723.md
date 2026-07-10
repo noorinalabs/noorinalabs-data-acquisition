@@ -134,7 +134,11 @@ failure. The exit codes are now separate:
 An `rc=4` prints `LOAD SUCCEEDED (… nodes, … edges written)` first. Below is
 the historical reading of the old conflated `rc=1`; confirm via the Load Summary
 line: `total_nodes≈1,665,760`, `total_errors=0`. The 4 flags and why they're benign:
-- `chain_integrity: 100 cycle(s)` — pre-existing, tracked da#248.
+- `chain_integrity: 100 cycle(s)` — **this number was a cap, not a measurement**
+  (the query ended in `LIMIT 100` and the classifier counted rows). Fixed in
+  da#250: the check now reports exact counts — `0 self-loops; 23,139 reciprocal
+  pair(s)` — and only self-loops gate. The reciprocal pairs are an upstream
+  over-merge metric, tracked da#248, to be re-measured after da#356.
 - `graph_integrity_deferred_inventory` / `sanadset_orphan_inventory: query
   execution failed` — validation harness runs multi-statement `.cypher` as one
   query; tracked da#249.

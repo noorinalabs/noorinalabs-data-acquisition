@@ -202,15 +202,76 @@ def _classify_orphan_narrators(
     return ValidationResult(query_name, passed, details, count)
 
 
+_CHAIN_INTEGRITY_COVERAGE = (
+    "coverage: cycle length 1 (self-loop) and length 2 (reciprocal pair) counted "
+    "exactly; cycles of length >= 3 are NOT measured"
+)
+
+
 def _classify_chain_integrity(
     query_name: str,
     rows: list[dict[str, object]],
     deviation_threshold: float,
 ) -> ValidationResult:
-    count = len(rows)
-    passed = count == 0
-    details = "no cycles" if passed else f"{count} cycle(s) detected"
-    return ValidationResult(query_name, passed, details, count)
+    """Classify the chain-integrity census (da#250).
+
+    ``chain_integrity.cypher`` returns exactly one aggregate row. Two distinct
+    signals come out of it:
+
+    * ``self_loops`` is the **gate**. A narrator who transmits to himself is
+      unambiguously corrupt. 0 on stg and prod today, so this guard is live and
+      non-vacuous rather than decorative.
+    * ``reciprocal_pairs`` is a **metric**, never a gate. Reciprocal
+      transmission (A taught B *and* B taught A) is historically impossible, so
+      every pair is manufactured upstream by identity collapse in ``resolve``
+      (da#356) — it is a thermometer for over-merge, not a defect the loader can
+      or should fix. Failing the load on it would only punish the loader for
+      someone else's merge. Re-measure after da#356 lands (da#248).
+
+    The predecessor counted ``len(rows)`` against a query ending in ``LIMIT
+    100``, so on the full graph it reported the constant ``100 cycle(s)
+    detected`` — a cap presented as a measurement, and the rc=1 that main#723
+    misread as a data defect. It also passed on ``[]``: an aggregate query that
+    returns no row did not run, and a zero you never measured is not a zero.
+    """
+    if len(rows) != 1:
+        return ValidationResult(
+            query_name,
+            passed=False,
+            details=(
+                f"census did not run: expected exactly 1 aggregate row, got {len(rows)}. "
+                "An absent row is not a zero."
+            ),
+            row_count=0,
+        )
+
+    row = rows[0]
+    try:
+        self_loops = int(row["self_loops"])  # type: ignore[call-overload]
+        reciprocal_pairs = int(row["reciprocal_pairs"])  # type: ignore[call-overload]
+    except (KeyError, TypeError, ValueError):
+        return ValidationResult(
+            query_name,
+            passed=False,
+            details=(
+                f"malformed census row, columns={sorted(row)} — "
+                "expected self_loops, reciprocal_pairs"
+            ),
+            row_count=0,
+        )
+
+    passed = self_loops == 0
+    gate = (
+        "0 self-loops"
+        if passed
+        else f"{self_loops} self-loop narrator(s) — a narrator transmitting to himself"
+    )
+    details = (
+        f"{gate}; {reciprocal_pairs} reciprocal pair(s) "
+        "[metric, not a gate: upstream over-merge, da#248/da#356]; "
+        f"{_CHAIN_INTEGRITY_COVERAGE}"
+    )
+    return ValidationResult(query_name, passed, details, self_loops + reciprocal_pairs)
 
 
 def _classify_transmitted_to_hadith_ref(
