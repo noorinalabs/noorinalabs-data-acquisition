@@ -31,7 +31,10 @@ def _check_neo4j() -> None:
         driver.verify_connectivity()
         driver.close()
     except Exception as exc:
-        # The load did not happen: nothing was written (da#384 §4).
+        # At THIS call site the load did not happen: nothing was written (da#384 §4).
+        # Locally true here; NOT a specification of what rc=1 means everywhere --
+        # _cmd_enrich still exits a bare 1 after the load has committed. See
+        # src/exit_codes.py, "Call sites still emitting a bare integer".
         print(f"ERROR: Cannot connect to Neo4j at {settings.neo4j.uri}: {exc}")
         sys.exit(ExitCode.LOAD_FAILED)
     print("  Neo4j is reachable.")
@@ -258,8 +261,12 @@ def _cmd_load(
             print(f"  [{vr.status}] {vr.query_name}: {vr.details}")
         warned = [vr for vr in summary.validation_results if vr.warning]
         if not summary.validation_passed:
+            # The load is committed; this reports on the graph it wrote. A
+            # findings condition mis-emitting LOAD_FAILED is the bug (da#384 §4 /
+            # Amendment G) -- correcting a call site is not renumbering. The
+            # wider `rc=1` invariant leak stays da#372's blocker.
             print("\nWARNING: Some validation checks failed.")
-            sys.exit(1)
+            sys.exit(ExitCode.VALIDATION_FINDINGS)
         elif warned:
             # Non-fatal: the load succeeded and no check hard-failed; one or more
             # checks were downgraded (e.g. timed out). da#259.
@@ -302,8 +309,10 @@ def _cmd_validate(*, validation_timeout: float | None = None) -> None:
             warned += 1
 
     if any_fatal:
+        # `validate` only reads the graph. A finding describes the data; it is
+        # not a failure to run (da#384 §4 / Amendment G).
         print("\nWARNING: Some validation checks failed.")
-        sys.exit(1)
+        sys.exit(ExitCode.VALIDATION_FINDINGS)
     elif warned:
         # Timed-out/downgraded checks are non-fatal (da#259).
         print(f"\nValidation OK. {warned} check(s) downgraded to warning.")

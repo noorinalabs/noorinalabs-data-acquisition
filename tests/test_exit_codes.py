@@ -11,10 +11,22 @@ This file has two halves, and they guard different things:
    raises ``ValueError`` when :mod:`src.exit_codes` is imported. The tests here
    prove the decorator is actually applied and actually bites.
 
-2. **Sole-declarership** is enforced by scanning ``src/`` for any ``EXIT_*``
+2. **Sole-declarership** is enforced by scanning ``src/`` for any exit-code
    assignment outside the registry module. Under a registry this is no longer a
    collision check -- ``@enum.unique`` covers that -- it is the assertion that
    nobody re-opens the space by declaring a constant somewhere else.
+
+   "Exit-code assignment" means an ``EXIT_*`` alias **or a registry member name**.
+   Matching only the ``EXIT_`` prefix was blind to the very form the registry
+   uses -- ``REFUSED_ROWS = 6`` inside a class body carries no prefix -- so a
+   rival module written in the registry's own style passed clean. Worse, the
+   instrument guard passed anyway, on the five module-level aliases, and so
+   demonstrated a capability the scan did not have.
+
+3. **Runtime-reserved values** (``0`` success, ``2`` argparse) are made
+   inexpressible by ``ExitCode.__new__``. ``@enum.unique`` has no opinion about
+   them; without the hook a member claiming ``2`` would be expressible with only
+   a test in the way.
 
 The scan is **AST-based, not regex-based**, deliberately. Alejandra
 Reyes-Fuentes measured seven declaration forms against the regex this replaces
@@ -61,8 +73,35 @@ def _src_root() -> Path:
     return Path(__file__).resolve().parents[1] / "src"
 
 
+def _registry_member_names() -> frozenset[str]:
+    """The registry's member names, through the ``enum`` API. Never grepped."""
+    return frozenset(c.name for c in ExitCode)
+
+
+def _is_exit_name(name: str) -> bool:
+    """Names that constitute an exit-code declaration.
+
+    Two shapes, and the second is the one that nearly shipped a blind guard:
+
+    * ``EXIT_*`` -- the module-level alias form.
+    * A registry MEMBER name (``LOAD_FAILED``, ``REFUSED_ROWS``, ...) -- the form
+      the registry itself uses, inside a class body, carrying **no** prefix.
+
+    Matching only on the ``EXIT_`` prefix let a rival module written in the
+    registry's own style pass clean:
+
+        class _Rival(enum.IntEnum):
+            VALIDATION_FINDINGS = 5
+            REFUSED_ROWS = 6          # invisible
+
+    The member set is read through the ``enum`` API so it cannot drift from the
+    thing it guards, and so a representation change cannot blind it.
+    """
+    return (name.startswith("EXIT_") and name.isupper()) or name in _registry_member_names()
+
+
 def _exit_name_assignments(tree: ast.AST) -> list[str]:
-    """Every ``EXIT_*`` name assigned anywhere in *tree*, at any nesting depth.
+    """Every exit-code name assigned anywhere in *tree*, at any nesting depth.
 
     Matches on the target NAME, so the RHS form is irrelevant: a bare int, an
     annotated assignment, a ``Final``, a class-body member, or a computed
@@ -76,7 +115,7 @@ def _exit_name_assignments(tree: ast.AST) -> list[str]:
         elif isinstance(node, ast.AnnAssign):
             targets = [node.target]
         for t in targets:
-            if isinstance(t, ast.Name) and t.id.startswith("EXIT_") and t.id.isupper():
+            if isinstance(t, ast.Name) and _is_exit_name(t.id):
                 found.append(t.id)
     return found
 
@@ -140,10 +179,47 @@ class TestDuplicateValueIsInexpressible:
 
 class TestReservedSetIsEnumerated:
     def test_no_member_claims_a_runtime_reserved_code(self) -> None:
-        """`0` is success and `2` is argparse's. Neither is ours to assign."""
+        """`0` is success and `2` is argparse's. Neither is ours to assign.
+
+        This is now a CHECK THAT THE MECHANISM IS APPLIED, not the mechanism.
+        `ExitCode.__new__` raises when the registry is imported; see below.
+        """
         assert RESERVED_BY_RUNTIME == frozenset({0, 2})
         collisions = {c.name: c.value for c in ExitCode if c.value in RESERVED_BY_RUNTIME}
         assert not collisions, f"members claiming a runtime-reserved code: {collisions}"
+
+    def test_the_reservation_hook_is_installed(self) -> None:
+        """`Enum` REPLACES `__new__` after class creation; the hook moves to `_new_member_`.
+
+        So `ExitCode.__new__` is `Enum.__new__` -- the by-value lookup -- and it
+        raises its own `ValueError("2 is not a valid ExitCode")`. A test written
+        as a bare `pytest.raises(ValueError)` against `ExitCode.__new__` would
+        therefore pass **for the wrong reason**, proving the lookup works and
+        saying nothing about the reservation. It happened to me; only the
+        `match=` clause caught it.
+        """
+        hook = ExitCode._new_member_  # type: ignore[attr-defined]
+        assert hook is not int.__new__, "no member-creation hook installed"
+        assert hook.__qualname__ == "ExitCode.__new__"
+
+    def test_a_reserved_value_is_inexpressible_not_merely_untested(self) -> None:
+        """`@enum.unique` has NO opinion about `0` or `2`.
+
+        It rejects duplicates *among members*. Without the `__new__` hook a member
+        could claim argparse's `2` with only a test between it and production --
+        the exact posture this registry abolishes for duplicates, and a docstring
+        that calls a test "the fallback" cannot then rely on one.
+
+        Exercised against the REAL hook, for every reserved value, not against a
+        re-statement of the members that exist today.
+        """
+        hook = ExitCode._new_member_  # type: ignore[attr-defined]
+        for reserved in sorted(RESERVED_BY_RUNTIME):
+            # Instrument guard: no live member holds this value, so a raise here
+            # is the reservation firing, not @enum.unique's duplicate error.
+            assert reserved not in {c.value for c in ExitCode}
+            with pytest.raises(ValueError, match="reserved by the runtime"):
+                hook(ExitCode, reserved)
 
     def test_members_are_enumerated_not_grepped(self) -> None:
         """This assertion must survive a change to the registry's SOURCE FORM.
@@ -191,17 +267,25 @@ class TestRegistryIsTheSoleDeclarer:
         matches = [p for p in _src_root().rglob("*.py") if p.resolve() == registry]
         assert len(matches) == 1, f"exclusion matched {len(matches)} files: {matches}"
 
-    def test_the_scanner_can_see_a_declaration(self) -> None:
+    def test_the_scanner_can_see_both_declaration_shapes(self) -> None:
         """INSTRUMENT GUARD. A scan that finds nothing is not a scan that found nothing wrong.
 
-        Point the scanner at the registry itself -- which is the one file that
-        legitimately declares `EXIT_*` aliases -- and require it to find them.
-        Without this, `_declarations_outside_registry() == {}` would also hold if
-        the AST walk were simply broken.
+        The previous version of this guard asserted only that an ``EXIT_*`` alias
+        was found -- and the five module-level aliases DO carry the prefix. It
+        therefore passed while the walk was blind to class bodies entirely: **an
+        instrument guard demonstrating a capability the scan did not have**, which
+        is the defect this whole issue exists to eliminate, sitting inside the fix
+        for it.
+
+        Both shapes are now required: a module-level alias, AND a class-body
+        member carrying no prefix.
         """
         names = _exit_name_assignments(ast.parse(_registry_path().read_text(encoding="utf-8")))
-        assert "EXIT_LOAD_FAILED" in names, f"scanner is blind; it saw {names}"
-        assert len(names) >= 5
+        assert "EXIT_LOAD_FAILED" in names, f"blind to module-level aliases; saw {names}"
+        assert "REFUSED_ROWS" in names, f"blind to class-body members; saw {names}"
+        # Every member must be visible, not just the one asserted above.
+        missing = _registry_member_names() - set(names)
+        assert not missing, f"blind to members: {sorted(missing)}"
 
     def test_no_module_outside_the_registry_declares_an_exit_code(self) -> None:
         offenders = _declarations_outside_registry()
