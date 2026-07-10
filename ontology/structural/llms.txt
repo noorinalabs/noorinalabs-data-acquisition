@@ -1739,45 +1739,45 @@ imports: __future__, ast, importlib, inspect, sys, pathlib, types, pytest, src.c
 - func _registry_path() @62
 - func _src_root() @74
 - func _registry_member_names() @78
-- func _is_exit_name(name) @97
-- func _exit_name_assignments(tree) @119
-- func _declarations_outside_registry() @142
-- class TestDuplicateValueIsInexpressible @159
-  - method test_the_registry_has_no_aliases(self) @160
-  - method test_importing_the_registry_is_what_raises(self) @188
-- class TestReservedSetIsEnumerated @203
-  - method test_no_member_claims_a_runtime_reserved_code(self) @204
-  - method test_the_reservation_hook_is_installed(self) @214
-  - method test_a_reserved_value_is_inexpressible_not_merely_untested(self) @228
-  - method test_members_are_enumerated_not_grepped(self) @247
-  - method test_the_ruling_table_is_pinned(self) @265
-  - method test_every_member_documents_what_is_on_disk(self) @279
-- func _unnamed_exits(tree) @367
-- func _unnamed_exits_by_scope(tree) @373
-- func _module_functions(tree) @413
-- func _exit_arg_is_named(arg, funcs) @420
-- func _unnamed_exit_at(node, funcs) @485
-- class TestNoUnnamedExit @501
-  - method test_a_named_code_or_zero_is_permitted(self, source) @550
-  - method test_everything_else_is_an_offender(self, source) @554
-  - method test_the_allowlist_is_not_vacuous(self) @561
-  - method test_a_call_that_is_not_an_exit_is_ignored(self) @574
-  - method test_the_live_tree_has_exactly_one_unnamed_exit_and_da372_owns_it(self) @584
-  - method test_the_hop_follows_the_value_into_ducks_real_idiom(self) @617
-  - method test_the_scope_walk_sees_async_and_module_scope(self) @641
-- class TestTheScanSeesEveryBindingForm @659
-  - method test_every_binding_form_is_seen(self, form) @674
-  - method test_a_load_is_not_a_binding(self) @689
-  - method test_the_class_body_member_form_is_seen(self) @694
-- class TestCheckNeo4jNamesOnlyWhatItKnows @700
-  - method test_it_takes_no_exit_code_parameter(self) @715
-  - method test_an_unreachable_database_exits_db_unreachable(self, monkeypatch, capsys) @720
-  - method test_the_helper_has_more_than_one_caller(self) @749
-- class TestRegistryIsTheSoleDeclarer @763
-  - method test_the_exclusion_matches_exactly_one_file(self) @764
-  - method test_the_scanner_can_see_both_declaration_shapes(self) @777
-  - method test_every_module_that_names_an_exit_code_resolves_it_to_the_registry(self) @797
-  - method test_no_module_outside_the_registry_declares_an_exit_code(self) @854
+- func _is_exit_name(name) @102
+- func _exit_name_assignments(tree) @124
+- func _declarations_outside_registry() @147
+- class TestDuplicateValueIsInexpressible @164
+  - method test_the_registry_has_no_aliases(self) @165
+  - method test_importing_the_registry_is_what_raises(self) @193
+- class TestReservedSetIsEnumerated @208
+  - method test_no_member_claims_a_runtime_reserved_code(self) @209
+  - method test_the_reservation_hook_is_installed(self) @219
+  - method test_a_reserved_value_is_inexpressible_not_merely_untested(self) @233
+  - method test_members_are_enumerated_not_grepped(self) @252
+  - method test_the_ruling_table_is_pinned(self) @270
+  - method test_every_member_documents_what_is_on_disk(self) @284
+- func _unnamed_exits(tree) @372
+- func _unnamed_exits_by_scope(tree) @378
+- func _module_functions(tree) @418
+- func _exit_arg_is_named(arg, funcs) @425
+- func _unnamed_exit_at(node, funcs) @490
+- class TestNoUnnamedExit @506
+  - method test_a_named_code_or_zero_is_permitted(self, source) @562
+  - method test_everything_else_is_an_offender(self, source) @566
+  - method test_the_allowlist_is_not_vacuous(self) @573
+  - method test_a_call_that_is_not_an_exit_is_ignored(self) @586
+  - method test_the_live_tree_has_exactly_one_unnamed_exit_and_da372_owns_it(self) @596
+  - method test_the_hop_follows_the_value_into_ducks_real_idiom(self) @629
+  - method test_the_scope_walk_sees_async_and_module_scope(self) @653
+- class TestTheScanSeesEveryBindingForm @671
+  - method test_every_binding_form_is_seen(self, form) @686
+  - method test_a_load_is_not_a_binding(self) @701
+  - method test_the_class_body_member_form_is_seen(self) @706
+- class TestCheckNeo4jNamesOnlyWhatItKnows @712
+  - method test_it_takes_no_exit_code_parameter(self) @727
+  - method test_an_unreachable_database_exits_db_unreachable(self, monkeypatch, capsys) @732
+  - method test_the_helper_has_more_than_one_caller(self) @761
+- class TestRegistryIsTheSoleDeclarer @775
+  - method test_the_exclusion_matches_exactly_one_file(self) @776
+  - method test_the_scanner_can_see_both_declaration_shapes(self) @789
+  - method test_every_module_that_names_an_exit_code_resolves_it_to_the_registry(self) @809
+  - method test_no_module_outside_the_registry_declares_an_exit_code(self) @866
 
 ## tests/test_graph/__init__.py [python]
 

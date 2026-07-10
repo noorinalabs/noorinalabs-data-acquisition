@@ -91,7 +91,12 @@ def _registry_member_names() -> frozenset[str]:
     which is exactly the mutant it exists to catch. `__members__` costs nothing
     and makes each guard alias-aware on its own. (Oyunbileg Batbayar.)
     """
-    return frozenset(ExitCode.__members__)
+    members = frozenset(ExitCode.__members__)
+    # INSTRUMENT GUARD: a derivation that yields nothing is not a derivation that
+    # found nothing wrong. Every consumer of this set -- the sole-declarer scan,
+    # the docstring guard, the exit allowlist -- would silently permit everything.
+    assert members, "the registry derivation yielded no members; the guards are blind"
+    return members
 
 
 def _is_exit_name(name: str) -> bool:
@@ -544,6 +549,13 @@ class TestNoUnnamedExit:
         # `g`'s return is a Call, and the recursion carries `funcs=None`.
         "def f():\n    return 0\ndef g():\n    return f()\nsys.exit(g())",
         "sys.exit(other.main())",  # not module-local; cannot follow
+        "sys.exit(ExitCode.NOPE)",  # a typo'd member -- resolved through __members__
+        # Self- and mutual recursion terminate: the hop carries `funcs=None`, so the
+        # inner Call can never be followed. Fail-closed, and no RecursionError.
+        "def f():\n    return f()\nsys.exit(f())",
+        "def f():\n    return g()\ndef g():\n    return f()\nsys.exit(f())",
+        # An imported callee cannot be resolved from this module's AST.
+        "from x import main\nraise SystemExit(main())",
     ]
 
     @pytest.mark.parametrize("source", PERMITTED)
