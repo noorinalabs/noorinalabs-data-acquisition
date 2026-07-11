@@ -1286,12 +1286,27 @@ class TestMatnProvenanceAndOath:
             "من رسول الله",  # mc-38
             "ه من رسول الله",  # mc-55
             "هذا من رسول الله",  # mc-18
-            "كمن زار رسول الله",  # mc-8
             "ه من النبي",  # mc-7
         ],
     )
     def test_prophet_provenance_dropped(self, provenance: str) -> None:
         assert clean_narrator_name(normalize_arabic(provenance)) is None
+
+    # ACCEPTED RESIDUAL, deliberately asserted as KEPT (da#424).
+    #
+    # "كمن زار رسول الله" ("like one who visited the Messenger of Allah", mc-8) carries a
+    # substantive verb, زار. The provenance rule is scoped all-residue precisely so it
+    # can NEVER reach a span with substantive content — that scoping is what stops it
+    # deleting rijal biographies ("وفد على رسول الله" = "he came as a delegate to the
+    # Messenger of Allah" is the SAME shape, and it names a real companion). A rule that
+    # drops this one would delete those, and we have already made that mistake twice.
+    #
+    # So this span stays, at no-worse-than-main (main keeps it too). Recovering it needs
+    # truncate-and-re-gate, which is da#424's job. Asserted explicitly rather than left
+    # silent so the trade is visible and a future edit cannot quietly "fix" it by
+    # loosening the scoping.
+    def test_verb_bearing_provenance_is_an_accepted_residual(self) -> None:
+        assert clean_narrator_name(normalize_arabic("كمن زار رسول الله")) is not None
 
     @pytest.mark.parametrize(
         "oath",
@@ -1416,3 +1431,66 @@ class TestScrubDoesNotDeleteRealNarrators:
     )
     def test_leading_oath_still_drops(self, oath: str) -> None:
         assert clean_narrator_name(normalize_arabic(oath)) is None
+
+
+class TestBioPromotedNarratorsSurvive:
+    """The provenance rule must not delete rijal BIOGRAPHY entries (2nd review round).
+
+    A companion's biography mentions the Prophet BY NATURE — "شهد النبي في حجة الوداع"
+    ("he witnessed the Prophet at the Farewell Pilgrimage"), "وفد على رسول الله" ("he
+    came as a delegate to the Messenger of Allah"), "خليفه رسول الله" ("Successor of the
+    Messenger of Allah"). Every one of those is a Prophet reference plus a preposition,
+    so an `any()`-shaped provenance rule reads a real transmitter's bio as a matn
+    fragment and deletes him.
+
+    That is what happened: 44 real bio-promoted narrators were dropped, including **Abu
+    Bakr al-Siddiq**, **al-Tayyib (the Prophet's son)** and **Dhu al-Yadayn**. Like Umm
+    Kulthum, all are `mention_count = 0` — 45,613 of the 150,187 canonical rows are — so
+    a mention-weighted A/B assigns them weight zero and CANNOT see the deletion. This is
+    the same premise error as the `أم` homograph, one layer deeper: it is not only kunya
+    connectors, it is that bio prose about a companion is indistinguishable from
+    provenance under a "Prophet-ref + particle" discriminator.
+
+    The rule is now scoped all-residue (every token must be a function word or part of
+    the Prophet reference), mirroring rule 5b — the only shape in this module proven safe
+    — so a span carrying ANY substantive token is structurally out of reach.
+
+    Fixtures are verbatim `name_ar` rows (itqan / sanadset, all mention_count 0).
+    """
+
+    @pytest.mark.parametrize(
+        "bio",
+        [
+            # Abu Bakr al-Siddiq, the first Caliph. Note the TRAILING DANGLING WAW: the
+            # waw-pop must not set was_truncated, or signal (2p) fires on the "رسول الله"
+            # in "خليفه رسول الله" and deletes him.
+            "ابو بكر الصديق عبدالله بن ابي قحافه عثمان التيمي خليفه رسول الله و",
+            "الطيب ولد رسول الله",  # al-Tayyib, the Prophet's son
+            "ذواليدين صلي مع النبي",  # Dhu al-Yadayn (sanadset)
+            "الحارث بن عمرو السهمي الباهلي شهد النبي في حجة الوداع عداده ف",
+            "ضمرة بن سعد السلمي شهد مع النبي حنينا",
+            "رغبان مولى حبيب بن مسلمة الفهري رأى أصحاب النبي يركعون ركعتين قبل المغرب",
+            "أبو صفية رجل من المهاجرين من 3 أصحاب النبي",
+            "زرارة بن عمرو النخعي وفد إلى رسول الله",
+        ],
+    )
+    def test_bio_promoted_companion_survives(self, bio: str) -> None:
+        assert clean_narrator_name(normalize_arabic(bio)) is not None
+
+    # PRECISION: the all-residue scoping must still drop the pure fragments — every
+    # token a function word or part of the Prophet reference, no naming content at all.
+    @pytest.mark.parametrize(
+        "fragment",
+        [
+            "من رسول الله",  # mc-38
+            "ه من رسول الله",  # mc-55
+            "ها من رسول الله",  # mc-7  (bare pronoun, same class as the 1-char "ه")
+            "هن من رسول الله",  # mc-5
+            "هذا من رسول الله",  # mc-18
+            "ه من النبي",  # mc-7
+            "بعض اصحاب النبي",  # mc-47 — mubham collective, must NOT be spared
+            "بعض ازواج النبي",  # mc-23
+        ],
+    )
+    def test_pure_provenance_fragment_still_drops(self, fragment: str) -> None:
+        assert clean_narrator_name(normalize_arabic(fragment)) is None

@@ -900,6 +900,47 @@ def _is_partitive(token: str) -> bool:
     return token[:1] in ("و", "ف", "ك", "ل", "ب") and token[1:] == _PARTITIVE
 
 
+# Collective nouns that head an ANONYMOUS group referred to the Prophet — "the
+# companions of…", "the wives of…". With a mubham quantifier in front ("بعض اصحاب
+# النبي" = "SOME OF the companions of the Prophet") the span names no individual, so
+# it is residue for the provenance rule below. Closed set, and never an ism.
+_PROPHET_COLLECTIVE_NOUNS = frozenset({"اصحاب", "ازواج", "نساء", "اهل", "ال", "امه"})
+
+# Bare pronouns left behind by a mis-parse ("ه من رسول الله" mc-55, "ها من رسول الله"
+# mc-7, "هن من رسول الله" mc-5). A pronoun is never an ism, so these carry no naming
+# content. The one-character check below already caught the bare "ه"; this completes the
+# closed set rather than leaving the lexicon to depend on token LENGTH, which is
+# arbitrary — "ه" and "ها" are the same class of fragment.
+_BARE_PRONOUNS = frozenset({"ه", "ها", "هم", "هن", "هما", "هي", "هو", "انا", "انت"})
+
+
+def _is_prophet_ref_component(token: str) -> bool:
+    """True when *token* is part of a Prophet reference itself (``رسول``/``النبي``/``الله``)."""
+    return token in _PROPHET_TITLE_SOLE or token in _PROPHET_TITLE_LEADERS or token == "الله"
+
+
+def _is_provenance_residue(token: str) -> bool:
+    """True when *token* carries no naming content — function word or anonymous collective.
+
+    The membership test for the da#314 provenance rule's all-residue scoping. A token
+    is residue when it is the partitive ``من`` (with proclitics), a bare matn particle,
+    a mubham collective quantifier (``بعض``, ``رجل``), a collective noun heading an
+    anonymous group (``اصحاب``, ``ازواج``), or a stray sub-token left by a mis-parse
+    (a one-letter fragment such as ``ه``/``ها``, which no Arabic ism can be).
+
+    The apposition connectors are EXCLUDED from the matn-particle arm (Sofia Cardoso):
+    ``أم`` (*umm*) normalizes to ``ام``, homographic with the disjunctive particle
+    ``أم`` ("or"), and treating it as residue is what deleted Umm Kulthum bint Muhammad.
+    Redundant under the all-token scoping — her span carries substantive tokens too —
+    but kept as the explicit, verified guard against the homograph.
+    """
+    if _is_partitive(token) or token in _MUBHAM_LEADERS or token in _PROPHET_COLLECTIVE_NOUNS:
+        return True
+    if len(token) == 1 or token in _BARE_PRONOUNS:
+        return True
+    return _is_matn_particle(token) and token not in _APPOSITION_CONNECTORS
+
+
 def _is_matn_particle(token: str) -> bool:
     """True when *token* (normalized) is a bare matn function word (da#317).
 
@@ -1353,8 +1394,25 @@ def _is_matn_sentence(tokens: list[str], kept_text: str, was_truncated: bool) ->
     #      why a mention-weighted sweep could not see them. The mubham collectives this
     #      rule targets are untouched: "بعض" is not an apposition connector, so
     #      "بعض اصحاب النبي" / "بعض ازواج النبي" still drop.
-    if any(_prophet_ref_len(bare, i) > 0 for i in range(n)) and any(
-        _is_partitive(t) or (_is_matn_particle(t) and t not in _APPOSITION_CONNECTORS) for t in bare
+    #      SCOPING (second review round): the rule fires only when EVERY token is
+    #      function-word residue or part of the Prophet reference itself — the same
+    #      all-residue shape as rule 5b, which is the only shape proven safe here. A
+    #      span carrying ANY substantive token (an ism, a nisba, a common noun) is
+    #      structurally out of reach, which is what a "does it contain a real name?"
+    #      test needs to be, absent a name lexicon.
+    #
+    #      This is not belt-and-braces; it is load-bearing. A rijal BIOGRAPHY entry
+    #      names a real narrator and then describes him — and a companion's biography
+    #      mentions the Prophet *by nature*: "شهد النبي في حجة الوداع" ("he witnessed
+    #      the Prophet at the Farewell Pilgrimage"), "وفد على رسول الله" ("he came as a
+    #      delegate to the Messenger of Allah"). Those carry a Prophet reference AND a
+    #      preposition, so the earlier any()-form of this rule deleted 44 real
+    #      bio-promoted narrators — among them ابو بكر الصديق … خليفه رسول الله (Abu
+    #      Bakr al-Siddiq, the first Caliph), الطيب ولد رسول الله (the Prophet's son)
+    #      and ذواليدين (Dhu al-Yadayn). All are mention_count 0, so — exactly like Umm
+    #      Kulthum — a mention-weighted sweep could not see them.
+    if any(_prophet_ref_len(bare, i) > 0 for i in range(n)) and all(
+        _is_prophet_ref_component(t) or _is_provenance_residue(t) for t in bare
     ):
         return True
 
@@ -1651,9 +1709,22 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
     #     no following member conjoins nothing and is never a name component. Only the
     #     TRAILING position is touched, so a MEDIAL waw — the class-6 compound join
     #     "X و Y" that :func:`split_compound_narrators` must still see — is untouched.
-    while tokens and (tokens[-1] in _ISNAD_BOUNDARY or tokens[-1] == _WAW_CONJUNCTION):
+    while tokens and tokens[-1] in _ISNAD_BOUNDARY:
         tokens.pop()
         was_truncated = True
+    #     The dangling waw is popped WITHOUT setting was_truncated. That flag means "a
+    #     tail was cut off, so this is a RECOVERED fragment and needs stricter scrutiny"
+    #     — and it gates signal (2p), which drops any span carrying a bare Prophet
+    #     reference. A trailing conjunction is an affix, not name material: popping it
+    #     removes nothing the source asserted, so it must not escalate scrutiny. Setting
+    #     it here deleted "ابو بكر الصديق … خليفه رسول الله و" — ABU BAKR AL-SIDDIQ, whose
+    #     bio ends in a dangling waw — because the pop flipped was_truncated and (2p)
+    #     then fired on the "رسول الله" in "خليفه رسول الله" ("Successor of the Messenger
+    #     of Allah"). Without the flag he is spared by the nasab guard (ابو/بن/ابي), as he
+    #     should be. Same reasoning as :func:`cleaner_removed_content`: an affix is not a
+    #     tail.
+    while tokens and tokens[-1] == _WAW_CONJUNCTION:
+        tokens.pop()
     if not tokens:
         return None
 
