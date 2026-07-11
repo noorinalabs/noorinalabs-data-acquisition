@@ -541,17 +541,21 @@ def _cmd_prune_narrators(*, canonical: str, dry_run: bool = False) -> None:
     """
     from pathlib import Path
 
-    from src.graph.prune import EmptyCanonicalSetError, prune_narrators
+    from src.graph.prune import EmptyCanonicalSetError, prune_narrators, summary_line
     from src.utils.neo4j_client import Neo4jClient
+
+    # This command reads the canonical parquet and writes ONLY to the graph and
+    # stdout. It never writes back into the parquet's directory (no manifest, no audit
+    # entry, unlike `load`) — deploy#557 mounts that dir read-only, so a stray write
+    # would trip the :ro mount (da#348).
 
     canonical_path = Path(canonical)
 
     # The guard runs inside prune_narrators, BEFORE the graph is touched. Catch it
     # here to exit the named code rather than crash — nothing was deleted.
     try:
-        # _check_neo4j only after the guard would have a chance to fire? No: the guard
-        # reads the parquet, not the DB, and reads nothing destructive. Check
-        # connectivity first (like load/migrate) so an unreachable DB is DB_UNREACHABLE.
+        # The guard reads the parquet, not the DB. Check connectivity first (like
+        # load/migrate) so an unreachable DB is DB_UNREACHABLE, not a later crash.
         _check_neo4j()
         with Neo4jClient() as client:
             result = prune_narrators(client, canonical_path, dry_run=dry_run)
@@ -561,7 +565,6 @@ def _cmd_prune_narrators(*, canonical: str, dry_run: bool = False) -> None:
 
     print("=== prune-narrators (canonical-set shrink, da#413) ===")
     print(f"  Canonical ids (keep-set)   : {result.canonical_ids_seen}")
-    print(f"  Narrator nodes in graph    : {result.graph_narrators_seen}")
     print(f"  Orphans (id ∉ canonical)   : {result.orphans_identified}")
     if result.sample:
         shown = ", ".join(result.sample)
@@ -569,16 +572,23 @@ def _cmd_prune_narrators(*, canonical: str, dry_run: bool = False) -> None:
         suffix = f" (+{more} more)" if more > 0 else ""
         print(f"  Sample orphan ids          : {shown}{suffix}")
     if dry_run:
+        print(f"  Narrator nodes in graph    : {result.graph_total}")
         print(
             f"\nDRY RUN: {result.orphans_identified} Narrator node(s) WOULD be "
             "DETACH DELETEd. Nothing was deleted."
         )
     else:
         print(f"  Narrator nodes deleted     : {result.deleted}")
+        print(f"  Narrator nodes remaining   : {result.graph_total}")
+        print(f"  Orphans remaining (post)   : {result.orphans}")
         if result.orphans_identified == 0:
             print("\nNo orphans — every Narrator in the graph is in the canonical set.")
         else:
             print("\nPrune complete.")
+
+    # The load-bearing machine-readable line deploy#557's verify greps. Emitted on
+    # BOTH modes and last, so it is unmissable on stdout.
+    print(summary_line(result))
 
 
 def _cmd_enrich(

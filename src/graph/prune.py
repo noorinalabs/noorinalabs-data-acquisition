@@ -52,6 +52,7 @@ __all__ = [
     "PruneResult",
     "prune_narrators",
     "read_canonical_ids",
+    "summary_line",
 ]
 
 DEFAULT_BATCH_SIZE = 1000
@@ -64,16 +65,14 @@ SAMPLE_SIZE = 20
 # difference cannot be a graph-side degree/reference predicate.
 _ALL_NARRATOR_IDS = "MATCH (n:Narrator) RETURN n.id AS id"
 
-# Delete one batch of orphans by id, edges and all. ``count(n)`` is an aggregation
-# over the matched rows, computed as the rows are deleted, so it returns the number
-# actually removed without ever returning a deleted node object. We do not trust the
-# driver's node-deleted counter (execute_write surfaces record data, not a summary);
-# the integration test verifies the graph by reading it back regardless.
+# Delete one batch of orphans by id, edges and all. No RETURN: we do NOT trust a
+# driver-side deleted counter. ``deleted`` and the post-count of orphans are measured
+# by reading the graph back after the deletes (the count>=0 discipline: prove the
+# post-state, don't infer it from a write's own report).
 _DETACH_DELETE_BY_ID = """\
 UNWIND $batch AS nid
 MATCH (n:Narrator {id: nid})
 DETACH DELETE n
-RETURN count(n) AS deleted
 """
 
 
@@ -101,19 +100,32 @@ class EmptyCanonicalSetError(Exception):
 
 @dataclass(frozen=True)
 class PruneResult:
-    """Outcome of a :func:`prune_narrators` run.
+    """Outcome of a :func:`prune_narrators` run, shaped to feed deploy#557's verify.
 
-    ``deleted`` is 0 on a ``--dry-run`` (nothing was deleted) and on a real run that
-    found no orphans. ``orphans_identified`` is the count the run WOULD delete (dry
-    run) or DID delete (real run) — they are equal by construction, the sample is the
-    same set, and a dry run is exactly a real run with the delete batches suppressed.
+    The fields map onto the machine-readable :func:`summary_line` its workflow greps:
+
+    * ``canonical_ids_seen`` → ``canonical=`` — size of the keep-set.
+    * ``graph_total`` → ``graph_total=`` — Narrator nodes in the graph AFTER the op
+      (for a dry run nothing is deleted, so this is the current total).
+    * ``orphans`` → ``orphans=`` — **its meaning differs by mode, by contract**: on a
+      dry run it is the count that WOULD be deleted (pre-count); on a real run it is
+      the orphans that REMAIN after the delete, re-measured by reading the graph back,
+      and it MUST be 0 (that is what proves exactly the orphans went and every
+      referenced/canonical narrator survived, not merely that the graph was not wiped).
+    * ``deleted`` → ``deleted=`` — nodes removed, measured as pre-total minus
+      post-total (readback truth), 0 on a dry run.
+
+    ``orphans_identified`` is always the pre-count (what a real run would delete); it
+    drives the human-readable line and the ``sample``. A dry run is exactly a real run
+    with the delete batches and the post-readback suppressed.
     """
 
     canonical_ids_seen: int
-    graph_narrators_seen: int
-    orphans_identified: int
+    graph_total: int
+    orphans: int
     deleted: int
     dry_run: bool
+    orphans_identified: int
     sample: list[str] = field(default_factory=list)
 
 
@@ -166,47 +178,69 @@ def prune_narrators(
     # Guard first, before ANY graph access. An unusable keep-set raises here.
     canonical_ids = read_canonical_ids(canonical_path)
 
-    graph_rows = client.execute_read(_ALL_NARRATOR_IDS)
-    graph_ids = [row["id"] for row in graph_rows if row.get("id")]
-    orphans = [gid for gid in graph_ids if gid not in canonical_ids]
+    graph_ids_pre = [row["id"] for row in client.execute_read(_ALL_NARRATOR_IDS) if row.get("id")]
+    orphans = [gid for gid in graph_ids_pre if gid not in canonical_ids]
     sample = orphans[:SAMPLE_SIZE]
 
     if dry_run:
         logger.info(
             "prune_narrators_dry_run",
             canonical_ids_seen=len(canonical_ids),
-            graph_narrators_seen=len(graph_ids),
+            graph_total=len(graph_ids_pre),
             orphans_identified=len(orphans),
         )
         return PruneResult(
             canonical_ids_seen=len(canonical_ids),
-            graph_narrators_seen=len(graph_ids),
-            orphans_identified=len(orphans),
+            graph_total=len(graph_ids_pre),
+            orphans=len(orphans),  # dry run: the WOULD-delete count
             deleted=0,
             dry_run=True,
+            orphans_identified=len(orphans),
             sample=sample,
         )
 
-    deleted = 0
     for i in range(0, len(orphans), batch_size):
         chunk = orphans[i : i + batch_size]
-        result = client.execute_write(_DETACH_DELETE_BY_ID, {"batch": chunk})
-        if result:
-            value = result[0].get("deleted", 0)
-            deleted += value if isinstance(value, int) else 0
+        client.execute_write(_DETACH_DELETE_BY_ID, {"batch": chunk})
+
+    # Read the graph BACK to measure the outcome — never trust a write's self-report.
+    # ``orphans_remaining`` must be 0: that is the proof that exactly the orphans went
+    # and every canonical narrator (edged or zero-degree) survived. ``deleted`` is the
+    # pre/post total difference, the honest count of what left the graph.
+    graph_ids_post = [row["id"] for row in client.execute_read(_ALL_NARRATOR_IDS) if row.get("id")]
+    orphans_remaining = [gid for gid in graph_ids_post if gid not in canonical_ids]
+    deleted = len(graph_ids_pre) - len(graph_ids_post)
 
     logger.info(
         "prune_narrators_complete",
         canonical_ids_seen=len(canonical_ids),
-        graph_narrators_seen=len(graph_ids),
+        graph_total=len(graph_ids_post),
         orphans_identified=len(orphans),
+        orphans_remaining=len(orphans_remaining),
         deleted=deleted,
     )
     return PruneResult(
         canonical_ids_seen=len(canonical_ids),
-        graph_narrators_seen=len(graph_ids),
-        orphans_identified=len(orphans),
+        graph_total=len(graph_ids_post),
+        orphans=len(orphans_remaining),  # real run: post-count, MUST be 0
         deleted=deleted,
         dry_run=False,
+        orphans_identified=len(orphans),
         sample=sample,
+    )
+
+
+def summary_line(result: PruneResult) -> str:
+    """The one machine-readable line deploy#557's graph-side verify greps from stdout.
+
+    Emitted on BOTH a dry run and a real run. Its absence is a hard failure in the
+    workflow — a missing instrument reading is a stop, not a silent pass — so it is
+    printed unconditionally by the CLI. ``orphans=`` carries the by-mode meaning
+    documented on :class:`PruneResult`: the would-delete count on a dry run, the
+    post-delete remaining count (``0`` on success) on a real run.
+    """
+    return (
+        f"PRUNE_NARRATORS_SUMMARY canonical={result.canonical_ids_seen} "
+        f"graph_total={result.graph_total} orphans={result.orphans} "
+        f"deleted={result.deleted}"
     )

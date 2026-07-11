@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from src.graph.prune import EmptyCanonicalSetError, prune_narrators
+from src.graph.prune import EmptyCanonicalSetError, prune_narrators, summary_line
 from src.utils.neo4j_client import Neo4jClient
 from tests.test_graph.conftest import write_narrators_canonical
 
@@ -92,8 +92,15 @@ class TestPruneAgainstRealGraph:
         assert _KEEP_ZERO in survivors, "a zero-degree canonical narrator was wrongly deleted"
         # DETACH removed the orphan's edge; the canonical endpoint stayed.
         assert _transmitted_edge_count(neo4j_client) == 0
-        assert result.deleted == 2
-        assert result.orphans_identified == 2
+        # Readback-measured summary fields — the deploy#557 contract on a real graph.
+        assert result.deleted == 2  # pre(4) - post(2)
+        assert result.graph_total == 2  # survivors, re-read
+        assert result.orphans == 0  # post-count MUST be 0 (exactly the orphans went)
+        assert result.orphans_identified == 2  # would-delete, pre
+        assert (
+            summary_line(result)
+            == "PRUNE_NARRATORS_SUMMARY canonical=2 graph_total=2 orphans=0 deleted=2"
+        )
 
     def test_dry_run_deletes_nothing(self, neo4j_client: Neo4jClient, tmp_path: Path) -> None:
         _seed_graph(neo4j_client)
