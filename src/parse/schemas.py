@@ -64,6 +64,20 @@ NARRATOR_MENTION_SCHEMA = pa.schema(
         pa.field("source_hadith_id", pa.string(), nullable=False),
         pa.field("source_corpus", pa.string(), nullable=False),
         pa.field("position_in_chain", pa.int32(), nullable=False),
+        # Which isnad-chain WITHIN this hadith the mention belongs to (da#282).
+        # ``position_in_chain`` alone is ambiguous once a single ``source_hadith_id``
+        # carries more than one transmission sequence — e.g. ``lk`` emits both an
+        # Arabic and an English isnad for one hadith, each numbered from position 0,
+        # so grouping by hadith and sorting by position interleaves two chains and
+        # fabricates cross-chain narrator adjacencies. ``chain_index`` is the
+        # per-hadith chain ordinal (0 for a single-isnad hadith; 0/1 for lk's ar/en
+        # lanes) that the graph loaders group on so a chain's edges are built WITHIN
+        # the chain, never across a hadith's chains. It also matches
+        # ``Chain.chain_index`` / ``identity.chain_node_id(hadith_id, chain_index)``.
+        # Nullable: a producer that does not set it (or a legacy file) reads back as
+        # None, which every consumer coalesces to 0 (single chain) — so single-isnad
+        # data is unaffected.
+        pa.field("chain_index", pa.int32(), nullable=True),
         pa.field("name_ar", pa.string(), nullable=True),
         pa.field("name_en", pa.string(), nullable=True),
         pa.field("name_ar_normalized", pa.string(), nullable=True),

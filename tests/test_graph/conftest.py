@@ -200,6 +200,8 @@ def write_narrator_mentions(
         "position_in_chain": pa.array(
             [r.get("position_in_chain", 0) for r in rows], type=pa.int32()
         ),
+        # da#282: per-hadith isnad-chain ordinal (defaults to 0 = single chain).
+        "chain_index": pa.array([r.get("chain_index", 0) for r in rows], type=pa.int32()),
         "name_ar": pa.array([r.get("name_ar") for r in rows], type=pa.string()),
         "name_en": pa.array([r.get("name_en") for r in rows], type=pa.string()),
         "name_ar_normalized": pa.array(
@@ -228,6 +230,9 @@ def write_narrator_mentions_resolved(
         "position_in_chain": pa.array(
             [r.get("position_in_chain", 0) for r in rows], type=pa.int32()
         ),
+        # da#282: per-hadith isnad-chain ordinal. Defaults to 0 (single chain) so
+        # existing fixtures need only set it when they exercise multi-chain grouping.
+        "chain_index": pa.array([r.get("chain_index", 0) for r in rows], type=pa.int32()),
         "name_raw": pa.array([r.get("name_raw") for r in rows], type=pa.string()),
         "name_normalized": pa.array([r.get("name_normalized") for r in rows], type=pa.string()),
         "canonical_narrator_id": pa.array(

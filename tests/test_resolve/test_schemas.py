@@ -37,6 +37,7 @@ class TestSampleData:
             "hadith_id": pa.array(["h-1"], type=pa.string()),
             "source_corpus": pa.array(["sunnah"], type=pa.string()),
             "position_in_chain": pa.array([0], type=pa.int32()),
+            "chain_index": pa.array([0], type=pa.int32()),
             "name_raw": pa.array(["Abu Hurayra"], type=pa.string()),
             "name_normalized": pa.array(["abu hurayra"], type=pa.string()),
             "canonical_narrator_id": pa.array([None], type=pa.string()),

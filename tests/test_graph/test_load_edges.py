@@ -241,6 +241,203 @@ class TestLoadTransmittedTo:
         assert tt_result.missing_endpoints == 1
 
 
+class TestChainIdentityNoCrossChainFabrication:
+    """da#282: TRANSMITTED_TO adjacencies are built WITHIN an isnad-chain, never
+    across a hadith's multiple chains.
+
+    A single ``hadith_id`` may carry more than one transmission sequence — today
+    ``lk`` emits both an Arabic and an English isnad for one hadith, each numbered
+    from ``position_in_chain = 0``. Grouping mentions by hadith and sorting by
+    position interleaves the chains and MERGEs narrator pairs that appear in no
+    actual chain. ``chain_index`` distinguishes the chains so the loader groups by
+    ``(hadith_id, chain_index)``.
+    """
+
+    @staticmethod
+    def _merged_pairs(mock_client: MockNeo4jClient) -> set[tuple[str, str]]:
+        """The (from_id, to_id) pairs MERGEd as TRANSMITTED_TO edges."""
+        pairs: set[tuple[str, str]] = set()
+        for query, payload in mock_client.calls:
+            if "MERGE (n1)-[:TRANSMITTED_TO" in query and isinstance(payload, list):
+                for row in payload:
+                    pairs.add((row["from_id"], row["to_id"]))
+        return pairs
+
+    def test_two_chains_one_hadith_no_cross_chain_edge(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        # Every endpoint exists — enough True rows to cover any pairing the loader
+        # builds (2 within-chain with the fix; 3 interleaved without it).
+        mock_client.set_read_results([{"from_exists": True, "to_exists": True} for _ in range(6)])
+        # One hadith, TWO isnad-chains. chain 0: A -> B. chain 1: C -> D. Both
+        # chains start at position 0, exactly the lk ar/en shape.
+        write_narrator_mentions_resolved(
+            curated_dir,
+            [
+                {
+                    "mention_id": "m0",
+                    "hadith_id": "h1",
+                    "chain_index": 0,
+                    "position_in_chain": 0,
+                    "canonical_narrator_id": "nar:A",
+                },
+                {
+                    "mention_id": "m1",
+                    "hadith_id": "h1",
+                    "chain_index": 0,
+                    "position_in_chain": 1,
+                    "canonical_narrator_id": "nar:B",
+                },
+                {
+                    "mention_id": "m2",
+                    "hadith_id": "h1",
+                    "chain_index": 1,
+                    "position_in_chain": 0,
+                    "canonical_narrator_id": "nar:C",
+                },
+                {
+                    "mention_id": "m3",
+                    "hadith_id": "h1",
+                    "chain_index": 1,
+                    "position_in_chain": 1,
+                    "canonical_narrator_id": "nar:D",
+                },
+            ],
+        )
+        load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
+        pairs = self._merged_pairs(mock_client)
+
+        # Within-chain adjacencies are present …
+        assert ("nar:A", "nar:B") in pairs
+        assert ("nar:C", "nar:D") in pairs
+        # … and NO cross-chain adjacency was fabricated. Under the pre-da#282
+        # per-hadith flatten these are exactly the edges that appeared:
+        # sorted [A(0), C(0), B(1), D(1)] -> (A,C), (C,B), (B,D).
+        assert ("nar:A", "nar:C") not in pairs
+        assert ("nar:C", "nar:B") not in pairs
+        assert ("nar:B", "nar:D") not in pairs
+        assert pairs == {("nar:A", "nar:B"), ("nar:C", "nar:D")}
+
+    def test_single_isnad_hadith_unaffected(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """A single-chain hadith (all chain_index 0) builds the same edges as before."""
+        mock_client.set_read_results([{"from_exists": True, "to_exists": True} for _ in range(4)])
+        write_narrator_mentions_resolved(
+            curated_dir,
+            [
+                {
+                    "mention_id": "m0",
+                    "hadith_id": "h1",
+                    "chain_index": 0,
+                    "position_in_chain": 0,
+                    "canonical_narrator_id": "nar:A",
+                },
+                {
+                    "mention_id": "m1",
+                    "hadith_id": "h1",
+                    "chain_index": 0,
+                    "position_in_chain": 1,
+                    "canonical_narrator_id": "nar:B",
+                },
+                {
+                    "mention_id": "m2",
+                    "hadith_id": "h1",
+                    "chain_index": 0,
+                    "position_in_chain": 2,
+                    "canonical_narrator_id": "nar:C",
+                },
+            ],
+        )
+        load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
+        assert self._merged_pairs(mock_client) == {("nar:A", "nar:B"), ("nar:B", "nar:C")}
+
+    def test_absent_chain_index_defaults_to_single_chain(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """A legacy row that omits chain_index (→ null) coalesces to chain 0, so a
+        pre-da#282 file still builds one contiguous chain rather than fragmenting."""
+        mock_client.set_read_results([{"from_exists": True, "to_exists": True} for _ in range(4)])
+        # Explicit None → a genuine null chain_index column in the parquet, the
+        # legacy pre-da#282 shape; the loader must coalesce it to chain 0.
+        write_narrator_mentions_resolved(
+            curated_dir,
+            [
+                {
+                    "mention_id": "m0",
+                    "hadith_id": "h1",
+                    "chain_index": None,
+                    "position_in_chain": 0,
+                    "canonical_narrator_id": "nar:A",
+                },
+                {
+                    "mention_id": "m1",
+                    "hadith_id": "h1",
+                    "chain_index": None,
+                    "position_in_chain": 1,
+                    "canonical_narrator_id": "nar:B",
+                },
+            ],
+        )
+        load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
+        assert self._merged_pairs(mock_client) == {("nar:A", "nar:B")}
+
+    def test_two_chains_narrated_dedupes_to_one_when_openers_match(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """Both chains of a hadith emit a NARRATED edge from their position-0
+        narrator; when the openers resolve to the same canonical (the lk ar/en
+        case) they MERGE to one edge, so per-chain NARRATED never inflates."""
+        mock_client.set_read_results(
+            [{"narrator_exists": True, "hadith_exists": True} for _ in range(4)]
+        )
+        write_narrator_mentions_resolved(
+            curated_dir,
+            [
+                # chain 0 opener and chain 1 opener are the SAME canonical narrator.
+                {
+                    "mention_id": "m0",
+                    "hadith_id": "h1",
+                    "chain_index": 0,
+                    "position_in_chain": 0,
+                    "canonical_narrator_id": "nar:A",
+                },
+                {
+                    "mention_id": "m1",
+                    "hadith_id": "h1",
+                    "chain_index": 0,
+                    "position_in_chain": 1,
+                    "canonical_narrator_id": "nar:B",
+                },
+                {
+                    "mention_id": "m2",
+                    "hadith_id": "h1",
+                    "chain_index": 1,
+                    "position_in_chain": 0,
+                    "canonical_narrator_id": "nar:A",
+                },
+                {
+                    "mention_id": "m3",
+                    "hadith_id": "h1",
+                    "chain_index": 1,
+                    "position_in_chain": 1,
+                    "canonical_narrator_id": "nar:C",
+                },
+            ],
+        )
+        results = load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
+        narrated = next(r for r in results if r.edge_type == "NARRATED")
+        # Two chain-openers, both nar:A -> hdt:h1 → one MERGEd edge after dedup.
+        narrated_targets = {
+            (row["narrator_id"], row["hadith_id"])
+            for query, payload in mock_client.calls
+            if "NARRATED" in query and isinstance(payload, list)
+            for row in payload
+        }
+        assert ("nar:A", "hdt:h1") in narrated_targets
+        assert narrated.created >= 1
+
+
 class TestLoadNarrated:
     def test_first_narrator_per_hadith(
         self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path

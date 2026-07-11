@@ -126,6 +126,21 @@ def _val(row: dict[str, Any], key: str, default: Any = None) -> Any:
     return default if v is None else v
 
 
+def _chain_index(row: dict[str, Any]) -> int:
+    """Per-hadith isnad-chain ordinal for a mention row (da#282).
+
+    Chain edges are grouped by ``(hadith_id, chain_index)`` — never by hadith
+    alone — so a hadith carrying more than one transmission sequence (today: lk's
+    Arabic + English isnads, each numbered from position 0) does not have its
+    chains flattened into one position-sorted list, which fabricated narrator
+    adjacencies that exist in no actual chain. A missing/None ``chain_index``
+    (legacy pre-da#282 file, or a single-isnad producer that left it unset)
+    coalesces to 0, so single-chain hadiths are unaffected.
+    """
+    v = row.get("chain_index")
+    return int(v) if v is not None else 0
+
+
 # ---------------------------------------------------------------------------
 # 1. TRANSMITTED_TO — consecutive narrator pairs in each chain
 # ---------------------------------------------------------------------------
@@ -247,7 +262,9 @@ def _load_transmitted_to(
         logger.warning("transmitted_to_files_missing", dir=str(staging_dir))
         return EdgeLoadResult("TRANSMITTED_TO", 0, 0, 0)
 
-    # Group mentions by hadith.
+    # Group mentions by (hadith_id, chain_index) so each isnad-chain is sequenced
+    # on its own (da#282). Keying on hadith alone flattened every chain of a
+    # multi-isnad hadith into one position-sorted list — see ``_chain_index``.
     #
     # Curated mention-links (provenance-bearing rows from the muhaddithat orphan
     # producer, da#228) are NARRATED-ONLY by contract and MUST NOT enter chain-pair
@@ -263,7 +280,7 @@ def _load_transmitted_to(
     # (the correct edge) while never fabricating a transmission pair. A normal
     # chain mention has no ``provenance`` column (row.get → None), so this only
     # ever excludes curated links.
-    by_hadith: dict[str, list[dict[str, Any]]] = {}
+    by_chain: dict[tuple[str, int], list[dict[str, Any]]] = {}
     dropped_noncanonical = 0
     for fp in files:
         rows = _read_parquet_rows(fp)
@@ -285,7 +302,7 @@ def _load_transmitted_to(
                 continue
             if row.get("provenance"):
                 continue  # curated NARRATED-only link — never a transmission pair
-            by_hadith.setdefault(hid, []).append(row)
+            by_chain.setdefault((hid, _chain_index(row)), []).append(row)
 
     # Build all chain pairs. Validate the group's hadith id ONCE up front: every
     # pair _build_chain_pairs emits re-derives it, so a malformed id would raise
@@ -294,7 +311,7 @@ def _load_transmitted_to(
     # leaves batches 1..N-1 already written to Neo4j.
     all_pairs: list[dict[str, Any]] = []
     malformed_ids = 0
-    for hid, mentions in by_hadith.items():
+    for (hid, _cidx), mentions in by_chain.items():
         try:
             hadith_node_id(hid)
         except DoubledCorpusPrefixError:
@@ -389,10 +406,16 @@ def _load_narrated(
         logger.warning("narrated_files_missing", dir=str(staging_dir))
         return EdgeLoadResult("NARRATED", 0, 0, 0)
 
-    # Find position-0 narrator per hadith (lowest position_in_chain). The winning
-    # mention's ``provenance`` (present only on curated orphan-links, da#228; null
-    # for ordinary chain mentions) rides along so it lands on the NARRATED edge.
-    first_narrators: dict[str, tuple[int, str, str | None]] = {}  # hid -> (pos, nid, provenance)
+    # Find the position-0 narrator of EACH chain (lowest position_in_chain within
+    # a (hadith_id, chain_index) group), not per hadith (da#282). A multi-isnad
+    # hadith is narrated by the first narrator of every one of its chains; keying on
+    # hadith alone dropped all but one chain's opener. Distinct chains that share a
+    # first narrator (e.g. lk's Arabic + English isnads) still MERGE to one edge, so
+    # this never inflates NARRATED. The winning mention's ``provenance`` (present
+    # only on curated orphan-links, da#228; null for ordinary chain mentions) rides
+    # along so it lands on the NARRATED edge.
+    # (hadith_id, chain_index) -> (pos, nid, provenance)
+    first_narrators: dict[tuple[str, int], tuple[int, str, str | None]] = {}
     dropped_noncanonical = 0
     for fp in files:
         rows = _read_parquet_rows(fp)
@@ -411,12 +434,13 @@ def _load_narrated(
                 # here (its edges come from ``network_edges_mis.parquet``).
                 dropped_noncanonical += 1
                 continue
-            if hid not in first_narrators or pos < first_narrators[hid][0]:
-                first_narrators[hid] = (pos, nid, row.get("provenance"))
+            key = (hid, _chain_index(row))
+            if key not in first_narrators or pos < first_narrators[key][0]:
+                first_narrators[key] = (pos, nid, row.get("provenance"))
 
     batch: list[dict[str, Any]] = []
     malformed_ids = 0
-    for hid, (_pos, nid, provenance) in first_narrators.items():
+    for (hid, _cidx), (_pos, nid, provenance) in first_narrators.items():
         try:
             full_hid = hadith_node_id(hid)
         except DoubledCorpusPrefixError:

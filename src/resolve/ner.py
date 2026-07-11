@@ -177,6 +177,12 @@ def _load_phase1_mentions(
     rows: list[dict[str, str | int | None]] = []
     dropped = 0
 
+    # Chain identity (da#282): sanadset/lk emit ``chain_index`` on their mention
+    # rows; carry it through so the loader groups per-chain, not per-hadith. Read
+    # defensively so a legacy pre-da#282 parse file (no such column) still loads —
+    # a missing column reads back as chain 0 (single chain).
+    has_chain_index = "chain_index" in table.column_names
+
     for i in range(table.num_rows):
         name_ar = safe_str(table.column("name_ar")[i].as_py())
         name_en = safe_str(table.column("name_en")[i].as_py())
@@ -196,12 +202,14 @@ def _load_phase1_mentions(
         name_normalized = cleaned
         name_raw = strip_markup(name_raw) or name_raw
 
+        chain_index = table.column("chain_index")[i].as_py() if has_chain_index else 0
         rows.append(
             {
                 "mention_id": str(uuid.uuid4()),
                 "hadith_id": table.column("source_hadith_id")[i].as_py(),
                 "source_corpus": corpus,
                 "position_in_chain": table.column("position_in_chain")[i].as_py(),
+                "chain_index": chain_index if chain_index is not None else 0,
                 "name_raw": name_raw,
                 "name_normalized": name_normalized,
                 "canonical_narrator_id": None,
@@ -294,6 +302,10 @@ def _extract_from_hadiths(
                         "hadith_id": hadith_id,
                         "source_corpus": corpus,
                         "position_in_chain": span.position,
+                        # One isnad column per hadith → a single linear chain
+                        # (the segmenter does not split parallel sub-chains), so
+                        # chain 0 (da#282).
+                        "chain_index": 0,
                         "name_raw": name_raw,
                         "name_normalized": name_normalized,
                         "canonical_narrator_id": None,
@@ -422,6 +434,7 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
             "position_in_chain": pa.array(
                 [r["position_in_chain"] for r in all_rows], type=pa.int32()
             ),
+            "chain_index": pa.array([r.get("chain_index", 0) for r in all_rows], type=pa.int32()),
             "name_raw": pa.array([r["name_raw"] for r in all_rows], type=pa.string()),
             "name_normalized": pa.array([r["name_normalized"] for r in all_rows], type=pa.string()),
             "canonical_narrator_id": pa.array(
