@@ -1122,9 +1122,19 @@ def _truncate_at_isnad_boundary(tokens: list[str]) -> list[str] | None:
     lineage) via ``وان`` → ``ان``, and ``"فان"``/``"فاذا"`` likewise. The definite
     relative pronouns have no such collision — no Arabic ism is ``والذي``/``فالتي`` —
     which is what makes them, and only them, safe to fold.
+
+    The fold is applied at index 0 ONLY. This function has *dual* semantics — a
+    boundary LEADING the span drops it, a boundary at index > 0 *truncates* and keeps
+    the head — and the oath is a matn SIGNAL, not a name TERMINATOR. In the corpus the
+    oath is overwhelmingly mid-matn ("تعاهدوا هذا القران فوالذي نفس محمد بيده…");
+    folding it at i > 0 would make it a truncation point and hand the matn head back
+    AS A NARRATOR NAME, minting 52 new zero-degree matn nodes ("دعوني" = "leave me",
+    "كلا" = "nay", "قول الله") — exactly the class da#317 exists to remove. Restricted
+    to the leading position, a mid-matn oath instead leaves the span whole and the
+    matn-sentence gate (step 10) drops it as the matn body it is.
     """
     for i, raw_tok in enumerate(tokens):
-        tok = raw_tok if raw_tok in _ISNAD_BOUNDARY else _fold_proclitics(raw_tok)
+        tok = raw_tok if (raw_tok in _ISNAD_BOUNDARY or i > 0) else _fold_proclitics(raw_tok)
         if tok in _ISNAD_BOUNDARY or _is_ask_verb(tok):
             # Nisba-transition ثم (da#308): "…الليثي ثم الجندعي" ("al-Laythī then
             # al-Jundaʿī") is a real tribal-affiliation nisba tail, not a temporal
@@ -1330,8 +1340,21 @@ def _is_matn_sentence(tokens: list[str], kept_text: str, was_truncated: bool) ->
     #      in the span, co-occurring with at least one partitive or matn particle, is a
     #      provenance/matn fragment, never a name. Runs AFTER the nasab guard, so a
     #      genuine lineage is already spared before this can see it.
+    #      The particle disjunct EXCLUDES the apposition connectors (Sofia Cardoso, PR
+    #      review). "أم" (umm — the commonest female kunya connector) normalizes to
+    #      "ام", which is HOMOGRAPHIC with the disjunctive particle "أم" ("or") and is
+    #      therefore in _MATN_PARTICLES; it is the only token in this module that is
+    #      both. Without the exclusion, any real narrator shaped "أم X <role> رسول الله"
+    #      — where the role noun is not already an apposition connector — reads as a
+    #      Prophet reference PLUS a particle and is deleted. That is not hypothetical:
+    #      it dropped "أم كلثوم بنت سيد البشر رسول الله" (Umm Kulthum bint Muhammad, the
+    #      Prophet's DAUGHTER) and "أم أيمن حاضنة رسول الله" (Umm Ayman, his nurse and a
+    #      transmitter) — both bio-promoted rows at mention_count 0, which is precisely
+    #      why a mention-weighted sweep could not see them. The mubham collectives this
+    #      rule targets are untouched: "بعض" is not an apposition connector, so
+    #      "بعض اصحاب النبي" / "بعض ازواج النبي" still drop.
     if any(_prophet_ref_len(bare, i) > 0 for i in range(n)) and any(
-        _is_partitive(t) or _is_matn_particle(t) for t in bare
+        _is_partitive(t) or (_is_matn_particle(t) and t not in _APPOSITION_CONNECTORS) for t in bare
     ):
         return True
 

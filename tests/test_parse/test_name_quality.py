@@ -1329,3 +1329,90 @@ class TestMatnProvenanceAndOath:
     )
     def test_real_lineages_preserved(self, name: str) -> None:
         assert clean_narrator_name(normalize_arabic(name)) is not None
+
+
+class TestScrubDoesNotDeleteRealNarrators:
+    """The reverse direction of the drop-gate diff (Sofia Cardoso, PR #423 review).
+
+    A drop-gate change has TWO failure directions, and a one-directional A/B — "which
+    rows does this newly drop?" — is structurally blind to both of the ones that matter:
+
+    1. it can **delete a real narrator**, and
+    2. it can **stop dropping** a matn span, resurrecting pollution as a narrator node.
+
+    Both happened. These tests pin both directions with verbatim corpus rows.
+    """
+
+    # === DIRECTION 1: deletion of a real transmitter ===
+    #
+    # "أم" (umm — the commonest female kunya connector) normalizes to "ام", which is
+    # HOMOGRAPHIC with the disjunctive particle "أم" ("or") and is therefore a member of
+    # _MATN_PARTICLES. It is the ONLY token that is both an apposition connector and a
+    # matn particle (pinned below). The da#314 provenance rule's discriminator — "a real
+    # narrator carries zero matn particles" — is simply FALSE in Arabic because of it, so
+    # any narrator shaped "أم X <role> رسول الله" read as Prophet-reference + particle
+    # and was deleted.
+    #
+    # Verbatim row, nar:d3937f2e-e077-598c-b139-9392d2c61359 (sanadset, mention_count 0):
+    # Umm Kulthum bint Muhammad — the Prophet's own DAUGHTER. mention_count is 0 because
+    # she is bio-promoted, which is exactly why a mention-weighted sweep could not see the
+    # deletion: the loss is a NODE, not an edge.
+    def test_umm_kulthum_bint_muhammad_survives(self) -> None:
+        row = "Umm Kulthum bint Muhammad أم كلثوم بنت سيد البشر رسول الله"
+        assert clean_narrator_name(normalize_arabic(row)) is not None
+
+    def test_umm_homograph_is_the_reason(self) -> None:
+        """`ام` is both an apposition connector and a matn particle — the sole such token.
+
+        If a future edit adds another homograph to _MATN_PARTICLES that is also an
+        apposition connector, the provenance rule silently regains a deletion surface.
+        This pins the collision that makes the exclusion in rule (2d) necessary.
+        """
+        from src.parse.name_quality import _APPOSITION_CONNECTORS, _MATN_PARTICLES
+
+        assert _APPOSITION_CONNECTORS & _MATN_PARTICLES == frozenset({"ام"})
+
+    # PRECISION: the exclusion must not spare the mubham collectives the rule targets —
+    # "بعض" is not an apposition connector, so these still drop. Verbatim voweled row
+    # (nar:2bb390c0-..., mc-47).
+    @pytest.mark.parametrize(
+        "mubham",
+        ["بَعْضِ أَصْحَابِ النَّبِيِّ", "بعض ازواج النبي", "من رسول الله", "هذا من رسول الله"],
+    )
+    def test_mubham_and_provenance_still_drop(self, mubham: str) -> None:
+        assert clean_narrator_name(normalize_arabic(mubham)) is None
+
+    # === DIRECTION 2: resurrecting matn as a narrator node ===
+    #
+    # _truncate_at_isnad_boundary has DUAL semantics: a boundary at index 0 DROPS the
+    # span; a boundary at index > 0 TRUNCATES and keeps the head. The oath is a matn
+    # SIGNAL, not a name TERMINATOR — and in the corpus it is overwhelmingly MID-matn.
+    # Folding the proclitic at i > 0 therefore turned the oath into a truncation point
+    # and handed the matn head back as a narrator name, minting 52 new zero-degree matn
+    # nodes ("دعوني" = "leave me", "اعملوا وابشروا" = "act and rejoice").
+    #
+    # Every oath fixture in TestMatnProvenanceAndOath LEADS with the oath, so they only
+    # ever exercised the drop path — which is exactly how this hid. These are verbatim
+    # MID-matn corpus rows: they must DROP as the matn bodies they are, and in particular
+    # must NOT come back as the truncated head.
+    @pytest.mark.parametrize(
+        "matn",
+        [
+            # nar:2324c241-..., mc-2 — the pushed fold returned "دعوني". Kept on ONE line
+            # and noqa'd rather than wrapped: the fixture's value is that it is the corpus
+            # row BYTE-FOR-BYTE, and implicit concatenation is an opportunity to mangle it.
+            "دعوني فالذي انا فيه خير اوصيكم بثلاث اخرجوا المشركين من جزيره العرب واجيزوا الوفد بنحو ما كنت اجيزهم",  # noqa: E501
+            # nar:1efadf02-..., mc-3 — the pushed fold returned "سريه تغزو في سبيل الله"
+            "سريه تغزو في سبيل الله والذي نفسي بيده لوددت اني اقتل في سبيل الله",
+        ],
+    )
+    def test_mid_matn_oath_drops_and_does_not_truncate_to_a_head(self, matn: str) -> None:
+        assert clean_narrator_name(normalize_arabic(matn)) is None
+
+    # The oath-LEADING fixtures must still drop — the fold is retained at index 0.
+    @pytest.mark.parametrize(
+        "oath",
+        ["والذي نفس محمد بيده", "فوالذي نفس محمد بيده اني لارجو", "فبالذي ارسلك الله امرك بهذا"],
+    )
+    def test_leading_oath_still_drops(self, oath: str) -> None:
+        assert clean_narrator_name(normalize_arabic(oath)) is None
