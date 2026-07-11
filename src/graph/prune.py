@@ -27,7 +27,7 @@ The guard is the point
 ``DETACH DELETE`` is irreversible against a live box. The keep-set — the canonical id
 set — is the ONLY thing standing between this command and deleting a node, so
 :func:`read_canonical_ids` refuses (raises :class:`EmptyCanonicalSetError`, exit
-:attr:`~src.exit_codes.ExitCode.EMPTY_CANONICAL_SET`) BEFORE the graph is read or
+:attr:`~src.exit_codes.ExitCode.UNUSABLE_CANONICAL_SET`) BEFORE the graph is read or
 written if that set cannot be trusted — an **empty** set (which would delete every
 narrator), a **missing** parquet, or an **unreadable/malformed** one. A bad read must
 never wipe the graph. This is the da#309 / da#361 fail-loud-on-missing-input
@@ -74,6 +74,61 @@ one whose ids are mostly strangers to this graph. A *subtly* stale parquet (one 
 back, most ids still present) slips under any plausible magnitude ceiling; catching that
 one is the consumer's ``missing == 0`` gate. The two are layered deliberately, and neither
 alone is sufficient.
+
+The delete side needs its own bound (da#413 second review)
+----------------------------------------------------------
+``missing`` bounds the direction that **cannot delete anything**. ``canonical - graph`` is
+a set of ids that are not in the graph, so no element of it can be DETACH DELETEd. The
+quantity that actually deletes is the *other* difference, ``orphans = graph - canonical``,
+and ``missing`` says nothing whatever about its size.
+
+That gap is not theoretical. Consider a **truncated but same-generation** keep-set: a
+resolve run stopped early (:attr:`~src.exit_codes.ExitCode.STOPPED_AT_LIMIT`), a partial
+upload, a half-written parquet, a null-heavy ``canonical_id`` column. It holds 5,000 ids
+that are all **genuinely this graph's** — so ``missing`` is exactly **0**, and:
+
+* the empty/unreadable guard passes (it is readable, and 5,000 ids is not zero);
+* the ``missing`` ceiling passes (``0 > 0.5 * 5,000`` is false);
+* the consumer's whole-graph-wipe check passes (155,614 orphans is not >= 160,614);
+* and the consumer's ``missing == 0`` policy **actively blesses it**;
+
+while the prune DETACH DELETEs 155,614 of 160,614 narrators — **96.9% of the graph** — and
+every post-op gate greens, because they are all still derived from the keep-set being
+validated. The set is not *foreign*. It is merely *incomplete*, and incompleteness is
+invisible to every instrument that asks whether the keep-set's ids belong to this graph.
+
+So the delete side is bounded too, symmetrically:
+
+    ``orphan_fraction`` = ``|orphans| / |graph|`` — the share of the graph this would delete.
+
+:class:`ExcessiveDeletionError` refuses above :data:`DEFAULT_MAX_ORPHAN_FRACTION`, before
+any write, overridable with ``--max-orphan-fraction``.
+
+**Why that ceiling is 0.9 and emphatically not 0.5.** A ceiling near one half looks
+prudent and would be wrong, because it refuses this command's own primary use case. The
+graph is the union of every load ever run against it, so a re-resolve that re-mints ids
+*en masse* — exactly the da#356/da#376 event this subcommand was built to clean up after —
+legitimately orphans the entire previous generation. Working it in the measured numbers:
+an accumulated graph holding the old 160,614-node generation plus a freshly loaded,
+fully re-minted 129,234-node one is 289,848 nodes, of which 160,614 are legitimate
+orphans — **55.4%**, with ``missing == 0``, and it is a *correct* prune. A 0.5 ceiling
+refuses it; the operator overrides; the override becomes reflex; the guard is dead.
+
+The honest separation is wide and it is not centred on one half:
+
+===========================================  ==================  ==============
+class                                        ``orphan_fraction``  verdict
+===========================================  ==================  ==============
+single-generation prune (da#352 measured)    19.5%                proceed
+accumulated graph, full re-mint (worst legit) 55.4%               proceed
+truncated 5,000-id keep-set                  96.9%                REFUSE
+truncated 500-id keep-set                    99.7%                REFUSE
+===========================================  ==================  ==============
+
+0.9 sits in the empty band between ~55% and ~97% with margin on both sides. It is the
+"no legitimate prune looks like this" line, not a tuned parameter — and, like the
+``missing`` ceiling, it is a **backstop**, not a policy. Surviving fewer than one node in
+ten is not a prune; it is a wipe wearing a prune's clothes.
 """
 
 from __future__ import annotations
@@ -91,7 +146,9 @@ logger = get_logger(__name__)
 __all__ = [
     "DEFAULT_BATCH_SIZE",
     "DEFAULT_MAX_MISSING_FRACTION",
+    "DEFAULT_MAX_ORPHAN_FRACTION",
     "EmptyCanonicalSetError",
+    "ExcessiveDeletionError",
     "ForeignCanonicalSetError",
     "SUMMARY_KEYS",
     "PruneResult",
@@ -122,6 +179,25 @@ SAMPLE_SIZE = 20
 # genuinely large partial load is intended; 1.0 disables the ceiling entirely.
 DEFAULT_MAX_MISSING_FRACTION = 0.5
 
+# The magnitude ceiling on the DELETE side: |orphans| / |graph|, the share of the narrator
+# graph this prune would DETACH DELETE. Refused above it, before any write.
+#
+# 0.9, NOT 0.5 — see the module docstring for the full argument, because the intuitive
+# number is the wrong one here. A ceiling near one half would refuse a legitimate prune:
+# after a mass id re-mint (da#356/da#376), the accumulated graph legitimately orphans its
+# entire previous generation — 160,614 of 289,848 nodes = 55.4%, with missing == 0. That is
+# precisely the cleanup this subcommand exists to perform. Refuse it and the operator
+# overrides by reflex, which kills the guard.
+#
+# The threat class sits far above the legitimate one, and the band between them is empty:
+#   19.5%  single-generation prune (da#352 measured)   legit
+#   55.4%  accumulated graph, full re-mint             legit, worst case
+#   96.9%  truncated 5,000-id keep-set                 THREAT (missing == 0; all other guards pass)
+#   99.7%  truncated 500-id keep-set                   THREAT
+# 0.9 separates them with margin on both sides. Surviving fewer than one node in ten is not
+# a prune. Override with --max-orphan-fraction when a wipe is genuinely intended.
+DEFAULT_MAX_ORPHAN_FRACTION = 0.9
+
 # Every Narrator id currently in the graph. The complement against the canonical set
 # (computed in Python) is the orphan set — see the module docstring for why the set
 # difference cannot be a graph-side degree/reference predicate.
@@ -143,7 +219,7 @@ class UnusableCanonicalSetError(Exception):
 
     The common supertype of every refusal door, and the thing ``_cmd_prune_narrators``
     catches. All of them share the one fact that defines
-    :attr:`~src.exit_codes.ExitCode.EMPTY_CANONICAL_SET` — **the graph is exactly as it
+    :attr:`~src.exit_codes.ExitCode.UNUSABLE_CANONICAL_SET` — **the graph is exactly as it
     was**, zero nodes deleted, zero edges touched — which is why they share its exit
     code rather than minting a second one for an identical on-disk state. The subclass
     (and the message) says which door fired; the exit code says the graph is safe.
@@ -163,7 +239,7 @@ class EmptyCanonicalSetError(UnusableCanonicalSetError):
     present-but-empty set — because each yields the same fact: there is no trustworthy
     set of ids to keep, and a destructive op with no keep-set would delete the whole
     graph. The message names which door fired so an operator can act without the
-    traceback. Maps to :attr:`~src.exit_codes.ExitCode.EMPTY_CANONICAL_SET`.
+    traceback. Maps to :attr:`~src.exit_codes.ExitCode.UNUSABLE_CANONICAL_SET`.
 
     This door tests the keep-set **in isolation**. It cannot see the fourth door — a
     keep-set that is perfectly well-formed but belongs to a *different graph* — because
@@ -195,7 +271,7 @@ class ForeignCanonicalSetError(UnusableCanonicalSetError):
 
     A stale ``parquet_ref`` is the most plausible operator error there is, and it is not
     self-announcing: it is readable, non-empty, and every derived gate downstream would
-    green. Maps to :attr:`~src.exit_codes.ExitCode.EMPTY_CANONICAL_SET` — the on-disk
+    green. Maps to :attr:`~src.exit_codes.ExitCode.UNUSABLE_CANONICAL_SET` — the on-disk
     state is identical to the other doors (the graph, untouched), and the consumer
     propagates the rc verbatim, so a distinct code would buy nothing and would re-open
     the three-way collision hazard :mod:`src.exit_codes` exists to document.
@@ -232,6 +308,66 @@ class ForeignCanonicalSetError(UnusableCanonicalSetError):
                 "--canonical at the parquet the live graph was loaded from. If this graph "
                 "really is a partial load of this keep-set, raise the ceiling deliberately "
                 "with --max-missing-fraction."
+            ),
+        )
+
+
+class ExcessiveDeletionError(UnusableCanonicalSetError):
+    """The keep-set is this graph's, but keeps so little of it that the prune is a wipe.
+
+    The **fifth** door, and the one :class:`ForeignCanonicalSetError` is structurally
+    incapable of seeing. ``missing`` bounds ``canonical - graph`` — a set whose elements
+    are *not in the graph* and therefore cannot be deleted. It says nothing about
+    ``orphans = graph - canonical``, which is the set that actually gets DETACH DELETEd.
+
+    A **truncated same-generation** keep-set exploits exactly that blind spot: a resolve
+    run stopped at :attr:`~src.exit_codes.ExitCode.STOPPED_AT_LIMIT`, a half-written
+    parquet, a partial upload, a null-heavy ``canonical_id`` column. Every id in it is
+    real and current, so ``missing`` is **0** and every id-provenance instrument — here
+    and in the consumer — reports the keep-set as perfectly healthy, while the prune
+    deletes all but the truncated remnant.
+
+    So this refuses on the delete magnitude itself: ``|orphans| / |graph|`` above
+    ``max_orphan_fraction`` (:data:`DEFAULT_MAX_ORPHAN_FRACTION`). Raised after the graph
+    read it depends on and strictly BEFORE any write, in dry-run mode too. Shares
+    :attr:`~src.exit_codes.ExitCode.UNUSABLE_CANONICAL_SET` with its siblings: the on-disk
+    state is the same one that defines the code — the graph, exactly as it was.
+    """
+
+    def __init__(
+        self,
+        *,
+        path: Path,
+        orphans: int,
+        graph_total: int,
+        canonical_total: int,
+        missing: int,
+        max_orphan_fraction: float,
+    ) -> None:
+        self.orphans = orphans
+        self.graph_total = graph_total
+        self.canonical_total = canonical_total
+        self.missing = missing
+        self.max_orphan_fraction = max_orphan_fraction
+        pct = 100.0 * orphans / graph_total
+        ceiling_pct = 100.0 * max_orphan_fraction
+        survivors = graph_total - orphans
+        super().__init__(
+            reason="prune would delete an implausible share of the narrator graph",
+            path=path,
+            message=(
+                f"refusing to prune narrators: this would DETACH DELETE {orphans} of "
+                f"{graph_total} Narrator node(s) ({pct:.1f}%), above the {ceiling_pct:.1f}% "
+                f"ceiling, leaving only {survivors}. The keep-set holds {canonical_total} "
+                f"canonical id(s), of which {missing} are absent from the graph "
+                f"(canonical master: {path}). "
+                "No node was deleted; the graph is exactly as it was. Note that a low "
+                "'missing' does NOT clear this: a TRUNCATED keep-set (a resolve stopped "
+                "early, a half-written or partially uploaded parquet, a null-heavy "
+                "canonical_id column) holds ids that are all genuinely this graph's — so "
+                "every id-provenance check passes — while keeping only a remnant of it. "
+                "Check that the canonical parquet is COMPLETE, not merely valid. If a "
+                "prune this large is genuinely intended, say so with --max-orphan-fraction."
             ),
         )
 
@@ -307,6 +443,7 @@ def prune_narrators(
     dry_run: bool = False,
     batch_size: int = DEFAULT_BATCH_SIZE,
     max_missing_fraction: float = DEFAULT_MAX_MISSING_FRACTION,
+    max_orphan_fraction: float = DEFAULT_MAX_ORPHAN_FRACTION,
 ) -> PruneResult:
     """DETACH DELETE every ``Narrator`` whose ``id`` is not in the canonical master.
 
@@ -319,13 +456,20 @@ def prune_narrators(
        against them — ``missing`` = ``|canonical - graph|`` — raising
        :class:`ForeignCanonicalSetError` if the keep-set is mostly strangers to this
        graph. This one needs the graph, so it cannot precede the read; it does precede
-       every **write**, which is the property that matters. Both guards fire in dry-run
-       mode too: the operator's mandatory dry run is exactly where a wrong parquet
-       should surface.
+       every **write**, which is the property that matters.
+    3. The orphan complement is computed, and its **magnitude** is checked —
+       ``|orphans| / |graph|`` — raising :class:`ExcessiveDeletionError` if the prune
+       would delete an implausible share of the graph. Guard 2 cannot cover this: it
+       bounds the difference that deletes *nothing*, while this bounds the one that
+       deletes *everything it names*. A truncated same-generation keep-set has
+       ``missing == 0`` and would still wipe the graph.
 
-    Only then does this compute the orphan complement in Python and — unless ``dry_run``
-    — DETACH-DELETE it in batches (removing each orphan's edges with it). A ``--dry-run``
-    computes the same orphan set and reports it but issues no write.
+    All three fire in dry-run mode too: the operator's mandatory dry run is exactly where
+    a bad keep-set needs to surface.
+
+    Only then does this — unless ``dry_run`` — DETACH-DELETE the complement in batches
+    (removing each orphan's edges with it). A ``--dry-run`` computes the same orphan set
+    and reports it but issues no write.
 
     The complement is a set difference, not a degree/reference test, which is the whole
     reason this exists rather than a cypher one-liner (see the module docstring): a
@@ -333,6 +477,9 @@ def prune_narrators(
     """
     if not 0.0 <= max_missing_fraction <= 1.0:
         msg = f"max_missing_fraction must be in [0.0, 1.0], got {max_missing_fraction}"
+        raise ValueError(msg)
+    if not 0.0 <= max_orphan_fraction <= 1.0:
+        msg = f"max_orphan_fraction must be in [0.0, 1.0], got {max_orphan_fraction}"
         raise ValueError(msg)
 
     # Guard 1, before ANY graph access. An unusable keep-set raises here.
@@ -356,6 +503,21 @@ def prune_narrators(
 
     orphans = [gid for gid in graph_ids_pre if gid not in canonical_ids]
     sample = orphans[:SAMPLE_SIZE]
+
+    # Guard 3: the DELETE-side magnitude. `missing` above is structurally blind to this —
+    # it bounds `canonical - graph`, none of whose elements can be deleted. A truncated
+    # same-generation keep-set has missing == 0 and would still wipe the graph. Refuses
+    # BEFORE any write, in both modes. (An empty graph has nothing to delete and no
+    # fraction to speak of; guard 2 has already refused it unless deliberately overridden.)
+    if graph_ids_pre and len(orphans) > max_orphan_fraction * len(graph_ids_pre):
+        raise ExcessiveDeletionError(
+            path=canonical_path,
+            orphans=len(orphans),
+            graph_total=len(graph_ids_pre),
+            canonical_total=len(canonical_ids),
+            missing=missing,
+            max_orphan_fraction=max_orphan_fraction,
+        )
 
     if dry_run:
         logger.info(

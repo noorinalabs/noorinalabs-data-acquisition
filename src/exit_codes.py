@@ -47,7 +47,7 @@ code    name                   what is on disk when it fires
 ``9``   ``UNROUTED_CORPUS``    nothing resolve would have written (NER Step-1 abort)
 ``10``  ``PARSE_PRODUCER_DEFECT`` the clean sources' staging; the defective source's is absent
 ``11``  ``RESOLVE_STAGE_FAILED`` prior stages' artifacts; a stage raised (da#360)
-``12``  ``EMPTY_CANONICAL_SET`` the graph, untouched; ``prune-narrators`` refused (da#413)
+``12``  ``UNUSABLE_CANONICAL_SET`` the graph, untouched; ``prune-narrators`` refused (da#413)
 ======  =====================  ===================================================
 
 da#360, da#369 and da#386 all branched from a main whose next free code was ``9``
@@ -162,7 +162,7 @@ import enum
 
 __all__ = [
     "EXIT_DB_UNREACHABLE",
-    "EXIT_EMPTY_CANONICAL_SET",
+    "EXIT_UNUSABLE_CANONICAL_SET",
     "EXIT_ENRICH_FAILED",
     "EXIT_LOAD_FAILED",
     "EXIT_MISSING_DEPENDENCY",
@@ -335,7 +335,7 @@ class ExitCode(enum.IntEnum):
     fails the whole invocation rather than being logged and skipped.
     """
 
-    EMPTY_CANONICAL_SET = 12
+    UNUSABLE_CANONICAL_SET = 12
     """``prune-narrators`` refused: its authoritative keep-set was untrustworthy (da#413).
 
     What is on disk when it fires: **the graph, exactly as it was** — zero nodes
@@ -347,29 +347,38 @@ class ExitCode(enum.IntEnum):
     the command and deleting a node, so the command refuses — before it writes to the
     graph at all — if the keep-set cannot be trusted to name the survivors.
 
-    Named for the worst of the **four** doors, not for one instance. Three of them ask
-    whether the parquet is usable *on its face* and fire before the graph is even read:
-    an **empty** keep-set (which would delete every narrator), a **missing** parquet,
-    an **unreadable/malformed** one. The fourth asks the question those three cannot,
-    because it is a relation between the parquet and the graph rather than a property
-    of the parquet: a keep-set that is well-formed but is **not this graph's** — a
-    stale ``--canonical`` from a previous resolve run, readable and non-empty and
-    catastrophic, detected by the ``missing`` (= ``|canonical - graph|``) signal and
-    raised as ``ForeignCanonicalSetError`` (da#413 review, Jean-Claude Habimana). It
-    fires after the graph is *read* and before any *write*, so its on-disk state is
-    identical to the other three, which is exactly why it shares this code.
+    Named for the CONCEPT — an untrustworthy keep-set — not for any one door, and there
+    are **five**. Three ask whether the parquet is usable *on its face* and fire before
+    the graph is even read: an **empty** keep-set (which would delete every narrator), a
+    **missing** parquet, an **unreadable/malformed** one. The last two ask questions those
+    three structurally cannot, because they are *relations between the parquet and the
+    graph* rather than properties of the parquet, and so they fire after the graph is
+    **read** and before any **write**:
 
-    That sharing is the deliberate reading of this registry's own rule — a code is
-    defined by **what is on disk when it fires**, and all four doors leave the graph
-    untouched, name the same remedy (fix the input, re-run), and are propagated
-    verbatim by a consumer that only asks whether the rc is zero. A fifth member would
-    encode a distinction nothing acts on, while re-opening the three-way collision
-    hazard this module was written to record. The exception subclass carries the
-    distinction where it is actually consumed: in-process, and on stderr.
+    * **not this graph's** — a stale ``--canonical`` from a previous resolve run,
+      readable and non-empty and catastrophic. Detected by ``missing``
+      (= ``|canonical - graph|``); raised as ``ForeignCanonicalSetError``.
+    * **this graph's, but a remnant of it** — a *truncated* keep-set (a resolve stopped
+      early, a half-written or partially uploaded parquet, a null-heavy ``canonical_id``
+      column). Every id in it is real and current, so ``missing`` is **0** and every
+      id-provenance instrument reports it healthy, while the prune deletes all but the
+      remnant. Detected by the delete magnitude ``|orphans| / |graph|``; raised as
+      ``ExcessiveDeletionError``.
 
-    Naming the member after only the empty case would re-arm the trap for the other
-    three, the same mistake :attr:`REFUSED_ROWS` documents for the
-    malformed-id-vs-blank-id classes.
+    The fifth door is the one worth dwelling on, because it is what the *name* of this
+    member used to hide. It was called ``EMPTY_CANONICAL_SET`` — and its own docstring
+    argued that "naming the member after only the empty case would re-arm the trap for
+    the other doors" while doing precisely that. The value stays ``12``; the name now
+    says what it has always meant. (Renamed on Jean-Claude Habimana's read of da#413,
+    which caught the contradiction.)
+
+    All five leave the graph untouched, name the same remedy (fix the input, re-run) and
+    are propagated verbatim by a consumer that only asks whether the rc is zero. Sharing
+    one code is therefore the deliberate reading of this registry's own rule — a code is
+    defined by **what is on disk when it fires**. A second member would encode a
+    distinction nothing acts on, while re-opening the three-way collision hazard this
+    module was written to record. The exception subclasses carry the distinction where it
+    is actually consumed: in-process, and on stderr.
 
     This is the da#309 / da#361 fail-loud-on-missing-input discipline applied to a
     *destructive* op. It gets its own code — not :attr:`LOAD_FAILED` — because a
@@ -393,4 +402,4 @@ EXIT_REFUSED_ROWS = ExitCode.REFUSED_ROWS
 EXIT_UNROUTED_CORPUS = ExitCode.UNROUTED_CORPUS
 EXIT_PARSE_PRODUCER_DEFECT = ExitCode.PARSE_PRODUCER_DEFECT
 EXIT_STAGE_FAILED = ExitCode.RESOLVE_STAGE_FAILED
-EXIT_EMPTY_CANONICAL_SET = ExitCode.EMPTY_CANONICAL_SET
+EXIT_UNUSABLE_CANONICAL_SET = ExitCode.UNUSABLE_CANONICAL_SET

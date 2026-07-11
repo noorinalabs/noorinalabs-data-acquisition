@@ -530,6 +530,7 @@ def _cmd_prune_narrators(
     canonical: str,
     dry_run: bool = False,
     max_missing_fraction: float | None = None,
+    max_orphan_fraction: float | None = None,
 ) -> None:
     """DETACH DELETE Narrator nodes whose id is not in narrators_canonical.parquet (da#413).
 
@@ -540,29 +541,38 @@ def _cmd_prune_narrators(
     (deploy#557). ``--dry-run`` reports the count that would be deleted and deletes
     nothing.
 
-    Refuses — non-zero exit :attr:`ExitCode.EMPTY_CANONICAL_SET`, ZERO deletion — when
-    the keep-set cannot be trusted: it is empty / unreadable / missing
-    (:class:`EmptyCanonicalSetError`), or it is well-formed but is not **this graph's**
-    (:class:`ForeignCanonicalSetError` — a stale ``--canonical``, caught by the
-    ``missing`` provenance signal). A bad read must never wipe the graph, and neither
-    must the wrong parquet.
+    Refuses — non-zero exit :attr:`ExitCode.UNUSABLE_CANONICAL_SET`, ZERO deletion — when
+    the keep-set cannot be trusted, on any of three axes:
+
+    * it is empty / unreadable / missing (:class:`EmptyCanonicalSetError`);
+    * it is well-formed but is not **this graph's** — a stale ``--canonical``, caught by
+      the ``missing`` provenance signal (:class:`ForeignCanonicalSetError`);
+    * it *is* this graph's but keeps so little of it that the prune is a wipe — a
+      TRUNCATED parquet, caught by the delete magnitude (:class:`ExcessiveDeletionError`).
+      Note this one has ``missing == 0``: every id-provenance check passes on it.
+
+    A bad read must never wipe the graph — and neither must the wrong parquet, nor half
+    of the right one.
     """
     from pathlib import Path
 
     from src.graph.prune import (
         DEFAULT_MAX_MISSING_FRACTION,
+        DEFAULT_MAX_ORPHAN_FRACTION,
         UnusableCanonicalSetError,
         prune_narrators,
         summary_line,
     )
     from src.utils.neo4j_client import Neo4jClient
 
-    # `None` (not the literal) is the CLI default, so the ceiling has exactly one home:
+    # `None` (not the literal) is the CLI default, so each ceiling has exactly one home:
     # src.graph.prune. A hardcoded default here — the shape of migrate's `--batch-size`
     # — is a second copy of a number that must not drift, and cli.py lazy-imports the
     # module precisely so `--help` need not pay for pyarrow + the neo4j driver.
     if max_missing_fraction is None:
         max_missing_fraction = DEFAULT_MAX_MISSING_FRACTION
+    if max_orphan_fraction is None:
+        max_orphan_fraction = DEFAULT_MAX_ORPHAN_FRACTION
 
     # This command reads the canonical parquet and writes ONLY to the graph and
     # stdout. It never writes back into the parquet's directory (no manifest, no audit
@@ -583,10 +593,11 @@ def _cmd_prune_narrators(
                 canonical_path,
                 dry_run=dry_run,
                 max_missing_fraction=max_missing_fraction,
+                max_orphan_fraction=max_orphan_fraction,
             )
     except UnusableCanonicalSetError as guard:
         print(f"\nERROR: {guard}", file=sys.stderr)
-        sys.exit(ExitCode.EMPTY_CANONICAL_SET)
+        sys.exit(ExitCode.UNUSABLE_CANONICAL_SET)
 
     print("=== prune-narrators (canonical-set shrink, da#413) ===")
     print(f"  Canonical ids (keep-set)   : {result.canonical_ids_seen}")
@@ -1008,6 +1019,21 @@ def main() -> None:
             "ceiling) only when a genuinely large partial load is intended."
         ),
     )
+    prune_parser.add_argument(
+        "--max-orphan-fraction",
+        type=_unit_fraction,
+        default=None,
+        metavar="FRACTION",
+        help=(
+            "Ceiling on the share of the Narrator graph this prune may DELETE. Above it "
+            "the prune is refused (exit 12, zero deletion) — the TRUNCATED --canonical "
+            "guard, which --max-missing-fraction cannot catch because a truncated "
+            "keep-set's ids are all genuinely this graph's ('missing' is 0). Default: "
+            "0.9 — a legitimate post-re-mint cleanup can orphan ~55%% of an accumulated "
+            "graph, so a tighter ceiling would refuse real work; a truncated keep-set "
+            "deletes 97%%+. Raise it (1.0 disables) only when a wipe is genuinely meant."
+        ),
+    )
 
     audit_parser = subparsers.add_parser("audit", help="View recent pipeline audit entries")
     audit_parser.add_argument(
@@ -1093,6 +1119,7 @@ def main() -> None:
             canonical=args.canonical,
             dry_run=args.dry_run,
             max_missing_fraction=args.max_missing_fraction,
+            max_orphan_fraction=args.max_orphan_fraction,
         )
     elif args.command == "audit":
         _cmd_audit(last_n=args.last)

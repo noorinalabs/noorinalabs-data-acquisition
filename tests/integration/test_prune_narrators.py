@@ -15,6 +15,7 @@ import pytest
 
 from src.graph.prune import (
     EmptyCanonicalSetError,
+    ExcessiveDeletionError,
     ForeignCanonicalSetError,
     prune_narrators,
     summary_line,
@@ -164,6 +165,30 @@ class TestPruneAgainstRealGraph:
 
         assert raised.value.missing == 4  # none of the keep-set is in the graph
         # Nothing was deleted: every node AND the orphan's edge are exactly as seeded.
+        assert _narrator_ids(neo4j_client) == before
+        assert _transmitted_edge_count(neo4j_client) == 1
+
+    def test_truncated_keep_set_refused_against_a_real_graph(
+        self, neo4j_client: Neo4jClient, tmp_path: Path
+    ) -> None:
+        """A TRUNCATED keep-set: this graph's own ids, just too few of them (da#413 2nd review).
+
+        The keep-set names one real, current narrator. ``missing`` is therefore **0** —
+        every id-provenance instrument, here and in deploy#574, reports it healthy — while
+        the prune would DETACH DELETE 3 of the 4 narrators. Against a live graph, the
+        refusal must cost it nothing: no node, no edge.
+        """
+        _seed_graph(neo4j_client)
+        before = _narrator_ids(neo4j_client)
+
+        truncated = _canonical(tmp_path, [_KEEP_BUSY])  # 1 of 4: a half-written parquet
+        with pytest.raises(ExcessiveDeletionError) as raised:
+            prune_narrators(neo4j_client, truncated, max_orphan_fraction=0.5)
+
+        assert raised.value.missing == 0, "the keep-set is same-generation; missing must be 0"
+        assert raised.value.orphans == 3
+        assert raised.value.graph_total == 4
+        # Nothing deleted: every node AND the orphan's edge are exactly as seeded.
         assert _narrator_ids(neo4j_client) == before
         assert _transmitted_edge_count(neo4j_client) == 1
 

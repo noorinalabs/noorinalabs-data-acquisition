@@ -18,6 +18,7 @@ import pytest
 from src.graph.prune import (
     SUMMARY_KEYS,
     EmptyCanonicalSetError,
+    ExcessiveDeletionError,
     ForeignCanonicalSetError,
     PruneResult,
     UnusableCanonicalSetError,
@@ -561,7 +562,7 @@ class TestStaleKeepSetIsRefused:
 
     def test_the_guard_is_catchable_as_the_cli_catches_it(self, curated_dir: Path) -> None:
         # _cmd_prune_narrators catches UnusableCanonicalSetError and exits
-        # EMPTY_CANONICAL_SET. If this door were not under that supertype it would escape
+        # UNUSABLE_CANONICAL_SET. If this door were not under that supertype it would escape
         # to CPython's handler and exit 1 (LOAD_FAILED) — "the load failed", for a command
         # that deleted nothing and is not a load.
         stale = _canonical_parquet(curated_dir, _stale_generation_ids())
@@ -645,6 +646,266 @@ class TestMissingIsReportedNotAsserted:
         # `missing` separates them cleanly, and it is the ONLY field that does.
         assert good.missing == 0
         assert bad.missing == 8
+
+
+# --------------------------------------------------------------------------------------
+# The TRUNCATED keep-set: same generation, right ids, just too few (da#413 2nd review)
+# --------------------------------------------------------------------------------------
+#
+# `missing` bounds `canonical - graph` — a set whose elements are NOT in the graph and so
+# cannot be deleted. It is structurally incapable of bounding the set that DOES delete,
+# `orphans = graph - canonical`. A truncated keep-set walks straight through that gap: a
+# resolve stopped early, a half-written parquet, a partial upload, a null-heavy
+# canonical_id column. Every id in it is real and current, so `missing` is EXACTLY 0 and
+# every id-provenance instrument — here and in deploy#574 — reports the keep-set healthy,
+# while the prune deletes all but the remnant.
+#
+# These fixtures work at generation scale rather than with a handful of ids, because the
+# guard is a FRACTION and a 3-node graph cannot express a realistic one. Names are composed
+# from real base names and real nisbas, and every id is minted by the production
+# `make_canonical_id` — the same discipline as the stale-keep-set fixtures above.
+_NISBAS = [
+    "الزهري",
+    "البصري",
+    "الكوفي",
+    "المدني",
+    "المكي",
+    "الشامي",
+    "اليماني",
+    "المصري",
+    "البغدادي",
+    "النيسابوري",
+    "الطبري",
+    "الرازي",
+    "الاصبهاني",
+    "الدمشقي",
+    "الحمصي",
+    "الواسطي",
+    "الانصاري",
+    "التميمي",
+    "القرشي",
+    "الهمداني",
+    "الجعفي",
+    "السلمي",
+    "الاسدي",
+    "العبدي",
+    "الثقفي",
+    "الخزاعي",
+    "النخعي",
+    "المزني",
+    "الغفاري",
+    "الجهني",
+    "الطائي",
+    "العبسي",
+    "الفزاري",
+    "الضبي",
+    "السدوسي",
+    "الحنفي",
+    "الازدي",
+    "الخولاني",
+    "الحضرمي",
+    "المرادي",
+]
+
+
+def _generation_names(count: int) -> list[str]:
+    """`count` real-shaped narrator names — base name + nisba, the actual naming morphology."""
+    names = [f"{base} {nisba}" for nisba in _NISBAS for base in _NARRATOR_NAMES]
+    assert count <= len(names), f"only {len(names)} distinct names available"
+    return names[:count]
+
+
+def _generation_ids(count: int, offset: int = 0) -> list[str]:
+    """`count` canonical ids minted by the PRODUCTION function from real-shaped names."""
+    return [make_canonical_id(n) for n in _generation_names(count + offset)[offset:]]
+
+
+class TestTruncatedKeepSetIsRefused:
+    """The second door to the same catastrophe (Kavitha Sundaramurthy + Jean-Claude, #414).
+
+    The keep-set is not foreign. It is this graph's own — every id real, every id current.
+    It is merely INCOMPLETE, and incompleteness is invisible to every instrument that asks
+    whether the keep-set's ids belong to this graph. `missing` is the wrong axis for it,
+    by construction, so the delete magnitude has to be bounded on its own.
+    """
+
+    def test_the_truncated_keep_set_passes_every_pre_existing_guard(
+        self, curated_dir: Path
+    ) -> None:
+        """The control, and the whole reason the new guard is not theatre.
+
+        Kavitha asked for exactly this: prove the fixture sails through everything that
+        already exists — INCLUDING `missing`, which is not merely small here but exactly
+        **zero**. Without this control, the new ceiling could be guarding a state nothing
+        can reach, and we would believe it. (`feedback_fixture_makes_guard_assertion_inert`.)
+        """
+        live = _generation_ids(200)
+        graph = [*live, *_ORPHANS]  # 202 nodes: a real generation + 2 real orphans
+        truncated = _canonical_parquet(  # a resolve that stopped after 10 rows
+            curated_dir, live[:10], names=_generation_names(10)
+        )
+
+        # (1) the empty / missing / unreadable guard: passes — readable, 10 real ids.
+        keep_set = read_canonical_ids(truncated)
+        assert len(keep_set) == 10
+
+        # (2) `missing` is EXACTLY 0 — every id in the keep-set really is in the graph.
+        #     So the ForeignCanonicalSetError ceiling passes, AND deploy#574's planned
+        #     `missing == 0` policy does not merely miss this: it BLESSES it.
+        graph_set = set(graph)
+        missing = sum(1 for cid in keep_set if cid not in graph_set)
+        assert missing == 0, "the truncated keep-set must be same-generation, or it proves nothing"
+
+        # (3) the consumer's whole-graph-wipe check (`orphans >= graph_pre`) passes too:
+        #     10 nodes survive, so it is not a total wipe by that test's reckoning.
+        orphans = [g for g in graph if g not in keep_set]
+        assert len(orphans) < len(graph)
+
+        # (4) and Weronika's proposed invariant, EXPECTED_POST == CANON_N, also passes.
+        assert len(graph) - len(orphans) == len(keep_set)
+
+        # Every guard we have ever designed says this keep-set is fine. It would delete:
+        assert len(orphans) / len(graph) > 0.95  # 95%+ of the narrator graph
+
+    def test_without_the_ceiling_a_truncated_keep_set_wipes_the_graph(
+        self, curated_dir: Path
+    ) -> None:
+        """The red: measured damage, not asserted danger."""
+        live = _generation_ids(200)
+        client = StatefulFakeNeo4j([*live, *_ORPHANS])
+        truncated = _canonical_parquet(curated_dir, live[:10], names=_generation_names(10))
+
+        result = prune_narrators(client, truncated, max_orphan_fraction=1.0)
+
+        assert result.missing == 0  # every provenance instrument stays silent
+        assert result.deleted == 192  # 202 - 10
+        assert len(client.narrators) == 10
+        assert result.deleted / 202 > 0.95
+        # And every post-op gate greens, exactly as with the stale keep-set.
+        assert result.orphans == 0
+        assert result.deleted == result.orphans_identified
+        assert result.graph_total > 0
+
+    def test_truncated_keep_set_is_refused_before_any_write(self, curated_dir: Path) -> None:
+        """The green: refused by the delete-side ceiling, ZERO rows deleted."""
+        live = _generation_ids(200)
+        client = StatefulFakeNeo4j([*live, *_ORPHANS])
+        before = list(client.narrators)
+        truncated = _canonical_parquet(curated_dir, live[:10], names=_generation_names(10))
+
+        with pytest.raises(ExcessiveDeletionError) as raised:
+            prune_narrators(client, truncated)
+
+        assert client.deleted_batches == [], "a refused prune issued a DETACH DELETE"
+        assert client.narrators == before
+        assert raised.value.orphans == 192
+        assert raised.value.graph_total == 202
+        # The refusal names the trap explicitly: a clean `missing` does NOT clear this.
+        assert raised.value.missing == 0
+        assert "TRUNCATED" in str(raised.value)
+
+    def test_refusal_fires_on_a_dry_run_too(self, curated_dir: Path) -> None:
+        live = _generation_ids(200)
+        client = StatefulFakeNeo4j([*live, *_ORPHANS])
+        truncated = _canonical_parquet(curated_dir, live[:10], names=_generation_names(10))
+
+        with pytest.raises(ExcessiveDeletionError):
+            prune_narrators(client, truncated, dry_run=True)
+
+        assert client.deleted_batches == []
+
+    def test_the_guard_is_catchable_as_the_cli_catches_it(self, curated_dir: Path) -> None:
+        live = _generation_ids(200)
+        client = StatefulFakeNeo4j([*live, *_ORPHANS])
+        truncated = _canonical_parquet(curated_dir, live[:10], names=_generation_names(10))
+
+        with pytest.raises(UnusableCanonicalSetError):
+            prune_narrators(client, truncated)
+
+
+class TestLargeLegitimatePruneStillProceeds:
+    """The dual — and the reason the ceiling is 0.9 rather than the intuitive 0.5.
+
+    This subcommand EXISTS to clean up after a mass id re-mint (da#356/da#376). The graph
+    is the union of every load ever run against it, so that cleanup legitimately orphans
+    the entire previous generation — well over half the graph. A ceiling near one half
+    refuses this command's own primary use case, the operator overrides, the override
+    becomes reflex, and the guard is dead. Jean-Claude caught this; it is pinned here so
+    nobody "tightens" the ceiling later and quietly breaks the tool.
+    """
+
+    def test_full_regeneration_orphans_the_majority_and_still_proceeds(
+        self, curated_dir: Path
+    ) -> None:
+        # The accumulated graph: an old generation (200) still resident, plus a freshly
+        # loaded, fully re-minted new one (150). The keep-set is the new generation — it
+        # is CORRECT, and it orphans every node of the old one.
+        old_generation = _generation_ids(200)
+        new_generation = _generation_ids(150, offset=200)
+        assert not (set(old_generation) & set(new_generation)), "re-mint must change the ids"
+
+        client = StatefulFakeNeo4j([*old_generation, *new_generation])
+        correct = _canonical_parquet(
+            curated_dir, new_generation, names=_generation_names(350)[200:]
+        )
+
+        result = prune_narrators(client, correct)  # default ceiling: NO refusal
+
+        # 200 of 350 = 57.1% of the graph deleted — a majority — and it is CORRECT.
+        assert result.deleted == 200
+        assert result.deleted / 350 > 0.5, "the whole point: a legit prune CAN exceed half"
+        assert result.missing == 0
+        assert result.orphans == 0
+        assert set(client.narrators) == set(new_generation)
+
+    def test_a_ceiling_at_one_half_would_have_refused_that(self, curated_dir: Path) -> None:
+        # Pin the counterfactual, so the choice of 0.9 is defended by a test and not only
+        # by a comment. This is the prune the intuitive ceiling would have destroyed.
+        old_generation = _generation_ids(200)
+        new_generation = _generation_ids(150, offset=200)
+        client = StatefulFakeNeo4j([*old_generation, *new_generation])
+        correct = _canonical_parquet(
+            curated_dir, new_generation, names=_generation_names(350)[200:]
+        )
+
+        with pytest.raises(ExcessiveDeletionError):
+            prune_narrators(client, correct, max_orphan_fraction=0.5)
+
+        assert client.deleted_batches == []
+
+
+class TestOrphanCeiling:
+    def test_at_the_ceiling_is_allowed_above_it_refuses(self, curated_dir: Path) -> None:
+        # Strictly-greater, same as the missing ceiling. graph=10, orphans=9 -> exactly 0.9.
+        live = _generation_ids(10)
+        keep = live[:1]
+        client = StatefulFakeNeo4j(list(live))
+        path = _canonical_parquet(curated_dir, keep, names=_generation_names(1))
+
+        at_ceiling = prune_narrators(client, path, dry_run=True, max_orphan_fraction=0.9)
+        assert at_ceiling.orphans == 9  # dry-run: the would-delete count
+
+        with pytest.raises(ExcessiveDeletionError):
+            prune_narrators(client, path, dry_run=True, max_orphan_fraction=0.89)
+
+    def test_empty_graph_does_not_divide_by_zero(self, curated_dir: Path) -> None:
+        # Nothing to delete, no fraction to speak of. The `missing` guard owns the empty
+        # graph (it refuses it by default); this one must simply not explode when the
+        # operator has deliberately waived that one.
+        path = _canonical_parquet(curated_dir, _live_generation_ids())
+        client = StatefulFakeNeo4j([])
+
+        result = prune_narrators(client, path, dry_run=True, max_missing_fraction=1.0)
+
+        assert result.graph_total == 0
+        assert result.orphans == 0
+
+    @pytest.mark.parametrize("bad", [-0.1, 1.1])
+    def test_out_of_range_fraction_raises(self, curated_dir: Path, bad: float) -> None:
+        path = _canonical_parquet(curated_dir, _live_generation_ids())
+        client = StatefulFakeNeo4j(_live_generation_ids())
+        with pytest.raises(ValueError, match=r"max_orphan_fraction.*\[0.0, 1.0\]"):
+            prune_narrators(client, path, max_orphan_fraction=bad)
 
 
 class TestMissingCeiling:
@@ -744,12 +1005,14 @@ class TestCliEmitsSummaryLine:
             def __exit__(self, *_a: object) -> None:
                 return None
 
+        def _canned_prune(
+            _client: object, _p: Path, **_kwargs: object
+        ) -> PruneResult:  # accepts whatever ceilings the CLI passes
+            return canned
+
         monkeypatch.setattr(cli, "_check_neo4j", lambda: None)
         monkeypatch.setattr("src.utils.neo4j_client.Neo4jClient", lambda *_a, **_k: _DummyClient())
-        monkeypatch.setattr(
-            "src.graph.prune.prune_narrators",
-            lambda _client, _p, *, dry_run=False, max_missing_fraction=0.5: canned,
-        )
+        monkeypatch.setattr("src.graph.prune.prune_narrators", _canned_prune)
 
         cli._cmd_prune_narrators(canonical=str(path), dry_run=dry_run)
 
@@ -792,7 +1055,7 @@ class TestCliRefusesStaleKeepSet:
         with pytest.raises(SystemExit) as exit_info:
             cli._cmd_prune_narrators(canonical=str(stale))
 
-        assert exit_info.value.code == ExitCode.EMPTY_CANONICAL_SET
+        assert exit_info.value.code == ExitCode.UNUSABLE_CANONICAL_SET
         assert client.deleted_batches == [], "the CLI deleted rows before refusing"
         err = capsys.readouterr().err
         assert "does not belong to this graph" in err
