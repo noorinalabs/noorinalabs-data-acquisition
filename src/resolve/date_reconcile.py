@@ -478,6 +478,12 @@ def reconcile_canonical_dates(
     Returns the canonical path, or ``None`` when it does not yet exist (the stage
     is a no-op until disambiguate/bio_promote have produced the table).
     """
+    # OPTIONAL input (da#361): unlike the raising sites, ``narrators_canonical.parquet``
+    # is a legitimately optional input HERE. This stage is a pure date-enricher: with
+    # no canonical table there are simply no narrators to date, so an absent table is
+    # an honest no-op, not an upstream defect. Confirmed as intended (da#361 carved
+    # date_reconcile + tabaqa_dates out of the fail-loud set): it does NOT call
+    # ``require_input`` and returns ``None`` by design. See module docstring.
     canonical_path = output_dir / "narrators_canonical.parquet"
     if not canonical_path.exists():
         logger.warning("reconcile_dates_no_canonical", path=str(canonical_path))

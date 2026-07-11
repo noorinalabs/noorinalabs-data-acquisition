@@ -17,6 +17,7 @@ from src.parse.name_quality import (
     cleaner_removed_content,
 )
 from src.parse.schemas import NARRATOR_ALIAS_SCHEMA, NARRATOR_BIO_SCHEMA
+from src.resolve import MissingInputError
 from src.resolve.bio_promote import promote_bios_to_canonical
 from src.utils.arabic import normalize_arabic
 
@@ -214,12 +215,37 @@ def test_merges_into_existing_canonical(tmp_path: Path) -> None:
     assert len(ids) == 2  # plus the new itqan-derived narrator
 
 
-def test_no_bio_files_returns_none(tmp_path: Path) -> None:
+def test_no_bio_files_raises_missing_input(tmp_path: Path) -> None:
+    """da#361: absent bio shards = an upstream defect, not an empty result.
+
+    RED before da#361: this returned a success-shaped ``None`` indistinguishable
+    from a genuine empty (see the present-but-empty case below).
+    """
     staging = tmp_path / "staging"
     staging.mkdir()
     out_dir = tmp_path / "curated"
     out_dir.mkdir()
-    assert promote_bios_to_canonical(staging, out_dir) is None
+    with pytest.raises(MissingInputError) as excinfo:
+        promote_bios_to_canonical(staging, out_dir)
+    assert excinfo.value.stage == "bio_promote"
+    assert "narrators_bio_*.parquet" in str(excinfo.value)
+
+
+def test_present_but_empty_bio_shard_still_succeeds(tmp_path: Path) -> None:
+    """da#361 distinction: a bio shard that EXISTS but is source-filtered to zero
+    promotable rows is a genuine empty — it must NOT raise. The input is present, so
+    the stage completes honestly (writing its canonical table), unlike the absent
+    case above which raises."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+    # A real (schema-valid) bio shard whose only row is filtered out by ``sources``.
+    _write_bios(staging, "itqan", [{"bio_id": "b1", "name_ar": "محمد", "source": "itqan"}])
+    # Restrict to a source the shard does not carry: input present, zero promoted —
+    # an honest success (a written canonical path), never a raise.
+    result = promote_bios_to_canonical(staging, out_dir, sources={"not_a_real_source"})
+    assert result is not None
 
 
 def test_aliases_attach_to_matching_canonical(tmp_path: Path) -> None:

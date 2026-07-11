@@ -40,6 +40,7 @@ from src.resolve import (
     disambiguate,
     fuzzy_cluster,
     muhaddithat_links,
+    narrator_split,
     ner,
     parallels,
     run_all,
@@ -71,6 +72,7 @@ def _install_benign_spies(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(bio_promote, "promote_bios_to_canonical", lambda *_a, **_k: None)
     metrics = type("M", (), {"merged_records": 0, "multi_member_clusters": 0})()
     monkeypatch.setattr(fuzzy_cluster, "cluster_canonical_narrators", lambda *_a, **_k: metrics)
+    monkeypatch.setattr(narrator_split, "split_generic_narrators", lambda *_a, **_k: None)
     monkeypatch.setattr(date_reconcile, "reconcile_canonical_dates", lambda *_a, **_k: None)
     monkeypatch.setattr(tabaqa_dates, "apply_tabaqa_fallback", lambda *_a, **_k: None)
     monkeypatch.setattr(

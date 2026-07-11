@@ -33,6 +33,7 @@ from src.parse.name_quality import (
     cleaner_removed_content,
     is_mubham_relational,
 )
+from src.resolve._inputs import require_input
 from src.resolve.schemas import NARRATORS_CANONICAL_SCHEMA
 from src.resolve.sect_affiliation import (
     derive_sect_affiliation,
@@ -216,10 +217,20 @@ def promote_bios_to_canonical(
     surface for no recovery-time saving. Recovery re-runs it via
     ``resolve --from-step bio_promote``.
     """
+    # Required input: the bio shards this stage exists to promote. da#361: their
+    # total absence means parse never produced them (or ran against the wrong dir)
+    # — an upstream defect, not an empty result — so raise rather than return a
+    # success-shaped ``None``. Shards present but carrying no promotable rows (all
+    # source-filtered / name-quality-dropped) is a genuine empty and still returns
+    # ``None`` honestly further down.
     bio_files = sorted(staging_dir.glob("narrators_bio_*.parquet"))
-    if not bio_files:
-        logger.warning("bio_promote_no_bio_files", staging_dir=str(staging_dir))
-        return None
+    require_input(
+        stage="bio_promote",
+        present=bool(bio_files),
+        input_desc=f"narrators_bio_*.parquet under {staging_dir}",
+        produced_by="parse (bio adapters)",
+        remediation="re-run `parse`; there are no bio shards to promote",
+    )
 
     canonical_path = output_dir / "narrators_canonical.parquet"
     canonical_map = _load_existing_canonical(canonical_path)

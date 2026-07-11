@@ -12,6 +12,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from src.models.enums import VariantType
+from src.resolve import MissingInputError
 from src.resolve._provenance import DetectorStatus, read_provenance
 from src.resolve.dedup import (
     _classify_pair,
@@ -281,16 +282,22 @@ class TestEmbeddingPipeline:
 # ---------------------------------------------------------------------------
 @ml
 class TestEmptyInput:
-    def test_empty_output_on_no_hadith_files(self, tmp_path: Path) -> None:
-        """Case A. Still non-fatal, but no longer conflated with Case B.
+    def test_no_hadith_files_raises_missing_input(self, tmp_path: Path) -> None:
+        """Case A (da#361): zero input files = an upstream defect (parse produced
+        nothing / wrong staging_dir), not a true negative — so it now RAISES rather
+        than writing a success-shaped empty output.
 
-        Zero input files means the upstream parse stage produced nothing — an
-        upstream defect rather than a true negative. Making it fatal is a
-        behaviour change tracked as a follow-up, not folded into da#309.
+        RED before da#361: da#309 stamped this ``NO_INPUT`` but left it non-fatal
+        (``return _write_empty_output(...)``), explicitly deferring the fatal turn
+        as "tracked separately" — this is that follow-up, landable now that da#360
+        makes ``run_all`` surface the raise instead of swallowing it. Case B below
+        (files present, no English matn) is still an honest empty success, so the
+        two remain distinguishable.
         """
-        path = run_dedup(tmp_path)
-        assert path.exists()
-        assert pq.read_table(path).num_rows == 0
+        with pytest.raises(MissingInputError) as excinfo:
+            run_dedup(tmp_path)
+        assert excinfo.value.stage == "dedup"
+        assert not (tmp_path / "parallel_links.parquet").exists()
 
     def test_empty_output_when_no_row_has_english_matn(self, tmp_path: Path) -> None:
         """Case B: a legitimate empty input for an English-matn semantic detector."""

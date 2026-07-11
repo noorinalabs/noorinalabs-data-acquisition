@@ -36,6 +36,7 @@ from src.resolve._checkpoint import (
     resolve_cadence,
     save_checkpoint,
 )
+from src.resolve._inputs import require_input
 from src.resolve.geography import regions_plausible, resolve_region
 from src.resolve.mononym_split import refine_mononym_name
 from src.resolve.schemas import (
@@ -554,11 +555,23 @@ def _count_mentions(mentions_dir: Path) -> int:
 def _load_mentions(
     staging_dir: Path,
 ) -> list[dict[str, str | int | float | None]]:
-    """Load narrator_mentions_resolved.parquet from NER stage."""
+    """Load narrator_mentions_resolved.parquet from NER stage.
+
+    da#361: an absent mentions file is a missing required input (NER did not run
+    or wrote elsewhere), not an empty result, so this raises rather than returning
+    ``[]``. NOTE: this helper is currently uncalled — ``run`` uses
+    :func:`_count_mentions` for the presence/size check — but it is kept honest so
+    a future re-wiring inherits the fail-loud contract rather than the old silent
+    empty. (Tracked for wire-up-or-remove; see da#361 discussion.)
+    """
     path = staging_dir / "narrator_mentions_resolved.parquet"
-    if not path.exists():
-        logger.warning("mentions_file_missing", path=str(path))
-        return []
+    require_input(
+        stage="disambiguate",
+        present=path.exists(),
+        input_desc=f"{path.name} (NER mention output)",
+        produced_by="resolve NER stage",
+        remediation="re-run resolve from the `ner` step; the mention output is absent",
+    )
 
     table = pq.read_table(path)
     rows: list[dict[str, str | int | float | None]] = []
@@ -1158,16 +1171,37 @@ def run(
         output_dir=str(output_dir),
     )
 
+    # Required input: candidate bio files (produced by parse). da#361 distinguishes
+    # an ABSENT input (no bio shards at all — an upstream defect) from a PRESENT one
+    # that is genuinely empty (shards exist, zero candidate rows). Absent → raise;
+    # present-but-empty → the honest ``disambiguate_no_candidates`` empty return.
+    bio_files = sorted(staging_dir.glob("narrators_bio_*.parquet"))
+    require_input(
+        stage="disambiguate",
+        present=bool(bio_files),
+        input_desc=f"narrators_bio_*.parquet under {staging_dir} (candidate narrator profiles)",
+        produced_by="parse (bio adapters)",
+        remediation="re-run `parse`; disambiguation has no candidate profiles to match against",
+    )
+
     # Load candidates and build blocking index.
     candidates = _load_candidates(staging_dir)
 
     if not candidates:
+        # Bio shards present but zero candidate rows — an honest empty, NOT a
+        # missing input (distinct from the raise above), so it stays a warning.
         logger.warning("disambiguate_no_candidates")
         return []
 
     index = _build_blocking_index(candidates)
 
-    # Check mention count without loading data.
+    # Check mention count without loading data. da#361: an absent/zero mentions file
+    # is NOT a missing input here — NER legitimately produces zero mentions for a
+    # bio-only corpus (e.g. muhaddithat, which NER skips) or an all-null-isnad
+    # subset. That is "an input that ran and legitimately produced nothing", which
+    # the da#361 defect definition explicitly excludes, so this stays an honest
+    # empty return, NOT a ``require_input`` raise. (The bio candidates above ARE
+    # required and DO raise when absent.)
     total_mentions = _count_mentions(output_dir)
     if total_mentions == 0:
         logger.warning("disambiguate_no_mentions")
