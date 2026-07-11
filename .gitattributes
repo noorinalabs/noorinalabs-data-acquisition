@@ -1,8 +1,0 @@
-# Structural ontology merge driver (#214).
-# Registered per-clone via: python3 scripts/structural_ontology.py register-merge-driver
-# (or: make setup-hooks, once that target exists).
-# The driver is invoked as a Python module (PYTHONPATH=<gen-lib> python3 -m
-# ontology_gen.merge_driver) -- NOT as a bare script -- because merge_driver.py
-# uses a package-relative import (from .model) that a plain python3 invocation
-# cannot resolve.
-ontology/structural/code-graph.json merge=ontology-codegraph
