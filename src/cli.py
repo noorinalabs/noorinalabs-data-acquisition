@@ -525,7 +525,12 @@ def _cmd_migrate_transmitted_hadith_ids(*, batch_size: int = 1000) -> None:
         print("\nMigration complete.")
 
 
-def _cmd_prune_narrators(*, canonical: str, dry_run: bool = False) -> None:
+def _cmd_prune_narrators(
+    *,
+    canonical: str,
+    dry_run: bool = False,
+    max_missing_fraction: float | None = None,
+) -> None:
     """DETACH DELETE Narrator nodes whose id is not in narrators_canonical.parquet (da#413).
 
     The canonical-set SHRINK: after a re-resolve collapses ids, the graph still holds
@@ -536,13 +541,28 @@ def _cmd_prune_narrators(*, canonical: str, dry_run: bool = False) -> None:
     nothing.
 
     Refuses — non-zero exit :attr:`ExitCode.EMPTY_CANONICAL_SET`, ZERO deletion — when
-    the canonical set is empty or its parquet is unreadable/missing. A bad read must
-    never wipe the graph.
+    the keep-set cannot be trusted: it is empty / unreadable / missing
+    (:class:`EmptyCanonicalSetError`), or it is well-formed but is not **this graph's**
+    (:class:`ForeignCanonicalSetError` — a stale ``--canonical``, caught by the
+    ``missing`` provenance signal). A bad read must never wipe the graph, and neither
+    must the wrong parquet.
     """
     from pathlib import Path
 
-    from src.graph.prune import EmptyCanonicalSetError, prune_narrators, summary_line
+    from src.graph.prune import (
+        DEFAULT_MAX_MISSING_FRACTION,
+        UnusableCanonicalSetError,
+        prune_narrators,
+        summary_line,
+    )
     from src.utils.neo4j_client import Neo4jClient
+
+    # `None` (not the literal) is the CLI default, so the ceiling has exactly one home:
+    # src.graph.prune. A hardcoded default here — the shape of migrate's `--batch-size`
+    # — is a second copy of a number that must not drift, and cli.py lazy-imports the
+    # module precisely so `--help` need not pay for pyarrow + the neo4j driver.
+    if max_missing_fraction is None:
+        max_missing_fraction = DEFAULT_MAX_MISSING_FRACTION
 
     # This command reads the canonical parquet and writes ONLY to the graph and
     # stdout. It never writes back into the parquet's directory (no manifest, no audit
@@ -551,21 +571,30 @@ def _cmd_prune_narrators(*, canonical: str, dry_run: bool = False) -> None:
 
     canonical_path = Path(canonical)
 
-    # The guard runs inside prune_narrators, BEFORE the graph is touched. Catch it
-    # here to exit the named code rather than crash — nothing was deleted.
+    # Both guards run inside prune_narrators, BEFORE any graph WRITE. Catch their common
+    # supertype here to exit the named code rather than crash — nothing was deleted.
     try:
-        # The guard reads the parquet, not the DB. Check connectivity first (like
+        # The first guard reads the parquet, not the DB. Check connectivity first (like
         # load/migrate) so an unreachable DB is DB_UNREACHABLE, not a later crash.
         _check_neo4j()
         with Neo4jClient() as client:
-            result = prune_narrators(client, canonical_path, dry_run=dry_run)
-    except EmptyCanonicalSetError as guard:
+            result = prune_narrators(
+                client,
+                canonical_path,
+                dry_run=dry_run,
+                max_missing_fraction=max_missing_fraction,
+            )
+    except UnusableCanonicalSetError as guard:
         print(f"\nERROR: {guard}", file=sys.stderr)
         sys.exit(ExitCode.EMPTY_CANONICAL_SET)
 
     print("=== prune-narrators (canonical-set shrink, da#413) ===")
     print(f"  Canonical ids (keep-set)   : {result.canonical_ids_seen}")
     print(f"  Orphans (id ∉ canonical)   : {result.orphans_identified}")
+    # The keep-set provenance reading. ~0 says the parquet is this graph's; a large value
+    # says it is a stale/foreign one — the one thing no post-op gate can check, because
+    # every one of them is derived from this same keep-set.
+    print(f"  Missing (canonical ∉ graph): {result.missing}")
     if result.sample:
         shown = ", ".join(result.sample)
         more = result.orphans_identified - len(result.sample)
@@ -772,6 +801,22 @@ def _cmd_pipeline() -> None:
     print("=== Full Pipeline Complete ===")
 
 
+def _unit_fraction(raw: str) -> float:
+    """argparse type for a fraction in [0.0, 1.0].
+
+    An out-of-range ceiling is operator error, so it must be argparse's usage exit (2),
+    not a traceback and not a silently clamped value that would quietly weaken a
+    destructive-op guard.
+    """
+    try:
+        value = float(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{raw!r} is not a number") from None
+    if not 0.0 <= value <= 1.0:
+        raise argparse.ArgumentTypeError(f"must be in [0.0, 1.0], got {value}")
+    return value
+
+
 def main() -> None:
     """Run the isnad-ingest CLI."""
     from src.graph.validate import _DEFAULT_VALIDATION_TIMEOUT_SECONDS
@@ -939,13 +984,29 @@ def main() -> None:
         help=(
             "Path to narrators_canonical.parquet. Its canonical_id set is the "
             "authoritative keep-set: every Narrator whose id is absent from it is "
-            "DETACH DELETEd. Refuses (exit 12, zero deletion) if empty/unreadable."
+            "DETACH DELETEd. Refuses (exit 12, zero deletion) if it is empty, missing "
+            "or unreadable — or if it is not THIS graph's keep-set (see "
+            "--max-missing-fraction). Point it at the parquet the live graph was "
+            "loaded from: a stale one deletes the narrators it fails to mention."
         ),
     )
     prune_parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Report the count that would be deleted (and a sample); delete nothing.",
+    )
+    prune_parser.add_argument(
+        "--max-missing-fraction",
+        type=_unit_fraction,
+        default=None,
+        metavar="FRACTION",
+        help=(
+            "Ceiling on 'missing' (canonical ids the graph has never seen), as a "
+            "fraction of the keep-set. Above it the keep-set is refused as belonging to "
+            "a DIFFERENT graph (exit 12, zero deletion) — the stale --canonical guard. "
+            "Default: half the keep-set. Raise it (up to 1.0, which disables the "
+            "ceiling) only when a genuinely large partial load is intended."
+        ),
     )
 
     audit_parser = subparsers.add_parser("audit", help="View recent pipeline audit entries")
@@ -1028,7 +1089,11 @@ def main() -> None:
     elif args.command == "migrate-transmitted-hadith-ids":
         _cmd_migrate_transmitted_hadith_ids(batch_size=args.batch_size)
     elif args.command == "prune-narrators":
-        _cmd_prune_narrators(canonical=args.canonical, dry_run=args.dry_run)
+        _cmd_prune_narrators(
+            canonical=args.canonical,
+            dry_run=args.dry_run,
+            max_missing_fraction=args.max_missing_fraction,
+        )
     elif args.command == "audit":
         _cmd_audit(last_n=args.last)
     elif args.command == "pipeline":

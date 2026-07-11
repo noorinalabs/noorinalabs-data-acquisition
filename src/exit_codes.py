@@ -336,7 +336,7 @@ class ExitCode(enum.IntEnum):
     """
 
     EMPTY_CANONICAL_SET = 12
-    """``prune-narrators`` refused: its authoritative keep-set was unusable (da#413).
+    """``prune-narrators`` refused: its authoritative keep-set was untrustworthy (da#413).
 
     What is on disk when it fires: **the graph, exactly as it was** — zero nodes
     deleted, zero edges touched. This is the load-bearing guarantee of a destructive
@@ -344,15 +344,32 @@ class ExitCode(enum.IntEnum):
 
     ``prune-narrators`` DETACH-DELETEs every ``Narrator`` whose ``id`` is not in
     ``narrators_canonical.parquet``. That keep-set is the ONLY thing standing between
-    the command and deleting a node, so the command refuses — before it reads or
-    writes the graph at all — if the keep-set cannot be trusted to name the survivors.
+    the command and deleting a node, so the command refuses — before it writes to the
+    graph at all — if the keep-set cannot be trusted to name the survivors.
 
-    Named for the worst of the three doors, not for one instance. The guard raises on
+    Named for the worst of the **four** doors, not for one instance. Three of them ask
+    whether the parquet is usable *on its face* and fire before the graph is even read:
     an **empty** keep-set (which would delete every narrator), a **missing** parquet,
-    and an **unreadable/malformed** parquet alike: each yields no usable set, and the
-    exception message names which door fired. Naming the member after only the empty
-    case would re-arm the trap for the missing/unreadable cases, the same mistake
-    :attr:`REFUSED_ROWS` documents for the malformed-id-vs-blank-id classes.
+    an **unreadable/malformed** one. The fourth asks the question those three cannot,
+    because it is a relation between the parquet and the graph rather than a property
+    of the parquet: a keep-set that is well-formed but is **not this graph's** — a
+    stale ``--canonical`` from a previous resolve run, readable and non-empty and
+    catastrophic, detected by the ``missing`` (= ``|canonical - graph|``) signal and
+    raised as ``ForeignCanonicalSetError`` (da#413 review, Jean-Claude Habimana). It
+    fires after the graph is *read* and before any *write*, so its on-disk state is
+    identical to the other three, which is exactly why it shares this code.
+
+    That sharing is the deliberate reading of this registry's own rule — a code is
+    defined by **what is on disk when it fires**, and all four doors leave the graph
+    untouched, name the same remedy (fix the input, re-run), and are propagated
+    verbatim by a consumer that only asks whether the rc is zero. A fifth member would
+    encode a distinction nothing acts on, while re-opening the three-way collision
+    hazard this module was written to record. The exception subclass carries the
+    distinction where it is actually consumed: in-process, and on stderr.
+
+    Naming the member after only the empty case would re-arm the trap for the other
+    three, the same mistake :attr:`REFUSED_ROWS` documents for the
+    malformed-id-vs-blank-id classes.
 
     This is the da#309 / da#361 fail-loud-on-missing-input discipline applied to a
     *destructive* op. It gets its own code — not :attr:`LOAD_FAILED` — because a

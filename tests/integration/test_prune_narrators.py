@@ -13,7 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from src.graph.prune import EmptyCanonicalSetError, prune_narrators, summary_line
+from src.graph.prune import (
+    EmptyCanonicalSetError,
+    ForeignCanonicalSetError,
+    prune_narrators,
+    summary_line,
+)
 from src.utils.neo4j_client import Neo4jClient
 from tests.test_graph.conftest import write_narrators_canonical
 
@@ -97,9 +102,10 @@ class TestPruneAgainstRealGraph:
         assert result.graph_total == 2  # survivors, re-read
         assert result.orphans == 0  # post-count MUST be 0 (exactly the orphans went)
         assert result.orphans_identified == 2  # would-delete, pre
+        assert result.missing == 0  # the keep-set IS this graph's — every id is present
         assert (
             summary_line(result)
-            == "PRUNE_NARRATORS_SUMMARY canonical=2 graph_total=2 orphans=0 deleted=2"
+            == "PRUNE_NARRATORS_SUMMARY canonical=2 graph_total=2 orphans=0 deleted=2 missing=0"
         )
 
     def test_dry_run_deletes_nothing(self, neo4j_client: Neo4jClient, tmp_path: Path) -> None:
@@ -139,3 +145,45 @@ class TestPruneAgainstRealGraph:
             prune_narrators(neo4j_client, tmp_path / "does_not_exist.parquet")
 
         assert _narrator_ids(neo4j_client) == before
+
+    def test_stale_keep_set_refused_against_a_real_graph(
+        self, neo4j_client: Neo4jClient, tmp_path: Path
+    ) -> None:
+        """A wrong-but-valid keep-set: readable, non-empty, and NOT this graph's (da#413
+        review). Against a live graph, the refusal must cost it nothing — no node, no edge.
+
+        The keep-set here names four narrators the graph has never heard of. It is exactly
+        as well-formed as the correct one; only ``missing`` tells them apart.
+        """
+        _seed_graph(neo4j_client)
+        before = _narrator_ids(neo4j_client)
+
+        stale = _canonical(tmp_path, ["nar:prev_a", "nar:prev_b", "nar:prev_c", "nar:prev_d"])
+        with pytest.raises(ForeignCanonicalSetError) as raised:
+            prune_narrators(neo4j_client, stale)
+
+        assert raised.value.missing == 4  # none of the keep-set is in the graph
+        # Nothing was deleted: every node AND the orphan's edge are exactly as seeded.
+        assert _narrator_ids(neo4j_client) == before
+        assert _transmitted_edge_count(neo4j_client) == 1
+
+    def test_partial_load_reports_missing_and_still_prunes(
+        self, neo4j_client: Neo4jClient, tmp_path: Path
+    ) -> None:
+        """The dual, on a real graph: a CORRECT keep-set whose load was partial.
+
+        ``nar:never_loaded`` is canonical but absent from the graph (the REFUSED_ROWS /
+        STOPPED_AT_LIMIT shape). ``missing`` is 1 — reported, not refused — and the prune
+        proceeds normally, removing exactly the orphans. A hard ``missing == 0`` in this
+        layer would have refused this legitimate prune.
+        """
+        _seed_graph(neo4j_client)
+
+        canonical = _canonical(tmp_path, [_KEEP_ZERO, _KEEP_BUSY, "nar:never_loaded"])
+        result = prune_narrators(neo4j_client, canonical)
+
+        assert result.missing == 1  # the canonical id the load never wrote
+        assert result.deleted == 2  # exactly the two orphans
+        assert _narrator_ids(neo4j_client) == {_KEEP_ZERO, _KEEP_BUSY}
+        assert result.orphans == 0
+        assert "missing=1" in summary_line(result)

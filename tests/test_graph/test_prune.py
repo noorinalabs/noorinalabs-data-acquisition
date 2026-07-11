@@ -8,18 +8,24 @@ and lives in ``tests/integration/test_prune_narrators.py``.
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from src.graph.prune import (
+    SUMMARY_KEYS,
     EmptyCanonicalSetError,
+    ForeignCanonicalSetError,
     PruneResult,
+    UnusableCanonicalSetError,
     prune_narrators,
     read_canonical_ids,
     summary_line,
 )
+from src.parse.identity import make_canonical_id, make_discriminated_canonical_id
 from tests.test_graph.conftest import MockNeo4jClient, write_narrators_canonical
 
 
@@ -253,7 +259,7 @@ class TestSummaryLine:
         result = prune_narrators(client, path, dry_run=True)
         assert (
             summary_line(result)
-            == "PRUNE_NARRATORS_SUMMARY canonical=1 graph_total=3 orphans=2 deleted=0"
+            == "PRUNE_NARRATORS_SUMMARY canonical=1 graph_total=3 orphans=2 deleted=0 missing=0"
         )
 
     def test_real_run_line_reports_zero_orphans_remaining(self, curated_dir: Path) -> None:
@@ -262,11 +268,426 @@ class TestSummaryLine:
         )
         client = StatefulFakeNeo4j(["nar:keep_a", "nar:keep_b", "nar:orphan_a"])
         result = prune_narrators(client, path)
-        # canonical=2, graph_total (post survivors)=2, orphans (post)=0, deleted=1.
+        # canonical=2, graph_total (post survivors)=2, orphans (post)=0, deleted=1, missing=0.
         assert (
             summary_line(result)
-            == "PRUNE_NARRATORS_SUMMARY canonical=2 graph_total=2 orphans=0 deleted=1"
+            == "PRUNE_NARRATORS_SUMMARY canonical=2 graph_total=2 orphans=0 deleted=1 missing=0"
         )
+
+    def test_missing_is_the_fifth_key_and_comes_last(self, curated_dir: Path) -> None:
+        # deploy#557's four-key extraction must be undisturbed by the arrival of a fifth,
+        # which is only true if it is APPENDED. Pin the position, not just the presence.
+        path = write_narrators_canonical(curated_dir, [{"canonical_id": "nar:keep"}])
+        client = StatefulFakeNeo4j(["nar:keep"])
+        line = summary_line(prune_narrators(client, path, dry_run=True))
+
+        keys = [field.split("=", 1)[0] for field in line.split()[1:]]
+        assert keys == list(SUMMARY_KEYS)
+        assert keys[-1] == "missing"
+
+
+class TestSummaryKeyNamespace:
+    """The keys are an APPEND-ONLY namespace, because the consumer's regex is unanchored.
+
+    deploy#557's ``summary_field`` extracts a key with a greedy, unanchored ``.*<key>=``
+    (da#419). A key whose name *ends with* another key's name is therefore read as that
+    other key: ``edges_deleted=`` is silently harvested as ``deleted=``, feeding an edge
+    count into a node-count gate. Adding a fifth key is exactly when that bites, so the
+    invariant is pinned mechanically here rather than left to whoever adds the sixth.
+    """
+
+    def test_no_key_is_a_suffix_of_another(self) -> None:
+        for key in SUMMARY_KEYS:
+            colliders = [other for other in SUMMARY_KEYS if other != key and other.endswith(key)]
+            assert not colliders, (
+                f"summary key {key!r} is a suffix of {colliders!r}: the consumer's "
+                f"unanchored `.*{key}=` would harvest the wrong field (da#419)"
+            )
+
+    def test_summary_line_emits_exactly_the_declared_keys(self, curated_dir: Path) -> None:
+        # SUMMARY_KEYS is the thing the suffix invariant above is checked against, so it
+        # has to actually BE the line's key set — otherwise the invariant guards a
+        # constant nobody emits.
+        path = write_narrators_canonical(curated_dir, [{"canonical_id": "nar:keep"}])
+        client = StatefulFakeNeo4j(["nar:keep", "nar:orphan"])
+        line = summary_line(prune_narrators(client, path))
+
+        assert line.split()[0] == "PRUNE_NARRATORS_SUMMARY"
+        emitted = tuple(field.split("=", 1)[0] for field in line.split()[1:])
+        assert emitted == SUMMARY_KEYS
+
+
+# The consumer's extractor, copied VERBATIM from deploy#557 PR#574's
+# `.github/workflows/graph-prune-narrators.yml:359-361` at head eef7ea7:
+#
+#     summary_field() {
+#       printf '%s\n' "$1" | sed -n "s/.*PRUNE_NARRATORS_SUMMARY .*$2=\([0-9][0-9]*\).*/\1/p" ...
+#
+# Re-implementing it in Python `re` would be testing a translation, not the consumer, and
+# POSIX BRE is not Python's dialect — so this shells out to the real `sed` with the real
+# expression. The producer is the right place for this: it is the producer that breaks the
+# consumer by adding a key.
+_CONSUMER_SED = r"s/.*PRUNE_NARRATORS_SUMMARY .*{key}=\([0-9][0-9]*\).*/\1/p"
+
+
+def _consumer_extract(line: str, key: str) -> str:
+    """Run deploy#557's actual `summary_field` sed over `line` and return what it reads."""
+    proc = subprocess.run(  # noqa: S603
+        ["sed", "-n", _CONSUMER_SED.format(key=key)],  # noqa: S607
+        input=line + "\n",
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return proc.stdout.splitlines()[0] if proc.stdout.strip() else ""
+
+
+@pytest.mark.skipif(shutil.which("sed") is None, reason="needs POSIX sed (the consumer's tool)")
+class TestConsumerExtractionCoVerifies:
+    """Co-verify the five-key line against deploy#557's REAL sed, not against a paraphrase.
+
+    ``feedback_silent_zero_is_not_a_measurement``: verify the instrument before you read
+    it. A test that only asserts "all five keys extract correctly" would pass just as
+    happily against a sed that cannot detect a collision at all — so
+    :meth:`test_the_harness_can_actually_detect_a_collision` feeds it a line that MUST be
+    misread, and requires it to be misread. Only then does the clean read below mean
+    anything.
+    """
+
+    def test_the_harness_can_actually_detect_a_collision(self) -> None:
+        # The positive control. `edges_deleted=` ends with `deleted`, so the unanchored
+        # `.*deleted=` harvests 999 — the exact da#419 hazard. If this ever passes as
+        # `4`, the harness has stopped reproducing the consumer and every assertion in
+        # the sibling test below is vacuous.
+        hijacked = (
+            "PRUNE_NARRATORS_SUMMARY canonical=1 graph_total=2 orphans=3 "
+            "deleted=4 edges_deleted=999"
+        )
+        assert _consumer_extract(hijacked, "deleted") == "999", (
+            "the consumer's regex is supposed to be hijackable by a suffix-colliding key; "
+            "if it is not, this harness is no longer the consumer and proves nothing"
+        )
+
+    def test_missing_does_not_collide_with_any_existing_key(self, curated_dir: Path) -> None:
+        # The reading, now that the instrument is known live. Every key — including the
+        # four deploy#557 already extracts — must read its OWN value off the five-key line.
+        path = write_narrators_canonical(
+            curated_dir, [{"canonical_id": f"nar:{c}"} for c in "abcd"]
+        )
+        # Five DISTINCT values (4/5/2/0/1), so a key that harvests a neighbour's field
+        # shows up as a wrong number rather than coincidentally matching the right one.
+        client = StatefulFakeNeo4j(["nar:a", "nar:b", "nar:c", "nar:orphan_x", "nar:orphan_y"])
+        line = summary_line(prune_narrators(client, path, dry_run=True))
+        assert line == (
+            "PRUNE_NARRATORS_SUMMARY canonical=4 graph_total=5 orphans=2 deleted=0 missing=1"
+        )
+
+        assert _consumer_extract(line, "canonical") == "4"
+        assert _consumer_extract(line, "graph_total") == "5"
+        assert _consumer_extract(line, "orphans") == "2"
+        assert _consumer_extract(line, "deleted") == "0"
+        assert _consumer_extract(line, "missing") == "1"
+
+
+# --------------------------------------------------------------------------------------
+# The stale keep-set: a WRONG-BUT-VALID parquet (da#413 review blocker)
+# --------------------------------------------------------------------------------------
+#
+# The fixture has to be able to PRODUCE the bad state, or the guard it tests is inert and
+# we will believe it anyway (`feedback_fixture_makes_guard_assertion_inert`). So the stale
+# keep-set below is not a toy and not an empty file: it is built by the SAME production
+# minting functions a real resolve run uses, re-keyed by the SAME mechanism that re-keys
+# ids between runs.
+#
+# The mechanism is real. `make_discriminated_canonical_id` (da#337 same-name split) mints
+# a DIFFERENT `nar:` id for the same person once the splitter assigns a discriminator, and
+# is byte-identical to `make_canonical_id` when it does not (its documented backward-compat
+# contract). So a run whose splitter discriminated a narrator, followed by a re-resolve
+# whose splitter did not (or chose differently), yields exactly this: a previous canonical
+# parquet whose ids are mostly strangers to the live graph — readable, non-empty, schema-
+# valid, full of real narrators, and catastrophic if handed to a prune.
+#
+# These are real narrators from the corpus, not `nar:foo`.
+_NARRATOR_NAMES = [
+    "ابو هريره",
+    "عايشه",
+    "عبد الله بن عمر",
+    "انس بن مالك",
+    "جابر بن عبد الله",
+    "ابو سعيد الخدري",
+    "عبد الله بن عباس",
+    "عمر بن الخطاب",
+    "علي بن ابي طالب",
+    "محمد بن شهاب الزهري",
+]
+# The previous run's splitter discriminated the first eight (death-year tags, the shape
+# da#337 uses) and left the last two alone.
+_PRIOR_RUN_DISCRIMINATORS = {
+    "ابو هريره": "d.59",
+    "عايشه": "d.58",
+    "عبد الله بن عمر": "d.73",
+    "انس بن مالك": "d.93",
+    "جابر بن عبد الله": "d.78",
+    "ابو سعيد الخدري": "d.74",
+    "عبد الله بن عباس": "d.68",
+    "عمر بن الخطاب": "d.23",
+}
+
+
+def _live_generation_ids() -> list[str]:
+    """The ids the LIVE graph was loaded from — this run's minting, undiscriminated."""
+    return [make_canonical_id(name) for name in _NARRATOR_NAMES]
+
+
+def _stale_generation_ids() -> list[str]:
+    """The PREVIOUS run's canonical ids: eight re-keyed by the splitter, two unchanged."""
+    return [
+        make_discriminated_canonical_id(name, _PRIOR_RUN_DISCRIMINATORS.get(name, ""))
+        for name in _NARRATOR_NAMES
+    ]
+
+
+def _canonical_parquet(curated: Path, ids: list[str], names: list[str] | None = None) -> Path:
+    """A realistic narrators_canonical.parquet — full rows, not bare ids."""
+    names = names or _NARRATOR_NAMES
+    return write_narrators_canonical(
+        curated,
+        [
+            {
+                "canonical_id": cid,
+                "name_ar": name,
+                "name_ar_normalized": name,
+                "mention_count": 100 + i,
+                "source_corpora": ["sunnah"],
+            }
+            for i, (cid, name) in enumerate(zip(ids, names, strict=True))
+        ],
+    )
+
+
+_ORPHANS = ["nar:orphan_a", "nar:orphan_b"]
+
+
+class TestStaleKeepSetIsRefused:
+    """The blocker: nothing bound the keep-set to the graph it prunes (Jean-Claude, #414).
+
+    A stale ``parquet_ref`` is the single most plausible operator error, and it is not
+    self-announcing. It passes every guard this command had, and — the reason it needed
+    a guard in *this* layer rather than a gate in the consumer's — it passes every
+    post-op check too, because they are all derived from the same keep-set they would be
+    validating. They prove the prune obeyed the parquet. None can ask if it was the right
+    parquet.
+    """
+
+    def test_the_stale_keep_set_passes_every_pre_existing_guard(self, curated_dir: Path) -> None:
+        """First: prove the fixture really does reach the bad state.
+
+        If the empty/missing/unreadable guard already caught this, the new guard would be
+        guarding nothing and the tests below would be theatre. It does not: the stale
+        parquet is readable, non-empty, and yields a full ten-id keep-set.
+        """
+        stale = _canonical_parquet(curated_dir, _stale_generation_ids())
+
+        keep_set = read_canonical_ids(stale)  # does NOT raise
+
+        assert len(keep_set) == 10
+        assert all(cid.startswith("nar:") for cid in keep_set)
+        # And it is genuinely a DIFFERENT set from the graph's: eight of its ten ids were
+        # re-keyed by the splitter, so the live graph has never seen them.
+        live = set(_live_generation_ids())
+        assert len(keep_set - live) == 8
+        assert len(keep_set & live) == 2  # the two the previous run left undiscriminated
+
+    def test_without_the_ceiling_the_stale_keep_set_deletes_the_live_generation(
+        self, curated_dir: Path
+    ) -> None:
+        """The red. This is what the code did before the guard, and what it still does if
+        an operator lifts the ceiling — so the damage is measured, not asserted.
+
+        Eight legitimate, edge-bearing, current-generation narrators are DETACH DELETEd
+        because a stale parquet does not list them. Every gate downstream would go green.
+        """
+        stale = _canonical_parquet(curated_dir, _stale_generation_ids())
+        live = _live_generation_ids()
+        client = StatefulFakeNeo4j([*live, *_ORPHANS])
+
+        # max_missing_fraction=1.0 disables the ceiling — i.e. the pre-fix behaviour.
+        result = prune_narrators(client, stale, max_missing_fraction=1.0)
+
+        # 8 legitimate narrators destroyed, plus the 2 real orphans: 10 of 12 gone.
+        assert result.deleted == 10
+        assert len(client.narrators) == 2
+        for name in _NARRATOR_NAMES[:8]:
+            assert make_canonical_id(name) not in client.narrators, (
+                f"{name} is a live, canonical narrator and was deleted by a stale keep-set"
+            )
+        # And here is the whole point: EVERY post-op gate still passes. The graph was not
+        # emptied, no orphan remains, and deleted equals what the dry run predicted. A
+        # workflow reading only these would print "post-op verification PASSED".
+        assert result.graph_total > 0  # gate A: not emptied
+        assert result.orphans == 0  # gate D: no orphan remains
+        assert result.deleted == result.orphans_identified  # gate C: matches prediction
+        # Only `missing` separates this from a correct run. It is 8.
+        assert result.missing == 8
+
+    def test_stale_keep_set_is_refused_before_any_write(self, curated_dir: Path) -> None:
+        """The green. Default ceiling: refused, and NOT ONE ROW DELETED."""
+        stale = _canonical_parquet(curated_dir, _stale_generation_ids())
+        live = _live_generation_ids()
+        client = StatefulFakeNeo4j([*live, *_ORPHANS])
+        before = list(client.narrators)
+
+        with pytest.raises(ForeignCanonicalSetError) as raised:
+            prune_narrators(client, stale)
+
+        # Zero deletion. The graph is exactly as it was — the load-bearing guarantee.
+        assert client.deleted_batches == [], "a refused prune issued a DETACH DELETE"
+        assert client.narrators == before
+        # The refusal reports the signal that produced it, so the operator can act.
+        assert raised.value.missing == 8
+        assert raised.value.canonical_total == 10
+        assert "does not belong to this graph" in str(raised.value)
+
+    def test_refusal_fires_on_a_dry_run_too(self, curated_dir: Path) -> None:
+        # The operator's mandatory dry run is precisely where a wrong parquet should
+        # surface — refusing only on the real run would let the dry run bless it.
+        stale = _canonical_parquet(curated_dir, _stale_generation_ids())
+        client = StatefulFakeNeo4j([*_live_generation_ids(), *_ORPHANS])
+
+        with pytest.raises(ForeignCanonicalSetError):
+            prune_narrators(client, stale, dry_run=True)
+
+        assert client.deleted_batches == []
+
+    def test_the_guard_is_catchable_as_the_cli_catches_it(self, curated_dir: Path) -> None:
+        # _cmd_prune_narrators catches UnusableCanonicalSetError and exits
+        # EMPTY_CANONICAL_SET. If this door were not under that supertype it would escape
+        # to CPython's handler and exit 1 (LOAD_FAILED) — "the load failed", for a command
+        # that deleted nothing and is not a load.
+        stale = _canonical_parquet(curated_dir, _stale_generation_ids())
+        client = StatefulFakeNeo4j(_live_generation_ids())
+
+        with pytest.raises(UnusableCanonicalSetError):
+            prune_narrators(client, stale)
+
+
+class TestMissingIsReportedNotAsserted:
+    """The dual. A guard that refuses every non-zero ``missing`` trades one failure for
+    another: :attr:`REFUSED_ROWS`, :attr:`STOPPED_AT_LIMIT` and a nodes-only load each
+    leave canonical ids legitimately unloaded, and a hard ``missing == 0`` in the CLI
+    would refuse a valid prune after any of them. The CLI reports; deploy#557 owns the
+    refuse-or-proceed policy.
+    """
+
+    def test_correct_keep_set_complete_load_reports_zero(self, curated_dir: Path) -> None:
+        # The da#352 property: for the parquet the graph was loaded from, every canonical
+        # id is present in the graph (129,234 = 71,241 edged + 57,993 zero-degree).
+        correct = _canonical_parquet(curated_dir, _live_generation_ids())
+        client = StatefulFakeNeo4j([*_live_generation_ids(), *_ORPHANS])
+
+        result = prune_narrators(client, correct)
+
+        assert result.missing == 0
+        assert result.deleted == 2  # exactly the orphans
+        assert set(client.narrators) == set(_live_generation_ids())
+
+    def test_correct_keep_set_partial_load_is_reported_and_proceeds(
+        self, curated_dir: Path
+    ) -> None:
+        """A legitimately partial load must still be PRUNABLE, and its ``missing`` visible.
+
+        The graph was loaded from this very parquet, but two canonical narrators never
+        made it in (REFUSED_ROWS). ``missing`` is 2 — non-zero, correctly so — and the
+        prune proceeds: it is well under any plausible magnitude, and the CLI is not the
+        layer that decides whether a partial load may be pruned.
+        """
+        correct = _canonical_parquet(curated_dir, _live_generation_ids())
+        live = _live_generation_ids()
+        loaded = live[:8]  # two canonical narrators refused at load time
+        client = StatefulFakeNeo4j([*loaded, *_ORPHANS])
+
+        result = prune_narrators(client, correct)  # default ceiling: NO refusal
+
+        assert result.missing == 2  # reported…
+        assert result.canonical_ids_seen == 10
+        assert result.deleted == 2  # …and exactly the orphans went
+        assert result.orphans == 0
+        assert set(client.narrators) == set(loaded), "a partial load's narrators were pruned"
+        assert "missing=2" in summary_line(result)
+
+    def test_the_two_classes_are_separated_by_missing(
+        self, curated_dir: Path, tmp_path: Path
+    ) -> None:
+        """The separation, side by side — a number for one class alone proves nothing.
+
+        Same graph, same command, two keep-sets. The four keys deploy#557 already reads
+        cannot tell them apart on the thing that matters; ``missing`` can.
+        """
+        good_dir = tmp_path / "good"
+        good_dir.mkdir()
+        bad_dir = tmp_path / "bad"
+        bad_dir.mkdir()
+        correct = _canonical_parquet(good_dir, _live_generation_ids())
+        stale = _canonical_parquet(bad_dir, _stale_generation_ids())
+        graph = [*_live_generation_ids(), *_ORPHANS]
+
+        good = prune_narrators(StatefulFakeNeo4j(list(graph)), correct, dry_run=True)
+        bad = prune_narrators(
+            StatefulFakeNeo4j(list(graph)), stale, dry_run=True, max_missing_fraction=1.0
+        )
+
+        # Both keep-sets are the same SIZE and both "work". The correct one would delete
+        # the 2 orphans; the stale one would delete 10 nodes — but a workflow cannot know
+        # 10 is wrong without knowing the right answer, which is the whole problem.
+        assert good.canonical_ids_seen == bad.canonical_ids_seen == 10
+        assert good.graph_total == bad.graph_total == 12
+
+        # `missing` separates them cleanly, and it is the ONLY field that does.
+        assert good.missing == 0
+        assert bad.missing == 8
+
+
+class TestMissingCeiling:
+    def test_at_the_ceiling_is_allowed_above_it_refuses(self, curated_dir: Path) -> None:
+        # Strictly-greater: the ceiling is the last ACCEPTABLE value, not the first
+        # rejected one. Pinned because "> vs >=" is exactly the kind of thing a later
+        # refactor flips without noticing.
+        correct = _canonical_parquet(curated_dir, _live_generation_ids())
+        client = StatefulFakeNeo4j(_live_generation_ids()[:5])  # missing = 5 of 10 = 0.5
+
+        at_ceiling = prune_narrators(client, correct, dry_run=True, max_missing_fraction=0.5)
+        assert at_ceiling.missing == 5
+
+        with pytest.raises(ForeignCanonicalSetError):
+            prune_narrators(client, correct, dry_run=True, max_missing_fraction=0.49)
+
+    def test_fraction_of_one_disables_the_ceiling(self, curated_dir: Path) -> None:
+        # The documented escape hatch: even a keep-set with ZERO overlap is allowed
+        # through at 1.0, because the operator asked for it explicitly.
+        stale = _canonical_parquet(curated_dir, _stale_generation_ids())
+        client = StatefulFakeNeo4j([])  # empty graph: missing == canonical
+
+        result = prune_narrators(client, stale, dry_run=True, max_missing_fraction=1.0)
+
+        assert result.missing == 10
+        assert result.graph_total == 0
+
+    def test_empty_graph_is_refused_by_default(self, curated_dir: Path) -> None:
+        # A graph holding none of the keep-set's ids is the most-wrong case there is, and
+        # "the graph is empty" is the correct diagnosis to hand the operator — not a
+        # cheerful no-op that reports zero orphans and zero deletions.
+        correct = _canonical_parquet(curated_dir, _live_generation_ids())
+        client = StatefulFakeNeo4j([])
+
+        with pytest.raises(ForeignCanonicalSetError, match="100.0%"):
+            prune_narrators(client, correct)
+
+    @pytest.mark.parametrize("bad", [-0.1, 1.1])
+    def test_out_of_range_fraction_raises(self, curated_dir: Path, bad: float) -> None:
+        correct = _canonical_parquet(curated_dir, _live_generation_ids())
+        client = StatefulFakeNeo4j(_live_generation_ids())
+        with pytest.raises(ValueError, match=r"\[0.0, 1.0\]"):
+            prune_narrators(client, correct, max_missing_fraction=bad)
 
 
 class TestNoWriteIntoCanonicalDir:
@@ -312,6 +733,7 @@ class TestCliEmitsSummaryLine:
             deleted=3,
             dry_run=dry_run,
             orphans_identified=3,
+            missing=0,
             sample=["nar:orphan"],
         )
 
@@ -326,10 +748,51 @@ class TestCliEmitsSummaryLine:
         monkeypatch.setattr("src.utils.neo4j_client.Neo4jClient", lambda *_a, **_k: _DummyClient())
         monkeypatch.setattr(
             "src.graph.prune.prune_narrators",
-            lambda _client, _p, *, dry_run=False: canned,
+            lambda _client, _p, *, dry_run=False, max_missing_fraction=0.5: canned,
         )
 
         cli._cmd_prune_narrators(canonical=str(path), dry_run=dry_run)
 
         out = capsys.readouterr().out
-        assert "PRUNE_NARRATORS_SUMMARY canonical=1 graph_total=1 orphans=0 deleted=3" in out
+        assert (
+            "PRUNE_NARRATORS_SUMMARY canonical=1 graph_total=1 orphans=0 deleted=3 missing=0" in out
+        )
+
+
+class TestCliRefusesStaleKeepSet:
+    """End to end through the CLI: a stale --canonical exits 12 with the graph untouched.
+
+    The unit tests above prove `prune_narrators` raises. This proves the CLI *catches* the
+    new door — it catches the supertype, so a subclass that escaped would exit 1
+    (LOAD_FAILED, "the load failed") for a command that is not a load and deleted nothing.
+    """
+
+    def test_stale_canonical_exits_empty_canonical_set(
+        self,
+        curated_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import src.cli as cli
+        from src.exit_codes import ExitCode
+
+        stale = _canonical_parquet(curated_dir, _stale_generation_ids())
+        client = StatefulFakeNeo4j([*_live_generation_ids(), *_ORPHANS])
+
+        class _DummyClient:
+            def __enter__(self) -> StatefulFakeNeo4j:
+                return client
+
+            def __exit__(self, *_a: object) -> None:
+                return None
+
+        monkeypatch.setattr(cli, "_check_neo4j", lambda: None)
+        monkeypatch.setattr("src.utils.neo4j_client.Neo4jClient", lambda *_a, **_k: _DummyClient())
+
+        with pytest.raises(SystemExit) as exit_info:
+            cli._cmd_prune_narrators(canonical=str(stale))
+
+        assert exit_info.value.code == ExitCode.EMPTY_CANONICAL_SET
+        assert client.deleted_batches == [], "the CLI deleted rows before refusing"
+        err = capsys.readouterr().err
+        assert "does not belong to this graph" in err
