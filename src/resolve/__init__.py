@@ -565,9 +565,11 @@ def run_all(
             logger.info("resolve_step", step="cluster", status="running")
             canonical_path = output_dir / "narrators_canonical.parquet"
             mentions_path = output_dir / "narrator_mentions_resolved.parquet"
+            merge_log_path = output_dir / "merge_log.parquet"
             cluster_metrics = fuzzy_cluster.cluster_canonical_narrators(
                 canonical_path,
                 mentions_path=mentions_path if mentions_path.exists() else None,
+                merge_log_path=merge_log_path if merge_log_path.exists() else None,
                 staging_dir=staging_dir,
                 resume=resume,
                 stop_after=stop_after,

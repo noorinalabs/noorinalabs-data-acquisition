@@ -23,6 +23,7 @@ from rapidfuzz import fuzz
 from src.models.enums import DatePrecision
 from src.parse.identity import make_canonical_id
 from src.resolve import fuzzy_cluster as fc
+from src.resolve.disambiguate import _MERGE_LOG_SCHEMA
 from src.resolve.fuzzy_cluster import (
     _match_keys,
     cluster_assignment,
@@ -273,6 +274,75 @@ def test_mentions_remapped_to_survivor(tmp_path: Path) -> None:
     got = {r["mention_id"]: r["canonical_narrator_id"] for r in pq.read_table(mentions).to_pylist()}
     assert got["m1"] == survivor_id  # absorbed → survivor
     assert got["m2"] == survivor_id  # already on survivor — untouched
+
+
+def _build_cluster_fixture(out_dir: Path) -> tuple[Path, Path, str, str]:
+    """A two-record canonical set (``var`` absorbed into ``rep``) plus a merge_log
+    with one row on the absorbed id and one on the survivor. Returns the canonical
+    path, merge_log path, absorbed id and survivor id."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rep = _rec("محمد بن اسماعيل البخاري", source_corpora=["itqan"], mention_count=10)
+    var = _rec("محمد بن اسماعيل", source_corpora=["sanadset"], mention_count=2)
+    survivor_id = make_canonical_id(normalize_arabic("محمد بن اسماعيل البخاري"))
+    absorbed_id = var["canonical_id"]
+
+    canonical = out_dir / "narrators_canonical.parquet"
+    _write_canonical(canonical, [rep, var])
+
+    merge_log = out_dir / "merge_log.parquet"
+    log_rows = {
+        "canonical_id": [absorbed_id, survivor_id],
+        "mention_id": ["m1", "m2"],
+        "mention_text": ["محمد بن اسماعيل", "محمد بن اسماعيل البخاري"],
+        "merge_stage": ["fuzzy", "exact"],
+        "score": [0.95, 1.0],
+    }
+    pq.write_table(pa.table(log_rows, schema=_MERGE_LOG_SCHEMA), merge_log)
+    return canonical, merge_log, absorbed_id, survivor_id
+
+
+def _merge_log_orphans(canonical: Path, merge_log: Path) -> list[str]:
+    live = set(pq.read_table(canonical).column("canonical_id").to_pylist())
+    return [c for c in pq.read_table(merge_log).column("canonical_id").to_pylist() if c not in live]
+
+
+def test_merge_log_orphaned_without_remap(tmp_path: Path) -> None:
+    """Control (da#313 red witness): clustering that rewrites the canonical set but
+    is NOT told about the merge_log leaves the absorbed id dangling in the log."""
+    canonical, merge_log, absorbed_id, _survivor = _build_cluster_fixture(tmp_path / "curated")
+
+    cluster_canonical_narrators(canonical)  # merge_log_path omitted
+
+    orphans = _merge_log_orphans(canonical, merge_log)
+    assert orphans == [absorbed_id]  # the absorbed id no longer exists as a canonical node
+
+
+def test_merge_log_remapped_to_survivor(tmp_path: Path) -> None:
+    """da#313: passing ``merge_log_path`` routes every absorbed id to its cluster
+    survivor, so no merge_log row references a dissolved node — and no row is
+    dropped (identity routing, not a silent filter)."""
+    canonical, merge_log, absorbed_id, survivor_id = _build_cluster_fixture(tmp_path / "curated")
+
+    metrics = cluster_canonical_narrators(canonical, merge_log_path=merge_log)
+    assert metrics.merge_log_remapped == 1
+
+    rows = pq.read_table(merge_log).to_pylist()
+    assert len(rows) == 2  # both rows preserved — nothing filtered
+    by_mention = {r["mention_id"]: r["canonical_id"] for r in rows}
+    assert by_mention["m1"] == survivor_id  # absorbed → survivor
+    assert by_mention["m2"] == survivor_id  # already on survivor — untouched
+    assert _merge_log_orphans(canonical, merge_log) == []
+    assert absorbed_id not in by_mention.values()
+
+
+def test_merge_log_remap_is_idempotent(tmp_path: Path) -> None:
+    """A second clustering pass over the already-collapsed set remaps nothing."""
+    canonical, merge_log, _absorbed, _survivor = _build_cluster_fixture(tmp_path / "curated")
+
+    cluster_canonical_narrators(canonical, merge_log_path=merge_log)
+    second = cluster_canonical_narrators(canonical, merge_log_path=merge_log)
+    assert second.merge_log_remapped == 0
+    assert _merge_log_orphans(canonical, merge_log) == []
 
 
 def test_empty_and_missing_inputs_are_noops(tmp_path: Path) -> None:
