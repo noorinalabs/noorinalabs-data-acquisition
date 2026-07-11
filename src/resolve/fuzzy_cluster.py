@@ -275,6 +275,9 @@ class ClusterMetrics:
     multi_member_clusters: int
     cross_source_clusters: int
     mentions_remapped: int = 0
+    # da#313: merge_log rows whose absorbed canonical_id was routed to its cluster
+    # survivor, keeping the audit log join-consistent with narrators_canonical.
+    merge_log_remapped: int = 0
     # da#376: records that produced no blocking key and were therefore never offered to
     # `_can_merge`. Reported so "did not merge" can be told apart from "was never scored".
     unblockable_records: int = 0
@@ -286,11 +289,16 @@ class ClusterMetrics:
             if self.unblockable_records
             else ""
         )
+        merge_log = (
+            f", {self.merge_log_remapped} merge_log rows remapped"
+            if self.merge_log_remapped
+            else ""
+        )
         return (
             f"fuzzy-cluster: {self.input_records} → {self.output_records} canonical "
             f"({self.merged_records} merged into {self.multi_member_clusters} clusters, "
             f"{self.cross_source_clusters} cross-source); "
-            f"{self.mentions_remapped} mentions remapped{unblockable}"
+            f"{self.mentions_remapped} mentions remapped{merge_log}{unblockable}"
         )
 
 
@@ -1210,10 +1218,62 @@ def _remap_mention_canonical_ids(mentions_path: Path, remap: dict[str, str]) -> 
     return remapped
 
 
+def _remap_merge_log_canonical_ids(merge_log_path: Path, remap: dict[str, str]) -> int:
+    """Rewrite absorbed canonical ids on ``merge_log.parquet`` to the cluster survivor.
+
+    ``disambiguate`` records one merge_log row per bio-matched mention keyed on the
+    ``canonical_id`` it minted (da#356). When ``fuzzy_cluster`` later collapses that
+    id into a survivor it rewrites ``narrators_canonical.parquet`` (dropping the
+    absorbed row) and remaps the mentions, but left the merge_log pointing at the
+    dissolved ``nar:`` node — an orphaned reference (da#313). This routes each
+    absorbed ``canonical_id`` to the SAME survivor the mention now belongs to, so
+    the audit log stays join-consistent with the canonical set. It is identity
+    routing, not a filter: no row is dropped. Streams row-group by row-group,
+    preserving the on-disk schema; idempotent and bounded-memory. Returns the count
+    of rows remapped.
+    """
+    if not remap or not merge_log_path.exists():
+        return 0
+
+    pf = pq.ParquetFile(merge_log_path)
+    schema = pf.schema_arrow
+    id_idx = schema.get_field_index("canonical_id")
+    if id_idx < 0:
+        return 0
+    tmp_path = merge_log_path.with_name(merge_log_path.name + ".cluster.tmp")
+    writer = pq.ParquetWriter(tmp_path, schema, compression="snappy")
+    remapped = 0
+    try:
+        for rg_idx in range(pf.metadata.num_row_groups):
+            table = pf.read_row_group(rg_idx).cast(schema)
+            ids = table.column("canonical_id").to_pylist()
+            new_ids: list[str | None] = []
+            for cid in ids:
+                target = remap.get(cid) if cid is not None else None
+                if target is not None and target != cid:
+                    new_ids.append(target)
+                    remapped += 1
+                else:
+                    new_ids.append(cid)
+            # Preserve the on-disk field (canonical_id is non-nullable) — a bare
+            # column name would relax it to nullable and reject the write.
+            table = table.set_column(
+                id_idx, schema.field(id_idx), pa.array(new_ids, type=pa.string())
+            )
+            writer.write_table(table)
+    finally:
+        writer.close()
+
+    tmp_path.replace(merge_log_path)
+    logger.info("cluster_merge_log_remapped", path=str(merge_log_path), remapped=remapped)
+    return remapped
+
+
 def cluster_canonical_narrators(
     canonical_path: Path,
     *,
     mentions_path: Path | None = None,
+    merge_log_path: Path | None = None,
     threshold: float = _CLUSTER_RATIO_THRESHOLD,
     max_block_size: int | None = _DEFAULT_MAX_BLOCK_SIZE,
     staging_dir: Path | None = None,
@@ -1306,6 +1366,12 @@ def cluster_canonical_narrators(
     remapped = (
         _remap_mention_canonical_ids(mentions_path, remap) if mentions_path is not None else 0
     )
+    # da#313: the same absorbed→survivor remap MUST also be applied to the audit
+    # log, or merge_log rows keep referencing the dissolved nar: node the mentions
+    # were just moved off of. Symmetric with the mentions remap above.
+    merge_log_remapped = (
+        _remap_merge_log_canonical_ids(merge_log_path, remap) if merge_log_path is not None else 0
+    )
 
     metrics = ClusterMetrics(
         input_records=len(records),
@@ -1314,6 +1380,7 @@ def cluster_canonical_narrators(
         multi_member_clusters=multi_member,
         cross_source_clusters=cross_source,
         mentions_remapped=remapped,
+        merge_log_remapped=merge_log_remapped,
         unblockable_records=count_unblockable(records),
     )
     logger.info("cluster_canonical_complete", summary=metrics.summary())
