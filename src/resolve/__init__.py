@@ -795,7 +795,16 @@ def run_all(
         composed = _compose_parallel_links(
             staging_dir, semantic_links, deterministic_links, provenance
         )
-        if composed is not None:
+        # Do NOT let a successful compose overwrite a StageErrored: on the common
+        # path (dedup produced links, ``parallels.run`` raised) ``composed`` is
+        # non-None because the semantic side alone composes, so an unconditional
+        # ``outcomes["parallels"] = StageRan(...)`` would clobber the StageErrored
+        # recorded by the parallels step — recreating the exact da#360 swallow one
+        # block down, letting the ``errored`` scan below find nothing and run_all
+        # exit 0. The composed artifact is still written (its provenance already
+        # records ``deterministic=ERRORED``); we just refuse to relabel the stage
+        # as succeeded (Nikolaos Papadopoulos, PR#404 review).
+        if composed is not None and not isinstance(outcomes.get("parallels"), StageErrored):
             outcomes["parallels"] = StageRan("parallels", [composed])
 
     # Collect metrics from output files.

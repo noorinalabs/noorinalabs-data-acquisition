@@ -138,6 +138,45 @@ class TestRaisedStageExitsNonZero:
         # errored (disambiguate was skipped for want of mentions, not a failure).
         assert [e.step for e in excinfo.value.errored] == ["ner"]
 
+    def test_parallels_raise_survives_compose_overwrite(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raised ``parallels`` must not be relabelled StageRan by the compose step.
+
+        RED on the pre-guard head: on the COMMON path — ``dedup`` produced links,
+        ``parallels.run`` raises — the compose block sees a non-None ``composed``
+        (the semantic side alone composes) and unconditionally did
+        ``outcomes["parallels"] = StageRan(...)``, clobbering the StageErrored the
+        parallels step recorded. The ``errored`` scan then found nothing and
+        ``run_all`` returned normally (exit 0) — the exact da#360 swallow, one
+        block down. The guard keeps the StageErrored, so ``run_all`` still raises.
+        (Nikolaos Papadopoulos, PR#404 review.)
+        """
+        staging, output = _staging_with_parquet(tmp_path)
+        _install_benign_spies(monkeypatch)
+
+        # dedup succeeds AND writes a real parallel_links.parquet, so semantic_links
+        # is non-None and _compose_parallel_links returns a path (the trigger).
+        def _dedup_writes_links(_staging: Path, _out: Path, **_k: Any) -> list[Path]:
+            return [
+                write_parallel_links(
+                    PARALLEL_LINKS_SCHEMA.empty_table(),
+                    _staging / "parallel_links.parquet",
+                    DetectorProvenance(DetectorStatus.RAN, 0, DetectorStatus.NOT_RUN, 0),
+                )
+            ]
+
+        def _parallels_boom(*_a: Any, **_k: Any) -> Any:
+            raise ValueError("parallels blew up after dedup produced links")
+
+        monkeypatch.setattr(dedup, "run", _dedup_writes_links)
+        monkeypatch.setattr(parallels, "run", _parallels_boom)
+
+        with pytest.raises(ResolveStageError) as excinfo:
+            run_all(tmp_path / "raw", staging, output)
+
+        assert [e.step for e in excinfo.value.errored] == ["parallels"]
+
     def test_clean_run_returns_discriminated_outcomes(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
