@@ -1151,3 +1151,181 @@ class TestMatnSentenceVerseGate:
     )
     def test_single_particle_and_conjunction_names_preserved(self, name: str) -> None:
         assert clean_narrator_name(normalize_arabic(name)) is not None
+
+
+class TestRlmShieldedEdgePunct:
+    """da#316 — U+200F (RLM) interleaved with trailing punctuation on the RAW field.
+
+    MECHANISM (verified at HEAD; the issue's stated one is STALE). The issue blamed
+    ``normalize_arabic`` for not stripping U+200F and ``clean_narrator_name``'s
+    ``token.strip(_EDGE_PUNCT)`` for being shielded by it. Both are FALSE at HEAD:
+    ``normalize_arabic`` HAS stripped bidi/zero-width marks since da#271
+    (``strip_format_marks``), so the NORMALIZED path is already clean — see
+    :meth:`test_normalized_path_was_never_the_defect`.
+
+    The live defect is in the **display** path. ``strip_markup`` /
+    ``clean_narrator_name_display`` strip ``_EDGE_PUNCT`` from the *voweled* token —
+    a string ``normalize_arabic`` deliberately never touches (it must keep the
+    diacritics) — and ``_EDGE_PUNCT`` carried no format marks, so a trailing RLM
+    standing BETWEEN the marks halted the peel before ``.`` and ``،`` were reached.
+    ``name_ar`` is the load-bearing field the graph loader keys the node ``name`` on,
+    so the cruft rode all the way into the graph.
+
+    Fixtures are verbatim rows from ``data/curated.run5-scrubbed/narrators_canonical
+    .parquet`` (``name_ar``), U+200F written as an explicit escape so the placement
+    cannot be mangled by an editor.
+    """
+
+    # Real corpus rows: ism + "،" + RLM + "." + RLM.
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("قتاده،‏.‏", "قتاده"),  # mc-6
+            ("يونس،‏.‏", "يونس"),  # mc-5
+            ("الزهري،‏.‏", "الزهري"),  # mc-2
+        ],
+    )
+    def test_rlm_shielded_punct_peeled_from_display(self, raw: str, expected: str) -> None:
+        assert clean_narrator_name_display(raw) == expected
+
+    def test_strip_markup_peels_rlm_shielded_punct(self) -> None:
+        assert strip_markup("قتاده،‏.‏") == "قتاده"
+
+    # The dangling-waw variant: the source stores a co-narrator join whose second
+    # member was never captured ("مالك،‏.‏ و" — mc-4).
+    def test_dangling_waw_after_rlm_punct_is_popped(self) -> None:
+        assert clean_narrator_name_display("مالك،‏.‏ و") == "مالك"
+
+    # Format marks appear INTERIOR to a span too, not only at token edges, so an
+    # edge-strip alone cannot clear them — strip_markup removes them wholesale.
+    def test_interior_format_marks_removed(self) -> None:
+        assert "‏" not in strip_markup("جابر بن عبد الله في قوله تعالى‏:‏")
+
+    # --- The issue's STATED mechanism, pinned as false: the normalized path was
+    # already correct at HEAD (da#271). This test passes BEFORE the fix too; it
+    # exists so a future reader does not "re-fix" normalize_arabic/_EDGE_PUNCT in
+    # the normalized path and think that closed da#316. ---
+    def test_normalized_path_was_never_the_defect(self) -> None:
+        assert clean_narrator_name(normalize_arabic("قتاده،‏.‏")) == "قتاده"
+
+    # --- PRECISION: the cleaner must be a FIXED POINT on the recovered display
+    # name (no cruft left to re-peel on a second pass). ---
+    @pytest.mark.parametrize("raw", ["قتاده،‏.‏", "مالك،‏.‏ و"])
+    def test_display_clean_is_idempotent(self, raw: str) -> None:
+        once = clean_narrator_name_display(raw)
+        assert once is not None
+        assert clean_narrator_name_display(once) == once
+
+    # --- PRECISION: a clean voweled name keeps its diacritics (strip_format_marks
+    # removes bidi/zero-width controls ONLY — it must not denature the display). ---
+    def test_diacritics_preserved(self) -> None:
+        assert clean_narrator_name_display("أَبُو هُرَيْرَة") == "أَبُو هُرَيْرَة"
+
+
+class TestBiPronounBackreference:
+    """da#315 — the bi+pronoun isnad back-reference (``وبه`` / ``به``).
+
+    MECHANISM (verified at HEAD; the issue is HALF STALE). The issue reported two
+    classes — ``ما`` (30 rows / 195 mentions) and ``وبه`` (2 rows / 18 mentions) —
+    and proposed adding ``ما`` to the particle drop vocab. **``ما`` was already fixed**
+    by da#317's all-function-word rule (2c), which landed after the issue was filed;
+    only the ``وبه`` class is live. Measured at HEAD the surviving class is 13 rows /
+    18 mentions, all ``وبه``/``به``.
+
+    ``_is_isnad_residue_token`` already de-waws (``وعنه`` → ``عنه``), but ``وبه``
+    de-waws to ``به``, which was not in ``_ISNAD_FORMULA_FRAGMENTS`` — so the
+    all-residue floor (rule 5b) never fired on it.
+    """
+
+    # Verbatim corpus rows (name_ar == 'وبه', 13 rows on the run-5 scrubbed set).
+    @pytest.mark.parametrize("residue", ["وبه", "به", "فيه", "منه", "نحوه", "مثله"])
+    def test_bi_pronoun_backreference_dropped(self, residue: str) -> None:
+        assert clean_narrator_name(normalize_arabic(residue)) is None
+
+    # --- The issue's OTHER half, pinned as already-fixed: ``ما`` drops at HEAD via
+    # da#317 rule (2c). Green before the fix; recorded so the stale half is not
+    # "re-fixed" and so a regression in da#317 surfaces here. ---
+    def test_ma_particle_already_dropped_by_da317(self) -> None:
+        assert clean_narrator_name(normalize_arabic("ما")) is None
+
+    # --- PRECISION DUAL: the de-waw fold must not eat a real waw-initial name, and
+    # rule 5b only drops when EVERY token is residue, so a real multi-token name
+    # containing one of these as a component survives. ---
+    @pytest.mark.parametrize(
+        "name",
+        ["وهب", "وكيع", "وهب بن منبه", "وكيع بن الجراح", "به بن سالم"],
+    )
+    def test_real_names_not_eaten_by_residue_floor(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) is not None
+
+
+class TestMatnProvenanceAndOath:
+    """da#314 — narration-provenance tails (``… من رسول الله``) and oath formulae.
+
+    MECHANISM (verified at HEAD). Both existing Prophet-reference detectors miss this
+    class: ``_is_prophet_reference`` (step 6b) is LEADER-anchored, but here the title
+    sits in the TAIL behind a preposition; and signal (2p) of ``_is_matn_sentence`` is
+    gated on ``was_truncated``, but these spans carry no isnad/matn verb, so nothing
+    ever truncates and they are never re-scrutinized.
+
+    The discriminator against a REAL name+title is the preposition: ``محمد رسول الله``
+    (Muhammad, the Messenger of Allah — a real narrator, the muhaddithat fixture)
+    carries ZERO matn particles, while a provenance fragment always carries the very
+    preposition that makes it provenance (``من`` / ``كمن`` / a demonstrative).
+
+    The oath formula (``والذي نفس محمد بيده``) escaped separately: ``الذي`` IS a
+    boundary token, but the corpus stacks proclitics onto it (``والذي``, ``فوالذي``,
+    ``فبالذي``) and the boundary check matched only the bare form.
+
+    Fixtures are verbatim ``name_ar`` rows from the run-5 scrubbed canonical set.
+    """
+
+    @pytest.mark.parametrize(
+        "provenance",
+        [
+            "من رسول الله",  # mc-38
+            "ه من رسول الله",  # mc-55
+            "هذا من رسول الله",  # mc-18
+            "كمن زار رسول الله",  # mc-8
+            "ه من النبي",  # mc-7
+        ],
+    )
+    def test_prophet_provenance_dropped(self, provenance: str) -> None:
+        assert clean_narrator_name(normalize_arabic(provenance)) is None
+
+    @pytest.mark.parametrize(
+        "oath",
+        [
+            "والذي نفس محمد بيده",  # mc-7
+            "فوالذي نفس محمد بيده اني لارجو",  # mc-2, stacked ف+و proclitics
+            "فبالذي ارسلك الله امرك بهذا",  # mc-11, stacked ف+ب proclitics
+            "فانشدك بالله هل تعلم",  # mc-3, adjuration verb
+        ],
+    )
+    def test_oath_formula_dropped(self, oath: str) -> None:
+        assert clean_narrator_name(normalize_arabic(oath)) is None
+
+    # --- PRECISION DUAL #1 (load-bearing): the Prophet's own name+title is a REAL
+    # narrator (muhaddithat `variousnarrators.csv` row 1) and carries zero particles,
+    # so the provenance rule must NOT fire on it. ---
+    def test_prophet_own_name_and_title_preserved(self) -> None:
+        assert clean_narrator_name(normalize_arabic("محمد رسول الله")) == normalize_arabic(
+            "محمد رسول الله"
+        )
+
+    # --- PRECISION DUAL #2: the proclitic fold is restricted to the definite relative
+    # pronouns precisely because folding it across the whole boundary set false-drops
+    # real name material — "وان بن سالم" (mc-251, a بن lineage) would go via وان → ان.
+    # This test is the guard on that restriction. ---
+    @pytest.mark.parametrize("name", ["وان بن سالم", "فان", "فاذا"])
+    def test_short_boundary_words_not_proclitic_folded(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) is not None
+
+    # --- PRECISION DUAL #3: a real nasab/kunya carrying a Prophet-adjacent component
+    # or a single particle is untouched. ---
+    @pytest.mark.parametrize(
+        "name",
+        ["عاءشه بنت سعد", "عبد الله بن عبد الله القرشي الاموي", "ابو هريره", "زكريا"],
+    )
+    def test_real_lineages_preserved(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) is not None
