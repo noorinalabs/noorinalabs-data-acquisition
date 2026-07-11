@@ -156,6 +156,7 @@ __all__ = [
     "clean_narrator_name_display",
     "asserted_name_tokens",
     "cleaner_removed_content",
+    "is_mubham_relational",
     "split_compound_narrators",
     "strip_markup",
 ]
@@ -326,6 +327,28 @@ _MUBHAM_RELATIONAL = frozenset(
         "زوجته",  # his wife          "زوجها" his/her spouse
         "زوجها",
         "عنه",  # "from him" — transmission particle, never a name
+        # da#391: the 1st-person-possessive (``-ي``) and vocative (``-اه``) kinship
+        # forms. The set above is exhaustively 3rd-person ("his/her …") plus the bare
+        # 1st-masc ``ابي``; a mention/alias phrased in the narrator's OWN voice
+        # ("امتاه" = "O mother!", "عمتي" = "my aunt", "جدي" = "my grandfather") is the
+        # same unnamed-relation reference and equally never a proper ism. Closed,
+        # kinship-only — no name adjudication. Attested as surviving aliases on the
+        # curated set (``عمتي``/``امتاه`` on the ʿĀʾisha chimera; ``جدي``×91, ``عمي``×32).
+        "امي",  # my mother
+        "ابني",  # my son            "ابنتي"/"بنتي" my daughter
+        "ابنتي",
+        "بنتي",
+        "جدي",  # my grandfather     "جدتي" my grandmother
+        "جدتي",
+        "اخي",  # my brother         "اختي" my sister
+        "اختي",
+        "عمي",  # my paternal uncle  "عمتي" my paternal aunt
+        "عمتي",
+        "خالي",  # my maternal uncle "خالتي" my maternal aunt
+        "خالتي",
+        "امتاه",  # O mother! (vocative) "اماه" variant
+        "اماه",
+        "ابتاه",  # O father! (vocative)
     }
 )
 
@@ -1367,6 +1390,27 @@ def _tokenize_and_strip_affixes(text: str) -> tuple[list[str], list[str], bool]:
             tokens.pop(0)
             raw_tokens.pop(0)
     return raw_tokens, tokens, stripped_number
+
+
+def is_mubham_relational(name_normalized: str | None) -> bool:
+    """True when the WHOLE name is a single bare relational-pronoun (mubham) token.
+
+    "his father", "my aunt", "O mother!" — an unnamed-relation reference, never a
+    person. This is exactly the drop :func:`clean_narrator_name` step 6 already applies
+    at NER/bio time; it is exposed so the resolve **alias-union** sites can apply the
+    SAME drop to the ``aliases`` ``list<string>`` — the field ``clean_narrator_name``
+    never reaches, and the da#391 blind spot (a relational deixis surviving as an alias
+    of a real narrator, so any alias lookup resolves the wrong person).
+
+    Normalizes internally (``normalize_arabic`` is idempotent) so a raw or already-
+    normalized alias both resolve. The single-token guard is the precision boundary:
+    a real multi-token kunya (``"ابي اسحاق"`` = Abū Isḥāq) returns ``False``, and the
+    lexicon is kinship-only, so no real single-token ism is ever matched.
+    """
+    if not name_normalized:
+        return False
+    tokens = normalize_arabic(name_normalized).split()
+    return len(tokens) == 1 and tokens[0] in _MUBHAM_RELATIONAL
 
 
 def clean_narrator_name(name_normalized: str | None) -> str | None:

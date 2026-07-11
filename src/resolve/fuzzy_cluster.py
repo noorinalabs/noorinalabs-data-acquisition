@@ -79,6 +79,7 @@ from rapidfuzz import fuzz, process
 from src.models.enums import DatePrecision
 from src.parse.base import safe_str, write_parquet
 from src.parse.identity import make_canonical_id
+from src.parse.name_quality import is_mubham_relational
 from src.resolve._checkpoint import (
     CheckpointController,
     checkpoint_dir,
@@ -1146,12 +1147,20 @@ def _merge_cluster(members: list[dict[str, Any]]) -> dict[str, Any]:
                 merged[field_name] = rec.get(field_name)
 
         # A non-representative spelling becomes an alias; carry existing aliases.
+        # da#391: skip a bare relational-pronoun surface ("خالته"/"عمتي"/"امتاه") —
+        # the aliases list<string> is the blind spot clean_narrator_name never reaches,
+        # so the deixis would otherwise survive as an alias of a real narrator.
         rec_norm = safe_str(rec.get("name_ar_normalized"))
-        if rec_norm and rec_norm != rep_norm and rec_norm not in aliases:
+        if (
+            rec_norm
+            and rec_norm != rep_norm
+            and rec_norm not in aliases
+            and not is_mubham_relational(rec_norm)
+        ):
             aliases.append(rec_norm)
         for a in rec.get("aliases") or []:
             av = safe_str(a)
-            if av and av != rep_norm and av not in aliases:
+            if av and av != rep_norm and av not in aliases and not is_mubham_relational(av):
                 aliases.append(av)
 
     merged["aliases"] = aliases

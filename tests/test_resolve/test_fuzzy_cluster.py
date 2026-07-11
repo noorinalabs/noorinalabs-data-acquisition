@@ -218,6 +218,29 @@ def test_merged_record_routes_through_make_canonical_id(tmp_path: Path) -> None:
     assert merged["external_id"] == "320"
 
 
+def test_merge_cluster_drops_bare_relational_alias() -> None:
+    """da#391: the cluster alias-union never carries a bare relational-pronoun.
+
+    A member's own spelling and its existing aliases both become aliases of the
+    survivor — the ``list<string>`` blind spot ``clean_narrator_name`` never reaches.
+    A deixis token ("خالته") riding in a member's alias list, or as a member's whole
+    name, must not propagate into the merged aliases; a real variant spelling still
+    does. RED on pre-da#391 code: ``خالته`` is appended unconditionally.
+    """
+    rep = _rec("محمد بن اسماعيل البخاري", mention_count=10)
+    var = _rec(
+        "محمد بن اسماعيل",
+        mention_count=2,
+        aliases=[normalize_arabic("خالته"), normalize_arabic("محمد البخاري")],
+    )
+
+    merged = fc._merge_cluster([rep, var])
+
+    assert normalize_arabic("محمد بن اسماعيل") in merged["aliases"]  # real variant kept
+    assert normalize_arabic("محمد البخاري") in merged["aliases"]  # real alias kept
+    assert normalize_arabic("خالته") not in merged["aliases"]  # deixis dropped
+
+
 def test_clustering_is_idempotent(tmp_path: Path) -> None:
     """Re-running on an already-clustered table changes nothing."""
     a = _rec("احمد بن حنبل الشيباني", source_corpora=["itqan"], death_year_ah=241, mention_count=5)

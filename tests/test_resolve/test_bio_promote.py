@@ -1032,6 +1032,73 @@ def test_merge_aliases_counts_recovered_and_pollution_dropped(tmp_path: Path) ->
     assert canonical_map[cid_635]["aliases"] == [normalize_arabic(_ITQAN_635_ALIAS)]
 
 
+def test_merge_aliases_drops_bare_relational_deixis(tmp_path: Path) -> None:
+    """da#391: a bare relational-pronoun alias ("عمتي" = "my aunt") never attaches.
+
+    The alias-list is the blind spot ``clean_narrator_name`` never reaches: the same
+    unnamed-relation deixis it drops from a NAME would otherwise survive as an alias of
+    a real narrator (on the ʿĀʾisha chimera: ``امتاه``/``خالته``/``عمتي``). It is dropped
+    here, ACCOUNTED as ``skipped_deixis`` (not silent), and the sum-invariant holds.
+    RED on pre-da#391 code: the variant is appended raw and ``skipped_deixis`` does not
+    exist. A legitimate co-anchored variant on the SAME node still attaches, proving the
+    scrub is surgical.
+    """
+    from src.resolve.bio_promote import _AliasMergeStats, _merge_aliases
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    real_variant = normalize_arabic(_ITQAN_635_ALIAS)
+    anchor = normalize_arabic(_ITQAN_635_BIO_NAME)
+    _write_aliases(
+        staging,
+        "itqan",
+        [
+            # bare relational deixis → dropped, counted as skipped_deixis
+            {
+                "bio_id": "itqan:635",
+                "source": "itqan",
+                "canonical_name_ar_normalized": anchor,
+                "alias": "عمتي",
+                "alias_normalized": normalize_arabic("عمتي"),
+            },
+            # a real co-anchored variant on the same node still attaches
+            {
+                "bio_id": "itqan:635",
+                "source": "itqan",
+                "canonical_name_ar_normalized": anchor,
+                "alias": _ITQAN_635_ALIAS,
+                "alias_normalized": real_variant,
+            },
+        ],
+    )
+
+    cleaned_635 = clean_narrator_name(anchor)
+    assert cleaned_635 is not None
+    cid_635 = make_canonical_id(cleaned_635)
+    canonical_map: dict[str, dict[str, Any]] = {
+        cid_635: {"canonical_id": cid_635, "name_ar_normalized": cleaned_635, "aliases": []}
+    }
+
+    stats = _merge_aliases(staging, canonical_map, {cid_635}, sources={"itqan"})
+    assert isinstance(stats, _AliasMergeStats)
+    assert stats.skipped_deixis == 1
+    assert stats.added == 1
+    # the deixis token is gone; only the real variant remains on the node
+    assert canonical_map[cid_635]["aliases"] == [real_variant]
+    # sum-invariant: every one of the 2 alias rows lands in exactly one bucket
+    total = (
+        stats.added
+        + stats.skipped_duplicate
+        + stats.skipped_empty
+        + stats.skipped_source
+        + stats.skipped_deixis
+        + stats.unmatched_pollution
+        + stats.unmatched_no_bio
+    )
+    assert total == 2
+
+
 def test_unmatched_no_bio_is_counted_and_warns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

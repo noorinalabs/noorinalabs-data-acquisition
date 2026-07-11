@@ -21,6 +21,7 @@ from src.resolve.disambiguate import (
     _geographic_filter,
     _make_canonical_id,
     _temporal_filter,
+    _upsert_canonical,
 )
 
 
@@ -426,3 +427,27 @@ class TestCrossrefMatchBlocked:
         index = _build_blocking_index(candidates)
         matches = _crossref_match_blocked("", index)
         assert matches == []
+
+
+class TestUpsertAliasDeixisScrub:
+    """da#391: the mention/bio alias-union in ``_upsert_canonical`` never appends a
+    bare relational-pronoun. The ``aliases`` ``list<string>`` is the blind spot
+    ``clean_narrator_name`` never reaches; a deixis surface ("خالته") would otherwise
+    become a searchable alias of a real narrator. A real bio_alias still attaches."""
+
+    def test_bare_relational_alias_is_not_appended(self) -> None:
+        canonical_map: dict[str, dict[str, str | int | list[str] | None]] = {}
+        cid = _make_canonical_id("عاءشه بنت سعد")
+        _upsert_canonical(
+            canonical_map,
+            cid,
+            norm_name="عاءشه بنت سعد",
+            name_ar="عائشة بنت سعد",
+            name_en=None,
+            alias="خالته",  # خالته — his maternal aunt (deixis)
+            candidate=None,
+            bio_alias="عاءشه ابنه ابي بكر",  # real variant
+        )
+        aliases = canonical_map[cid]["aliases"]
+        assert aliases == ["عاءشه ابنه ابي بكر"]
+        assert "خالته" not in aliases  # deixis dropped

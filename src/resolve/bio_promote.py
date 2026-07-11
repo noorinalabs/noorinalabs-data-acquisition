@@ -28,7 +28,11 @@ import pyarrow.parquet as pq
 from src.models.enums import DatePrecision
 from src.parse.base import safe_str, write_parquet
 from src.parse.identity import make_canonical_id
-from src.parse.name_quality import clean_narrator_name, cleaner_removed_content
+from src.parse.name_quality import (
+    clean_narrator_name,
+    cleaner_removed_content,
+    is_mubham_relational,
+)
 from src.resolve.schemas import NARRATORS_CANONICAL_SCHEMA
 from src.resolve.sect_affiliation import (
     derive_sect_affiliation,
@@ -59,11 +63,14 @@ class _AliasMergeStats(NamedTuple):
 
     Every alias row lands in exactly one bucket, so
     ``added + skipped_duplicate + skipped_empty + skipped_source +
-    unmatched_pollution + unmatched_no_bio`` equals the alias-row count — no alias
-    is ever silently dropped again. ``unmatched_pollution`` (the alias's bio was
-    itself cleaner-dropped, so no canonical node was minted to anchor to) and
-    ``skipped_source`` are *explained* non-attachments; ``unmatched_no_bio`` is the
-    one that warrants a look and is logged at warning level when non-zero.
+    skipped_deixis + unmatched_pollution + unmatched_no_bio`` equals the alias-row
+    count — no alias is ever silently dropped again. ``unmatched_pollution`` (the
+    alias's bio was itself cleaner-dropped, so no canonical node was minted to anchor
+    to) and ``skipped_source`` are *explained* non-attachments; ``skipped_deixis``
+    (da#391 — the alias is a bare relational-pronoun, "خالته"/"عمتي"/"امتاه", the same
+    unnamed-relation deixis the cleaner drops from a NAME) is the alias-list analogue
+    of that pollution drop; ``unmatched_no_bio`` is the one that warrants a look and
+    is logged at warning level when non-zero.
     """
 
     added: int
@@ -72,6 +79,7 @@ class _AliasMergeStats(NamedTuple):
     skipped_source: int
     skipped_duplicate: int
     skipped_empty: int
+    skipped_deixis: int
 
 
 def _load_existing_canonical(path: Path) -> dict[str, dict[str, Any]]:
@@ -127,6 +135,7 @@ def _merge_aliases(
     skipped_source = 0
     skipped_duplicate = 0
     skipped_empty = 0
+    skipped_deixis = 0
     for af in alias_files:
         for row in pq.read_table(af).to_pylist():
             if sources is not None and safe_str(row.get("source")) not in sources:
@@ -136,6 +145,14 @@ def _merge_aliases(
             variant = safe_str(row.get("alias_normalized"))
             if not norm or not variant:
                 skipped_empty += 1
+                continue
+            # da#391: a bare relational-pronoun variant ("خالته"/"عمتي"/"امتاه") is the
+            # unnamed-relation deixis clean_narrator_name drops from a NAME; the aliases
+            # list<string> is the blind spot it never reaches (the third and final
+            # alias-union site, alongside disambiguate + fuzzy_cluster). Drop it here,
+            # accounted, so it cannot survive as an alias of a real narrator.
+            if is_mubham_relational(variant):
+                skipped_deixis += 1
                 continue
             # Re-key on the cleaned form the promoter minted the node under (da#389).
             cleaned = clean_narrator_name(norm)
@@ -165,6 +182,7 @@ def _merge_aliases(
         skipped_source=skipped_source,
         skipped_duplicate=skipped_duplicate,
         skipped_empty=skipped_empty,
+        skipped_deixis=skipped_deixis,
     )
 
 
@@ -379,5 +397,6 @@ def promote_bios_to_canonical(
         aliases_skipped_source=alias_stats.skipped_source,
         aliases_skipped_duplicate=alias_stats.skipped_duplicate,
         aliases_skipped_empty=alias_stats.skipped_empty,
+        aliases_skipped_deixis=alias_stats.skipped_deixis,
     )
     return canonical_path
