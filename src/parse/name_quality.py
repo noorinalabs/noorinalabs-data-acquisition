@@ -149,7 +149,7 @@ from __future__ import annotations
 
 import re
 
-from src.utils.arabic import normalize_arabic
+from src.utils.arabic import normalize_arabic, strip_format_marks
 
 __all__ = [
     "clean_narrator_name",
@@ -183,9 +183,32 @@ _WAW_CONJUNCTION = normalize_arabic("و")
 # :func:`_is_isnad_residue_token`) so ordinary spans are untouched (da#311 round-4b
 # — Kavitha's review caught attached-waw "وعنه"/"وباسناده", the passive verb "روي",
 # the particle "قد", and bare mubham collectives slipping the round-4 digit-strip).
+# da#315 adds the PREPOSITION+PRONOUN back-reference forms — the classical isnad
+# shorthand a compiler uses to chain a narration onto the preceding one instead of
+# repeating it: "وبه" / "به" ("and by it / by it [same chain]"), "نحوه" ("the like of
+# it"), "مثله" ("similar to it"), "منه", "فيه". The de-waw fold below already reached
+# "وعنه" → "عنه", but "وبه" folds to "به" — which was NOT in this set, so the whole
+# class survived the all-residue floor (13 rows / 18 mentions on the run-5 scrubbed
+# set). Every one is a preposition bound to a resumptive pronoun; none is, or contains,
+# a proper ism, and rule 5b only drops a span when EVERY token is residue, so a real
+# multi-token name is untouched.
 _ISNAD_FORMULA_FRAGMENTS = frozenset(
     normalize_arabic(w)
-    for w in ("باسناده", "بإسناده", "بالاسناد", "اسناده", "عنه", "روي", "روى", "قد")
+    for w in (
+        "باسناده",
+        "بإسناده",
+        "بالاسناد",
+        "اسناده",
+        "عنه",
+        "روي",
+        "روى",
+        "قد",
+        "به",
+        "فيه",
+        "منه",
+        "نحوه",
+        "مثله",
+    )
 )
 
 
@@ -592,6 +615,39 @@ _ISNAD_BOUNDARY = frozenset(
     }
 )
 
+# Boundary tokens into which leading proclitics may be folded (da#314). The definite
+# relative pronouns ONLY: "والذي" ("and he who") opens the oath formula "والذي نفس
+# محمد بيده" and is never a name. Kept as a narrow allowlist rather than folding
+# across all of _ISNAD_BOUNDARY, because folding into that set's SHORT function words
+# (ان/اذا/عن/هو/ثم) collides with real name material — "وان بن سالم" (mc-251, a بن
+# lineage) would false-drop via وان → ان. See :func:`_truncate_at_isnad_boundary`.
+_PROCLITIC_FOLDABLE_BOUNDARY = frozenset({"الذي", "التي", "الذين"})
+
+# Proclitics stripped (iteratively, longest-chain-first) when folding into the set
+# above. The oath formula stacks them — "فوالذي نفس محمد بيده" (ف+و), "فبالذي ارسلك
+# الله" (ف+ب) — so a single-proclitic fold leaves the commonest forms behind. Safe
+# ONLY because the fold target is the relative-pronoun allowlist: no Arabic ism is
+# "بالذي" / "فوالذي", so no real name can be reached by peeling these.
+_BOUNDARY_PROCLITICS = ("و", "ف", "ب", "ل", "ك")
+
+
+def _fold_proclitics(token: str) -> str:
+    """Peel leading proclitics while the remainder is a foldable boundary (da#314).
+
+    ``"فوالذي"`` → ``"والذي"`` → ``"الذي"``. Returns *token* unchanged when no chain
+    of proclitics reaches :data:`_PROCLITIC_FOLDABLE_BOUNDARY`, so a real name is
+    never partially peeled (the peel is only *kept* if it lands on the allowlist).
+    """
+    seen = token
+    for _ in range(len(_BOUNDARY_PROCLITICS)):
+        if seen in _PROCLITIC_FOLDABLE_BOUNDARY:
+            return seen
+        if seen[:1] not in _BOUNDARY_PROCLITICS or len(seen) < 2:
+            break
+        seen = seen[1:]
+    return seen if seen in _PROCLITIC_FOLDABLE_BOUNDARY else token
+
+
 # Matn-density backstop: a span whose leading tokens form a real name but whose tail
 # is matn NOT anchored by an _ISNAD_BOUNDARY verb (e.g. a bare-preposition run) is
 # still a sentence. ≥2 whole-token matn/particle words → drop. A real name carries
@@ -632,7 +688,18 @@ _COMPOUND_TRAILING_MARKERS = frozenset({"جميعا", "قالوا"})
 # ؟ is included (da#308) so a stray trailing question mark ("الاوزاعي الدمشقي؟")
 # is stripped off the token like any other edge mark and does not ride into the
 # clustering key; matn ؟ mid-span is still detected via the raw kept-text scan.
-_EDGE_PUNCT = " \t\r\n,،.;؛:؟-_\"'«»()[]"
+#
+# Bidi / zero-width FORMAT MARKS are included (da#316). The raw source interleaves
+# U+200F RIGHT-TO-LEFT MARK *between* trailing punctuation characters — the real
+# stored span is ``'قتاده،‏.‏'``, not ``'قتاده،.'``. ``str.strip`` halts at
+# the first character outside its set, so a trailing RLM standing between the marks
+# ends the peel before the ``.`` and ``،`` are reached and the name keeps its cruft.
+# NOTE this only matters on RAW / voweled text: ``normalize_arabic`` already removes
+# these marks (:func:`~src.utils.arabic.strip_format_marks`, da#271), so the
+# *normalized* path never sees one. It is the DISPLAY path — which strips edge punct
+# from the un-normalized voweled token to keep its diacritics — that needs them here.
+_FORMAT_MARK_CHARS = "​‌‍‎‏‪‫‬‭‮﻿"
+_EDGE_PUNCT = " \t\r\n,،.;؛:؟-_\"'«»()[]" + _FORMAT_MARK_CHARS
 
 # --- Sentence / matn-body drop-gate (da#308) -----------------------------------
 # Nasab (lineage) connectors — the PRECISION GUARD. A string dense in these is a
@@ -693,6 +760,12 @@ _MATN_OPENERS = frozenset(
         "تزوج",  # "he married" ("تزوج النبي ميمونه" — Prophet-marriage matn); never
         # a name (the noun زوج is handled as an apposition connector separately).
         "رءيا",  # "[I] saw" (رأيا; a رايت variant); a matn eyewitness opener.
+        # Oath / adjuration verb (da#314) — "انشدك بالله" ("I adjure you BY GOD …"),
+        # the matn interrogation formula ("فانشدك بالله هل تعلم" = "I adjure you by
+        # God, do you know …"). The ف-prefixed form folds via the step-2 opener check.
+        # A verb of address, never a name component.
+        "انشدك",
+        "نشدتك",
     }
 )
 
@@ -810,6 +883,62 @@ _THEOPHORIC_HEADS = frozenset(
         "ذبيح",  # sacrifice of
     }
 )
+
+
+# The partitive / ablative ``من`` ("from", "of", "one who"), optionally carrying a
+# ك/و/ف/ل/ب proclitic (``كمن`` "like one who", ``ومن``, ``فمن``). It is deliberately
+# NOT a member of :data:`_MATN_PARTICLES` — guard 5 keys the mubham collective on the
+# bare partitive and folding it in there would entangle the two — so the
+# Prophet-provenance rule (da#314) tests for it through this helper instead.
+_PARTITIVE = "من"
+
+
+def _is_partitive(token: str) -> bool:
+    """True when *token* is the partitive ``من``, bare or with a single proclitic (da#314)."""
+    if token == _PARTITIVE:
+        return True
+    return token[:1] in ("و", "ف", "ك", "ل", "ب") and token[1:] == _PARTITIVE
+
+
+# Collective nouns that head an ANONYMOUS group referred to the Prophet — "the
+# companions of…", "the wives of…". With a mubham quantifier in front ("بعض اصحاب
+# النبي" = "SOME OF the companions of the Prophet") the span names no individual, so
+# it is residue for the provenance rule below. Closed set, and never an ism.
+_PROPHET_COLLECTIVE_NOUNS = frozenset({"اصحاب", "ازواج", "نساء", "اهل", "ال", "امه"})
+
+# Bare pronouns left behind by a mis-parse ("ه من رسول الله" mc-55, "ها من رسول الله"
+# mc-7, "هن من رسول الله" mc-5). A pronoun is never an ism, so these carry no naming
+# content. The one-character check below already caught the bare "ه"; this completes the
+# closed set rather than leaving the lexicon to depend on token LENGTH, which is
+# arbitrary — "ه" and "ها" are the same class of fragment.
+_BARE_PRONOUNS = frozenset({"ه", "ها", "هم", "هن", "هما", "هي", "هو", "انا", "انت"})
+
+
+def _is_prophet_ref_component(token: str) -> bool:
+    """True when *token* is part of a Prophet reference itself (``رسول``/``النبي``/``الله``)."""
+    return token in _PROPHET_TITLE_SOLE or token in _PROPHET_TITLE_LEADERS or token == "الله"
+
+
+def _is_provenance_residue(token: str) -> bool:
+    """True when *token* carries no naming content — function word or anonymous collective.
+
+    The membership test for the da#314 provenance rule's all-residue scoping. A token
+    is residue when it is the partitive ``من`` (with proclitics), a bare matn particle,
+    a mubham collective quantifier (``بعض``, ``رجل``), a collective noun heading an
+    anonymous group (``اصحاب``, ``ازواج``), or a stray sub-token left by a mis-parse
+    (a one-letter fragment such as ``ه``/``ها``, which no Arabic ism can be).
+
+    The apposition connectors are EXCLUDED from the matn-particle arm (Sofia Cardoso):
+    ``أم`` (*umm*) normalizes to ``ام``, homographic with the disjunctive particle
+    ``أم`` ("or"), and treating it as residue is what deleted Umm Kulthum bint Muhammad.
+    Redundant under the all-token scoping — her span carries substantive tokens too —
+    but kept as the explicit, verified guard against the homograph.
+    """
+    if _is_partitive(token) or token in _MUBHAM_LEADERS or token in _PROPHET_COLLECTIVE_NOUNS:
+        return True
+    if len(token) == 1 or token in _BARE_PRONOUNS:
+        return True
+    return _is_matn_particle(token) and token not in _APPOSITION_CONNECTORS
 
 
 def _is_matn_particle(token: str) -> bool:
@@ -970,10 +1099,22 @@ def strip_markup(name: str | None) -> str:
     :func:`clean_narrator_name`; this keeps the two in lock-step. Only colon spans
     whose tail begins with an English leader are cut — Arabic voweled names and
     ordinary names (no such colon) are returned unchanged.
+
+    Bidi / zero-width format marks are stripped FIRST (da#316). This is the raw,
+    un-normalized entry point — the only path that never runs through
+    ``normalize_arabic`` (which would remove them) because it must preserve the
+    diacritics. The marks appear *interleaved* with punctuation (``'قتاده،‏.‏'``)
+    and *interior* to the span (``'…تعالى‏:‏ ‏(‏لقد'``), so an edge-strip alone
+    cannot clear them; removing them here makes the subsequent edge-punct strip —
+    and the token alignment in :func:`clean_narrator_name_display` — behave exactly
+    as it does on normalized text. Diacritics are untouched
+    (:func:`~src.utils.arabic.strip_format_marks` removes only bidi/zero-width
+    controls), so the display name keeps its vowels.
     """
     if not name:
         return ""
-    cleaned = _MARKUP_RE.sub(" ", name).replace("<", " ").replace(">", " ")
+    cleaned = strip_format_marks(name)
+    cleaned = _MARKUP_RE.sub(" ", cleaned).replace("<", " ").replace(">", " ")
     cleaned = _truncate_colon_prose(" ".join(cleaned.split()))
     return cleaned.strip(_EDGE_PUNCT).strip()
 
@@ -1009,8 +1150,32 @@ def _truncate_at_isnad_boundary(tokens: list[str]) -> list[str] | None:
     ``None`` when the boundary *leads* the span (``"كان علي …"``, ``"قالوا"``) —
     the real narrator sits after an elided-grammar verb and cannot be recovered
     here. When no boundary token is present the tokens are returned unchanged.
+
+    Leading proclitics are folded before matching (:func:`_fold_proclitics`), but ONLY
+    into the definite RELATIVE PRONOUNS (:data:`_PROCLITIC_FOLDABLE_BOUNDARY`) — so the
+    oath formula ``"والذي نفس محمد بيده"`` ("by Him in whose hand is Muhammad's soul",
+    da#314) leads with ``والذي`` → folds to the boundary ``الذي`` → drops. The formula
+    stacks proclitics in the corpus (``فوالذي``, ``فبالذي``), so the fold is iterative.
+
+    The fold is deliberately NOT applied to the whole boundary set. Folding it into
+    the SHORT function words there (``ان``, ``اذا``, ``عن``, ``هو``, ``ثم``) collides
+    with real name material: it false-drops ``"وان بن سالم"`` (mc-251 — a ``بن``
+    lineage) via ``وان`` → ``ان``, and ``"فان"``/``"فاذا"`` likewise. The definite
+    relative pronouns have no such collision — no Arabic ism is ``والذي``/``فالتي`` —
+    which is what makes them, and only them, safe to fold.
+
+    The fold is applied at index 0 ONLY. This function has *dual* semantics — a
+    boundary LEADING the span drops it, a boundary at index > 0 *truncates* and keeps
+    the head — and the oath is a matn SIGNAL, not a name TERMINATOR. In the corpus the
+    oath is overwhelmingly mid-matn ("تعاهدوا هذا القران فوالذي نفس محمد بيده…");
+    folding it at i > 0 would make it a truncation point and hand the matn head back
+    AS A NARRATOR NAME, minting 52 new zero-degree matn nodes ("دعوني" = "leave me",
+    "كلا" = "nay", "قول الله") — exactly the class da#317 exists to remove. Restricted
+    to the leading position, a mid-matn oath instead leaves the span whole and the
+    matn-sentence gate (step 10) drops it as the matn body it is.
     """
-    for i, tok in enumerate(tokens):
+    for i, raw_tok in enumerate(tokens):
+        tok = raw_tok if (raw_tok in _ISNAD_BOUNDARY or i > 0) else _fold_proclitics(raw_tok)
         if tok in _ISNAD_BOUNDARY or _is_ask_verb(tok):
             # Nisba-transition ثم (da#308): "…الليثي ثم الجندعي" ("al-Laythī then
             # al-Jundaʿī") is a real tribal-affiliation nisba tail, not a temporal
@@ -1197,6 +1362,59 @@ def _is_matn_sentence(tokens: list[str], kept_text: str, was_truncated: bool) ->
     nasab = sum(1 for t in bare if t in _NASAB_CONNECTORS)
     if nasab >= 2 or nasab / n >= _NASAB_SPARE_DENSITY:
         return False
+
+    # (2d) Prophet-reference PROVENANCE (da#314): a narration-provenance tail — "…
+    #      من رسول الله" ("… FROM the Messenger of Allah"), "هذا من رسول الله", "كمن
+    #      زار رسول الله" — kept as a canonical "narrator" (mc-55 "ه من رسول الله",
+    #      mc-38 bare "من رسول الله"). The existing Prophet detectors both miss it:
+    #      step 6b's :func:`_is_prophet_reference` is LEADER-anchored (here the title
+    #      sits in the TAIL, behind a preposition), and signal (2p) above is gated on
+    #      ``was_truncated`` (these spans carry no isnad/matn verb, so nothing ever
+    #      truncated and they are never re-scrutinized).
+    #
+    #      DISCRIMINATOR — what may legitimately precede "رسول الله" in a real name is
+    #      an ism, and nothing else: "محمد رسول الله" (Muhammad, the Messenger of Allah
+    #      — a REAL narrator, the muhaddithat fixture) carries ZERO matn particles and
+    #      no partitive, so it is kept. A provenance fragment, by contrast, always
+    #      carries the very preposition/particle that makes it provenance ("من" — the
+    #      ablative — or a demonstrative "هذا"/"ذلك"). So: a Prophet reference ANYWHERE
+    #      in the span, co-occurring with at least one partitive or matn particle, is a
+    #      provenance/matn fragment, never a name. Runs AFTER the nasab guard, so a
+    #      genuine lineage is already spared before this can see it.
+    #      The particle disjunct EXCLUDES the apposition connectors (Sofia Cardoso, PR
+    #      review). "أم" (umm — the commonest female kunya connector) normalizes to
+    #      "ام", which is HOMOGRAPHIC with the disjunctive particle "أم" ("or") and is
+    #      therefore in _MATN_PARTICLES; it is the only token in this module that is
+    #      both. Without the exclusion, any real narrator shaped "أم X <role> رسول الله"
+    #      — where the role noun is not already an apposition connector — reads as a
+    #      Prophet reference PLUS a particle and is deleted. That is not hypothetical:
+    #      it dropped "أم كلثوم بنت سيد البشر رسول الله" (Umm Kulthum bint Muhammad, the
+    #      Prophet's DAUGHTER) and "أم أيمن حاضنة رسول الله" (Umm Ayman, his nurse and a
+    #      transmitter) — both bio-promoted rows at mention_count 0, which is precisely
+    #      why a mention-weighted sweep could not see them. The mubham collectives this
+    #      rule targets are untouched: "بعض" is not an apposition connector, so
+    #      "بعض اصحاب النبي" / "بعض ازواج النبي" still drop.
+    #      SCOPING (second review round): the rule fires only when EVERY token is
+    #      function-word residue or part of the Prophet reference itself — the same
+    #      all-residue shape as rule 5b, which is the only shape proven safe here. A
+    #      span carrying ANY substantive token (an ism, a nisba, a common noun) is
+    #      structurally out of reach, which is what a "does it contain a real name?"
+    #      test needs to be, absent a name lexicon.
+    #
+    #      This is not belt-and-braces; it is load-bearing. A rijal BIOGRAPHY entry
+    #      names a real narrator and then describes him — and a companion's biography
+    #      mentions the Prophet *by nature*: "شهد النبي في حجة الوداع" ("he witnessed
+    #      the Prophet at the Farewell Pilgrimage"), "وفد على رسول الله" ("he came as a
+    #      delegate to the Messenger of Allah"). Those carry a Prophet reference AND a
+    #      preposition, so the earlier any()-form of this rule deleted 44 real
+    #      bio-promoted narrators — among them ابو بكر الصديق … خليفه رسول الله (Abu
+    #      Bakr al-Siddiq, the first Caliph), الطيب ولد رسول الله (the Prophet's son)
+    #      and ذواليدين (Dhu al-Yadayn). All are mention_count 0, so — exactly like Umm
+    #      Kulthum — a mention-weighted sweep could not see them.
+    if any(_prophet_ref_len(bare, i) > 0 for i in range(n)) and all(
+        _is_prophet_ref_component(t) or _is_provenance_residue(t) for t in bare
+    ):
+        return True
 
     # (2a) Divine-name / Qur'anic-verse signature (da#317): the bare divine name
     #      الله occurring TWICE OR MORE is a verse / oath / matn signature, never a
@@ -1484,9 +1702,29 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
     #     ال-token was itself truncated ("اتموا الصف الاول ثم") — a lone trailing
     #     ثم/عن/ان/… is never a name component, so pop it. This makes the recovery a
     #     fixed point (clean(clean(x)) == clean(x)) in a single pass.
+    #
+    #     A trailing bare waw CONJUNCTION is popped the same way (da#316): the source
+    #     stores a dangling co-narrator join whose second member was never captured
+    #     ("مالك،‏.‏ و" — Malik, followed by an "and" that leads nowhere). A waw with
+    #     no following member conjoins nothing and is never a name component. Only the
+    #     TRAILING position is touched, so a MEDIAL waw — the class-6 compound join
+    #     "X و Y" that :func:`split_compound_narrators` must still see — is untouched.
     while tokens and tokens[-1] in _ISNAD_BOUNDARY:
         tokens.pop()
         was_truncated = True
+    #     The dangling waw is popped WITHOUT setting was_truncated. That flag means "a
+    #     tail was cut off, so this is a RECOVERED fragment and needs stricter scrutiny"
+    #     — and it gates signal (2p), which drops any span carrying a bare Prophet
+    #     reference. A trailing conjunction is an affix, not name material: popping it
+    #     removes nothing the source asserted, so it must not escalate scrutiny. Setting
+    #     it here deleted "ابو بكر الصديق … خليفه رسول الله و" — ABU BAKR AL-SIDDIQ, whose
+    #     bio ends in a dangling waw — because the pop flipped was_truncated and (2p)
+    #     then fired on the "رسول الله" in "خليفه رسول الله" ("Successor of the Messenger
+    #     of Allah"). Without the flag he is spared by the nasab guard (ابو/بن/ابي), as he
+    #     should be. Same reasoning as :func:`cleaner_removed_content`: an affix is not a
+    #     tail.
+    while tokens and tokens[-1] == _WAW_CONJUNCTION:
+        tokens.pop()
     if not tokens:
         return None
 
