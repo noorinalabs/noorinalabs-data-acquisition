@@ -874,6 +874,49 @@ class TestLargeLegitimatePruneStillProceeds:
         assert client.deleted_batches == []
 
 
+class TestKnownBlindSpotMildTruncation:
+    """A CHARACTERIZATION test: what the two ceilings do NOT catch, pinned deliberately.
+
+    This test asserts a **hole**, not a fix. It exists so that nobody — including us in
+    three months — reads the two magnitude ceilings as closing truncation. They close the
+    catastrophic tail. They cannot close a *fraction*.
+
+    The delete-side ceiling catches a keep-set truncated to a REMNANT (a 500- or 5,000-id
+    parquet against a 160k graph — 97%+ deleted). It cannot catch one truncated to a
+    FRACTION: at 20% of its rows the parquet still deletes 83.9% of the narrator graph and
+    sails under 0.9. And **no ceiling fixes this**, because 83.9% (truncated) and 55.4%
+    (a legitimate full re-mint — see TestLargeLegitimatePruneStillProceeds) are the same
+    kind of number. The bands overlap; a magnitude cannot separate them.
+
+    Only a COMPLETENESS signal can — an expected row count, or the resolve manifest's md5
+    — so that a short parquet is caught by being *short* rather than by being *drastic*.
+    That is a different axis, and it is not plumbed to where the prune runs today.
+
+    If someone later adds that binding, this test should start failing. Deleting it then
+    is the correct action; deleting it *now*, or "fixing" it by lowering the ceiling until
+    it goes green, would break the legitimate prune the ceiling was raised to protect.
+    """
+
+    def test_a_keep_set_missing_a_fifth_of_its_rows_is_NOT_refused(self, curated_dir: Path) -> None:
+        # 200-node generation; the parquet lost 60% of its rows (kept 80 of 200). Real
+        # ids, same generation, so `missing` is 0 — and the delete magnitude is 60%,
+        # comfortably under the 0.9 ceiling. It deletes 120 legitimate narrators.
+        live = _generation_ids(200)
+        client = StatefulFakeNeo4j(list(live))
+        short = _canonical_parquet(curated_dir, live[:80], names=_generation_names(80))
+
+        result = prune_narrators(client, short)  # default ceilings: NO refusal
+
+        assert result.missing == 0, "same-generation, so no provenance signal fires"
+        assert result.deleted == 120  # 120 legitimate, current narrators destroyed
+        assert 0.5 < result.deleted / 200 < 0.9, (
+            "this is the overlap band: indistinguishable BY MAGNITUDE from a legitimate "
+            "full-re-mint cleanup, which is exactly why no ceiling can catch it"
+        )
+        # The only thing standing in front of this is the operator reading the dry run.
+        assert "missing=0" in summary_line(result)
+
+
 class TestOrphanCeiling:
     def test_at_the_ceiling_is_allowed_above_it_refuses(self, curated_dir: Path) -> None:
         # Strictly-greater, same as the missing ceiling. graph=10, orphans=9 -> exactly 0.9.

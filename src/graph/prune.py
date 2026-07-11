@@ -129,6 +129,53 @@ truncated 500-id keep-set                    99.7%                REFUSE
 "no legitimate prune looks like this" line, not a tuned parameter — and, like the
 ``missing`` ceiling, it is a **backstop**, not a policy. Surviving fewer than one node in
 ten is not a prune; it is a wipe wearing a prune's clothes.
+
+What NEITHER ceiling catches — read this before trusting them
+-------------------------------------------------------------
+Both ceilings are magnitude backstops on the catastrophic tail. Neither is a completeness
+check, and the difference matters, because the band they rely on **closes from both ends**:
+
+*From below — skipping the prune.* Each unpruned re-mint leaves another stale generation
+resident, so the legitimate orphan fraction is ``k/(k+1)`` for ``k`` stale generations:
+50% at ``k=1``, 75% at ``k=3``, and it *reaches 0.9 at k=9*. The 0.9 ceiling is therefore
+sound only while the prune runs regularly. deploy#557/#574 runs it per load (``k=1``); a
+graph left unpruned for many load cycles would start false-refusing its own cleanup.
+
+*From above — a MILD truncation. This is the real hole, and it does not close.* The
+delete-side ceiling catches a keep-set truncated to a *remnant*. It cannot catch one
+truncated to a *fraction*. With the keep-set retaining share ``f`` of the canonical set,
+the prune deletes ``1 - f * 129,234/160,614`` of the graph:
+
+======  ==================  =========================================
+``f``   deletes             verdict
+======  ==================  =========================================
+0.05    96.0%               REFUSED
+0.10    92.0%               REFUSED
+0.124   90.0%               REFUSED (the ceiling)
+0.20    **83.9%**           **PASSES** — 134,768 legitimate narrators gone
+0.40    **67.8%**           **PASSES**
+0.60    **51.7%**           **PASSES**
+0.80    **35.6%**           **PASSES**
+======  ==================  =========================================
+
+A parquet that lost a fifth of its rows deletes 84% of the narrator graph and is refused
+by nothing here — and **no choice of ceiling fixes it**, because 83.9% (truncated) and
+55.4% (the legitimate full re-mint, A2 above) are the same *kind* of number. The bands
+overlap. A fraction cannot separate them; only a *completeness* signal can, and there
+isn't one in this command's inputs.
+
+The principled cure is to bind the keep-set to the run that produced it — an expected row
+count, or the ``src/pipeline/manifest.py`` md5 of the resolve output — so a short parquet
+is caught by being *short*, not by being *drastic*. That is a different axis from any
+magnitude ceiling, and it is not plumbed to where the prune runs today (deploy#557 pulls
+the one parquet into a scratch dir; the load's manifest is not there). Until it is, the
+honest statement of what this module guarantees is:
+
+    A wrong keep-set (foreign) is refused. A remnant keep-set is refused. A **short**
+    keep-set is NOT — it is merely reported, via ``missing`` and the orphan count, and
+    the operator's dry run is the only thing standing in front of it.
+
+Do not let the two ceilings read as more than they are.
 """
 
 from __future__ import annotations
