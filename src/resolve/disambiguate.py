@@ -37,6 +37,7 @@ from src.resolve._checkpoint import (
     save_checkpoint,
 )
 from src.resolve._inputs import require_input
+from src.resolve._run_record import write_canonical
 from src.resolve.geography import regions_plausible, resolve_region
 from src.resolve.mononym_split import refine_mononym_name
 from src.resolve.schemas import (
@@ -1581,7 +1582,7 @@ def run(
     # 1. narrators_canonical.parquet
     canonical_table = _build_canonical_table(canonical_map)
     canonical_path = output_dir / "narrators_canonical.parquet"
-    write_parquet(canonical_table, canonical_path, schema=NARRATORS_CANONICAL_SCHEMA)
+    write_canonical(canonical_table, canonical_path, stage="disambiguate")
     output_paths.append(canonical_path)
 
     # 2. ambiguous_narrators.csv

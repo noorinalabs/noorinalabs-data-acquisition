@@ -76,7 +76,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.models.enums import DatePrecision
-from src.parse.base import safe_str, write_parquet
+from src.parse.base import safe_str
 from src.parse.identity import make_canonical_id
 from src.parse.narrator_dates import (
     MAX_PLAUSIBLE_AH,
@@ -84,6 +84,7 @@ from src.parse.narrator_dates import (
     ParsedDate,
     parse_year_notation,
 )
+from src.resolve._run_record import write_canonical
 from src.resolve.schemas import NARRATORS_CANONICAL_SCHEMA
 from src.utils.arabic import normalize_arabic
 from src.utils.hijri import ah_year_to_ce_range
@@ -523,7 +524,7 @@ def reconcile_canonical_dates(
 
     arrays = {f.name: [r.get(f.name) for r in rows] for f in NARRATORS_CANONICAL_SCHEMA}
     out_table = pa.table(arrays, schema=NARRATORS_CANONICAL_SCHEMA)
-    write_parquet(out_table, canonical_path, schema=NARRATORS_CANONICAL_SCHEMA)
+    write_canonical(out_table, canonical_path, stage="reconcile")
 
     logger.info(
         "reconcile_dates_complete",
