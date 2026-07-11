@@ -26,7 +26,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.models.enums import DatePrecision
-from src.parse.base import safe_str, write_parquet
+from src.parse.base import safe_str
 from src.parse.identity import make_canonical_id
 from src.parse.name_quality import (
     clean_narrator_name,
@@ -34,6 +34,7 @@ from src.parse.name_quality import (
     is_mubham_relational,
 )
 from src.resolve._inputs import require_input
+from src.resolve._run_record import write_canonical
 from src.resolve.schemas import NARRATORS_CANONICAL_SCHEMA
 from src.resolve.sect_affiliation import (
     derive_sect_affiliation,
@@ -380,7 +381,7 @@ def promote_bios_to_canonical(
     for col in ("birth_date_precision", "death_date_precision"):
         arrays[col] = [r.get(col) or DatePrecision.UNKNOWN.value for r in table_rows]
     out_table = pa.table(arrays, schema=NARRATORS_CANONICAL_SCHEMA)
-    write_parquet(out_table, canonical_path, schema=NARRATORS_CANONICAL_SCHEMA)
+    write_canonical(out_table, canonical_path, stage="bio_promote")
 
     # An alias that matched no promoted bio (and was not a cleaner-dropped-bio case)
     # is the one non-attachment worth investigating — surface it loudly so the

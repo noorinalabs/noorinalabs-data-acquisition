@@ -15,11 +15,16 @@ import pytest
 
 from scripts.publish_parquet import (
     BUCKET,
+    CANONICAL_PARQUET_NAME,
     CURATED_REQUIRED,
+    MANIFEST_FILENAME,
+    PROVENANCE_REQUIRED,
+    RESOLVE_RUN_FILENAME,
     PlannedUpload,
     PublishError,
     build_rclone_env,
     default_parquet_ref,
+    file_md5,
     main,
     plan_curated,
     plan_staging,
@@ -32,9 +37,25 @@ _FAKE_KEY = "K0ffeeBabeSecretAppKeyValue999"
 
 
 def _make_curated(curated_dir: Path) -> None:
+    """The three curated parquets PLUS the resolve run record they cannot publish without.
+
+    The record is what resolve writes (da#428): an in-memory tally, the run's terminal
+    status, and the md5 of the bytes the tally was taken over. Publish refuses without it.
+    """
     curated_dir.mkdir(parents=True, exist_ok=True)
     for name in CURATED_REQUIRED:
         (curated_dir / name).write_bytes(b"PAR1")
+    _write_run_record(curated_dir)
+
+
+def _write_run_record(
+    curated_dir: Path, *, canonical_ids: int = 129234, status: str = "complete"
+) -> None:
+    md5 = file_md5(curated_dir / CANONICAL_PARQUET_NAME)
+    (curated_dir / RESOLVE_RUN_FILENAME).write_text(
+        f"RESOLVE_RUN canonical_ids={canonical_ids} run_status={status} git_sha=abc1234 "
+        f"run_id=1-deadbeef last_writer=tabaqa_dates parquet_md5={md5} parquet_bytes=4\n"
+    )
 
 
 def _make_staging(staging_dir: Path, *, full: bool) -> None:
@@ -135,6 +156,7 @@ def test_verify_remote_passes_when_all_present() -> None:
     ]
     listing = {
         *(f"curated/{n}" for n in CURATED_REQUIRED),
+        *(f"curated/{n}" for n in PROVENANCE_REQUIRED),
         "staging/hadiths_bukhari.parquet",
     }
     verify_remote(listing, plan)  # no raise
@@ -151,6 +173,20 @@ def test_verify_remote_missing_curated_raises() -> None:
     plan: list[PlannedUpload] = []
     listing = {f"curated/{CURATED_REQUIRED[0]}"}  # only 1 of 3 curated present
     with pytest.raises(PublishError, match="required curated object"):
+        verify_remote(listing, plan)
+
+
+@pytest.mark.parametrize("absent", PROVENANCE_REQUIRED)
+def test_verify_remote_requires_both_provenance_objects(absent: str) -> None:
+    """A ref whose parquets landed but whose provenance did not is a ref the consumer
+    REFUSES to prune against. It must fail here, at publish, and not surface as a
+    mysterious refusal on the production box mid-destructive-op (da#428)."""
+    plan: list[PlannedUpload] = []
+    listing = {
+        *(f"curated/{n}" for n in CURATED_REQUIRED),
+        *(f"curated/{n}" for n in PROVENANCE_REQUIRED if n != absent),
+    }
+    with pytest.raises(PublishError, match=f"curated/{absent}"):
         verify_remote(listing, plan)
 
 
@@ -218,6 +254,7 @@ def test_publish_copy_only_and_no_secret_on_argv(
             listing = "\n".join(
                 [
                     *(f"curated/{n}" for n in CURATED_REQUIRED),
+                    *(f"curated/{n}" for n in PROVENANCE_REQUIRED),
                     "staging/hadiths_bukhari.parquet",
                     "staging/collections_all.parquet",
                     "staging/narrator_mentions_all.parquet",
@@ -243,9 +280,16 @@ def test_publish_copy_only_and_no_secret_on_argv(
     assert rc == 0
     assert capsys.readouterr().out.strip().splitlines()[-1] == ref
 
-    # 8 objects copied + 1 lsf verification.
+    # 8 data objects + the 2 provenance objects (da#428) copied, + 1 lsf verification.
     copy_calls = [c for c in calls if "copyto" in c]
-    assert len(copy_calls) == 8
+    assert len(copy_calls) == 10
+
+    # The manifest goes up LAST of all, so its mere presence in the bucket is itself the
+    # evidence that the publish ran to completion — a half-finished publish cannot leave
+    # a ref that looks complete to the consumer.
+    assert copy_calls[-1][-1].endswith(f"/curated/{MANIFEST_FILENAME}")
+    assert copy_calls[-2][-1].endswith(f"/curated/{RESOLVE_RUN_FILENAME}")
+
     # Copy-only: never a destructive rclone verb against the bucket.
     for cmd in calls:
         assert not ({"sync", "delete", "purge", "deletefile", "rmdir"} & set(cmd))

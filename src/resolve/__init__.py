@@ -31,6 +31,7 @@ from src.resolve._checkpoint import EXIT_STOPPED_AT_LIMIT, StopAfterReached
 from src.resolve._deps import EXIT_MISSING_DEPENDENCY, MissingDependencyError
 from src.resolve._inputs import MissingInputError
 from src.resolve._provenance import DetectorProvenance, DetectorStatus, read_provenance
+from src.resolve._run_record import finalize_run
 from src.resolve.ner import EXIT_UNROUTED_CORPUS, UnroutedCorpusError
 from src.utils.logging import get_logger
 
@@ -127,6 +128,33 @@ class ResolveStageError(Exception):
 def _outcome_files(outcome: StageOutcome | None) -> list[Path]:
     """Files a stage produced, or ``[]`` for a skipped/errored/absent stage."""
     return outcome.files if isinstance(outcome, StageRan) else []
+
+
+def _stage_provenance(outcomes: dict[str, StageOutcome]) -> tuple[str, ...]:
+    """Render each stage's outcome as a ``RESOLVE_STAGE`` body for the run record.
+
+    Forensics, not a gate — the consumer keys only on ``canonical_ids`` and
+    ``run_status``. But a counts-only record cannot be told apart from one an
+    operator hand-authored in a single line straight off the parquet, and the
+    pressure to hand-mint is maximal exactly when the gate bites. Recording which
+    stages ran, skipped and why makes hand-minting an act of forgery rather than
+    one of convenience (da#428, Jean-Claude Habimana). Deliberately unsigned:
+    pre-launch, no adversary, not worth the key management.
+    """
+    rendered: list[str] = []
+    for step in RESOLVE_STEP_ORDER:
+        outcome = outcomes.get(step)
+        match outcome:
+            case StageRan():
+                detail = f"outcome=ran files={len(outcome.files)}"
+            case StageSkipped():
+                detail = f"outcome=skipped reason={outcome.reason}"
+            case StageErrored():
+                detail = f"outcome=errored exc={outcome.exc_type}"
+            case _:
+                detail = "outcome=absent"
+        rendered.append(f"step={step} {detail}")
+    return tuple(rendered)
 
 
 # Canonical execution order of the resolve steps. ``run_all(from_step=...)`` skips
@@ -846,6 +874,16 @@ def run_all(
     # StageErrored now forces a non-zero exit via the CLI's ResolveStageError
     # handler, aggregating every failed stage from this one (possibly 7.5-hour) run.
     errored = [o for o in outcomes.values() if isinstance(o, StageErrored)]
+
+    # da#428: stamp the run's terminal status onto curated/_resolve_run.txt. This is
+    # the ONLY place run_status may be upgraded to `complete`; every write_canonical
+    # stamps `incomplete`, so a killed process, a raised stage or a --stop-after probe
+    # all leave `incomplete` on disk and the publish refuses. `complete` is exactly
+    # "reached this line with no stage in error" — the one fact no count can supply,
+    # because a run that halts after writing a coherent partial file is internally
+    # consistent and its tally matches what it managed to write.
+    finalize_run(output_dir, _stage_provenance(outcomes), complete=not errored)
+
     if errored:
         for e in errored:
             logger.error("resolve_stage_errored", step=e.step, exc_type=e.exc_type)

@@ -129,6 +129,7 @@ from src.models.enums import DatePrecision, NarratorGeneration
 from src.parse.base import safe_str, write_parquet
 from src.parse.identity import make_canonical_id, make_discriminated_canonical_id
 from src.resolve._inputs import require_input
+from src.resolve._run_record import write_canonical
 from src.resolve.generic_name import is_generic_name
 from src.resolve.mononym_split import _MAX_GAP, _MIN_GAP, is_registered_mononym
 from src.resolve.schemas import NARRATOR_MENTIONS_RESOLVED_SCHEMA, NARRATORS_CANONICAL_SCHEMA
@@ -704,10 +705,10 @@ def split_generic_narrators(output_dir: Path, *, staging_dir: Path | None = None
 
     all_records = records + new_rows
     arrays = {f.name: [r.get(f.name) for r in all_records] for f in NARRATORS_CANONICAL_SCHEMA}
-    write_parquet(
+    write_canonical(
         pa.table(arrays, schema=NARRATORS_CANONICAL_SCHEMA),
         canonical_path,
-        schema=NARRATORS_CANONICAL_SCHEMA,
+        stage="narrator_split",
     )
 
     remapped = _remap_split_mentions(mentions_path, remap)

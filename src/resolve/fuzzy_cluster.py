@@ -77,7 +77,7 @@ import pyarrow.parquet as pq
 from rapidfuzz import fuzz, process
 
 from src.models.enums import DatePrecision
-from src.parse.base import safe_str, write_parquet
+from src.parse.base import safe_str
 from src.parse.identity import make_canonical_id
 from src.parse.name_quality import is_mubham_relational
 from src.resolve._checkpoint import (
@@ -91,6 +91,7 @@ from src.resolve._checkpoint import (
     resolve_cadence,
     save_checkpoint,
 )
+from src.resolve._run_record import write_canonical
 from src.resolve.schemas import NARRATOR_MENTIONS_RESOLVED_SCHEMA, NARRATORS_CANONICAL_SCHEMA
 from src.resolve.sect_affiliation import derive_sect_affiliation, normalize_corpus, primary_corpus
 from src.utils.logging import get_logger
@@ -1365,7 +1366,7 @@ def cluster_canonical_narrators(
             if len(merged.get("source_corpora") or []) > 1:
                 cross_source += 1
 
-    write_parquet(_build_table(merged_rows), canonical_path, schema=NARRATORS_CANONICAL_SCHEMA)
+    write_canonical(_build_table(merged_rows), canonical_path, stage="cluster")
 
     # Clustering completed and the canonical table is rewritten — drop the
     # checkpoint so the next cold run doesn't spuriously resume (da#272).
