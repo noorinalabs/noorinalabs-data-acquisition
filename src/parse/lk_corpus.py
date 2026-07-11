@@ -184,6 +184,11 @@ def _parse_single_csv(
                         "source_hadith_id": source_id,
                         "source_corpus": "lk",
                         "position_in_chain": span.position,
+                        # The English isnad is a SEPARATE chain from the Arabic isnad
+                        # of the same hadith (da#282): both are numbered from position
+                        # 0, so they must not share a chain bucket or the loader
+                        # interleaves them and fabricates cross-language adjacencies.
+                        "chain_index": 1,
                         "name_ar": None,
                         "name_en": span.name,
                         "name_ar_normalized": None,
@@ -202,6 +207,10 @@ def _parse_single_csv(
                         "source_hadith_id": source_id,
                         "source_corpus": "lk",
                         "position_in_chain": span.position,
+                        # Arabic isnad = chain 0 (the English isnad above is chain 1).
+                        # Separate ordinals keep the two same-hadith sequences from
+                        # being flattened together (da#282).
+                        "chain_index": 0,
                         "name_ar": span.name,
                         "name_en": None,
                         "name_ar_normalized": normalize_arabic(span.name),

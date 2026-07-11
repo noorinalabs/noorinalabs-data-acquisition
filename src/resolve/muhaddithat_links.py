@@ -238,6 +238,10 @@ def build_muhaddithat_mention_links(
                 "hadith_id": link.hadith_id,
                 "source_corpus": _SOURCE_CORPUS,
                 "position_in_chain": 0,
+                # Curated orphan link is a single NARRATED-only node, never a chain
+                # pair — chain 0 (da#282). Required now that the superset schema
+                # carries ``chain_index`` and the array build reads every field.
+                "chain_index": 0,
                 "name_raw": link.name_en,
                 "name_normalized": normalize_arabic(link.name_ar),
                 "canonical_narrator_id": cid,

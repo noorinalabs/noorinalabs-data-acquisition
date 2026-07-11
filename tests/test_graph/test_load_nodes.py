@@ -679,6 +679,67 @@ class TestLoadChains:
         assert h1["chain_length"] == 2
         assert h1["is_complete"] is True
 
+    def test_multi_chain_hadith_yields_one_chain_node_per_chain(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """da#282: a hadith carrying two isnad-chains (distinct ``chain_index``,
+        each numbered from position 0 — the lk ar/en shape) produces ONE Chain node
+        per chain, each keyed ``chn:<hadith>-<chain_index>`` with only its own
+        members — not a single flattened node interleaving both chains.
+        """
+        write_narrator_mentions_resolved(
+            curated_dir,
+            [
+                {
+                    "mention_id": "m0",
+                    "hadith_id": "h-1",
+                    "chain_index": 0,
+                    "position_in_chain": 0,
+                    "canonical_narrator_id": "nar:A",
+                },
+                {
+                    "mention_id": "m1",
+                    "hadith_id": "h-1",
+                    "chain_index": 0,
+                    "position_in_chain": 1,
+                    "canonical_narrator_id": "nar:B",
+                },
+                {
+                    "mention_id": "m2",
+                    "hadith_id": "h-1",
+                    "chain_index": 1,
+                    "position_in_chain": 0,
+                    "canonical_narrator_id": "nar:C",
+                },
+                {
+                    "mention_id": "m3",
+                    "hadith_id": "h-1",
+                    "chain_index": 1,
+                    "position_in_chain": 1,
+                    "canonical_narrator_id": "nar:D",
+                },
+            ],
+        )
+        results = load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        chain_result = results[3]
+        assert chain_result.created + chain_result.merged == 2  # two chains, one hadith
+
+        chain_batches = [
+            batch
+            for _query, batch in mock_client.calls
+            if isinstance(batch, list)
+            and batch
+            and "id" in batch[0]
+            and str(batch[0]["id"]).startswith("chn:")
+        ]
+        by_id = {row["id"]: row for batch in chain_batches for row in batch}
+        c0 = by_id[chain_node_id("h-1", 0)]
+        c1 = by_id[chain_node_id("h-1", 1)]
+        assert c0["narrator_ids"] == ["nar:A", "nar:B"]
+        assert c0["chain_index"] == 0
+        assert c1["narrator_ids"] == ["nar:C", "nar:D"]
+        assert c1["chain_index"] == 1
+
     def test_chains_exclude_provenance_orphan_links(
         self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
     ) -> None:

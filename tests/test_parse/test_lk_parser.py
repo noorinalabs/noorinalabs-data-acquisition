@@ -189,6 +189,32 @@ class TestLkParser:
         assert table.schema == NARRATOR_MENTION_SCHEMA
         assert table.num_rows > 0
 
+    def test_arabic_and_english_isnads_are_separate_chains(self, tmp_path: Path) -> None:
+        """da#282: lk emits an Arabic AND an English isnad for one hadith, each
+        numbered from position 0. They MUST carry distinct ``chain_index`` values
+        (ar=0, en=1) so the graph loader does not flatten the two same-hadith
+        sequences into one chain and fabricate cross-language narrator adjacencies.
+        """
+        raw_dir = tmp_path / "raw"
+        lk_dir = raw_dir / "lk"
+        lk_dir.mkdir(parents=True)
+        staging_dir = tmp_path / "staging"
+
+        _make_lk_csv(lk_dir / "albukhari.csv", _sample_rows())
+        run(raw_dir, staging_dir)
+
+        rows = pq.read_table(staging_dir / "narrator_mentions_lk.parquet").to_pylist()
+        # Row 1 of the sample carries both an English and an Arabic isnad.
+        ar = [r for r in rows if ":ar:" in r["mention_id"]]
+        en = [r for r in rows if ":en:" in r["mention_id"]]
+        assert ar, "expected Arabic-isnad mentions"
+        assert en, "expected English-isnad mentions"
+        assert all(r["chain_index"] == 0 for r in ar)
+        assert all(r["chain_index"] == 1 for r in en)
+        # The two chains of one hadith share a source_hadith_id but differ in chain.
+        shared = {r["source_hadith_id"] for r in ar} & {r["source_hadith_id"] for r in en}
+        assert shared, "a hadith with both isnads should appear in both chains"
+
     def test_no_csv_raises(self, tmp_path: Path) -> None:
         raw_dir = tmp_path / "raw"
         lk_dir = raw_dir / "lk"

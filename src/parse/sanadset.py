@@ -356,6 +356,10 @@ def _extract_narrator_mentions(
                     "source_hadith_id": source_hadith_id,
                     "source_corpus": _SOURCE_CORPUS,
                     "position_in_chain": position,
+                    # Sanadset carries one sanad (chain) per hadith row, so every
+                    # mention is chain 0 (da#282). Explicit rather than defaulted so
+                    # the column is never null on this high-volume producer.
+                    "chain_index": 0,
                     "name_ar": name_ar,
                     "name_en": None,
                     "name_ar_normalized": name_ar_normalized,
@@ -427,6 +431,9 @@ def _mentions_from_names(
                 "source_hadith_id": source_hadith_id,
                 "source_corpus": _SOURCE_CORPUS,
                 "position_in_chain": position,
+                # One sanad per hadith row → chain 0 (da#282); matches the
+                # ``<NAR>``-tag path in _extract_narrator_mentions.
+                "chain_index": 0,
                 "name_ar": name,
                 "name_en": None,
                 "name_ar_normalized": normalize_arabic(name),

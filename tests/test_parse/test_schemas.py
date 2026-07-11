@@ -76,6 +76,7 @@ class TestSampleData:
             "source_hadith_id": ["lk:bukhari:1:1"],
             "source_corpus": ["lk"],
             "position_in_chain": [0],
+            "chain_index": [1],
             "name_ar": [None],
             "name_en": ["Abu Hurayra"],
             "name_ar_normalized": [None],

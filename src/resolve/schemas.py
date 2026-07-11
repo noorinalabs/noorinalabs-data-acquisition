@@ -13,7 +13,10 @@ __all__ = [
     "PARALLEL_LINKS_SCHEMA",
 ]
 
-RESOLVE_SCHEMA_VERSION = 1
+# v2 (da#282): added ``chain_index`` — the per-hadith isnad-chain ordinal the
+# graph loaders group on so TRANSMITTED_TO / NARRATED / Chain are built WITHIN a
+# chain, never flattened across a hadith's multiple chains.
+RESOLVE_SCHEMA_VERSION = 2
 
 NARRATOR_MENTIONS_RESOLVED_SCHEMA = pa.schema(
     [
@@ -21,6 +24,15 @@ NARRATOR_MENTIONS_RESOLVED_SCHEMA = pa.schema(
         pa.field("hadith_id", pa.string(), nullable=False),
         pa.field("source_corpus", pa.string(), nullable=False),
         pa.field("position_in_chain", pa.int32(), nullable=False),
+        # Per-hadith isnad-chain ordinal (da#282). Carries the parse-layer
+        # ``NARRATOR_MENTION_SCHEMA.chain_index`` through resolution so the edge /
+        # chain loaders can group by (hadith_id, chain_index) instead of hadith_id
+        # alone. Without it, a hadith with more than one transmission sequence (today:
+        # lk's Arabic + English isnads, each numbered from position 0) is flattened
+        # into one position-sorted list, fabricating narrator adjacencies that exist
+        # in no actual chain. Nullable → None coalesces to 0 (single chain), so
+        # single-isnad hadiths and legacy files are unaffected.
+        pa.field("chain_index", pa.int32(), nullable=True),
         pa.field("name_raw", pa.string(), nullable=True),
         pa.field("name_normalized", pa.string(), nullable=True),
         pa.field("canonical_narrator_id", pa.string(), nullable=True),

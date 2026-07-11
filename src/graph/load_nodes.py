@@ -576,8 +576,10 @@ def _load_chains(
     """Load Chain nodes from the *resolved* narrator-mention master.
 
     Chains are synthesized from narrator-mention parquet: each unique
-    (hadith_id, chain_index=0) tuple produces a Chain node whose ``narrator_ids``
-    is the per-hadith mention sequence (ordered by ``position_in_chain``).
+    (hadith_id, chain_index) tuple produces a Chain node whose ``narrator_ids`` is
+    that chain's mention sequence (ordered by ``position_in_chain``). ``chain_index``
+    is the per-hadith isnad ordinal (da#282) — a hadith with multiple transmission
+    sequences yields one Chain node per chain rather than a single flattened one.
 
     Reads ``narrator_mentions_resolved*.parquet`` from ``curated_dir`` — NOT the
     raw ``narrator_mentions_*.parquet`` in ``staging_dir``. The canonical
@@ -603,7 +605,13 @@ def _load_chains(
     # Accumulate only the (position, canonical_id) pairs we need per hadith —
     # the resolved master is ~3.2M rows, so keeping whole row dicts would bloat
     # memory needlessly (see the streaming work in load_edges for the same reason).
-    seen_hadiths: dict[str, list[tuple[int, str]]] = {}
+    # Key by (hadith_id, chain_index) so each isnad-chain becomes its own Chain
+    # node (da#282). Keying on hadith alone flattened a multi-isnad hadith's chains
+    # (today: lk's Arabic + English isnads, each numbered from position 0) into one
+    # position-sorted ``narrator_ids`` list, corrupting the chain member order.
+    # ``chain_index`` is None/absent for single-chain producers and legacy files →
+    # coalesces to 0, leaving single-isnad hadiths unchanged.
+    seen_chains: dict[tuple[str, int], list[tuple[int, str]]] = {}
     for fp in files:
         for row in _read_parquet_rows(fp):
             hid = row.get("source_hadith_id") or row.get("hadith_id")
@@ -622,18 +630,19 @@ def _load_chains(
             if row.get("provenance"):
                 continue
             pos = row.get("position_in_chain") or 0
-            seen_hadiths.setdefault(hid, []).append((pos, nid))
+            cidx = row.get("chain_index") or 0
+            seen_chains.setdefault((hid, cidx), []).append((pos, nid))
 
     batch: list[dict[str, Any]] = []
     errors: list[str] = []
     skipped = 0
     malformed = 0
 
-    for hid, mentions in seen_hadiths.items():
+    for (hid, chain_index), mentions in seen_chains.items():
         # da#355: both constructors route through ``bare_source_id``, so a malformed
         # hadith id raises here too. Quarantine the chain rather than abort the load.
         try:
-            chn_id = chain_node_id(hid, 0)
+            chn_id = chain_node_id(hid, chain_index)
             chain_hadith_id = hadith_node_id(hid)
         except DoubledCorpusPrefixError as exc:
             if strict:
@@ -647,7 +656,7 @@ def _load_chains(
             {
                 "id": chn_id,
                 "hadith_id": chain_hadith_id,
-                "chain_index": 0,
+                "chain_index": chain_index,
                 "full_chain_text_ar": None,
                 "full_chain_text_en": None,
                 "chain_length": len(narrator_ids),

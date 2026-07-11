@@ -30,6 +30,7 @@ def _write_narrator_mentions_parquet(path: Path, rows: list[dict]) -> Path:
         "source_hadith_id": pa.array([r["source_hadith_id"] for r in rows], type=pa.string()),
         "source_corpus": pa.array([r["source_corpus"] for r in rows], type=pa.string()),
         "position_in_chain": pa.array([r["position_in_chain"] for r in rows], type=pa.int32()),
+        "chain_index": pa.array([r.get("chain_index", 0) for r in rows], type=pa.int32()),
         "name_ar": pa.array([r.get("name_ar") for r in rows], type=pa.string()),
         "name_en": pa.array([r.get("name_en") for r in rows], type=pa.string()),
         "name_ar_normalized": pa.array(

@@ -88,7 +88,9 @@ def _mention_rows(n_hadiths: int) -> list[dict[str, object]]:
 def _write_mentions(output_dir: Path, rows: list[dict[str, object]]) -> None:
     cols: dict[str, pa.Array] = {}
     for field in NARRATOR_MENTIONS_RESOLVED_SCHEMA:
-        cols[field.name] = pa.array([r[field.name] for r in rows], type=field.type)
+        # ``.get`` so a row need not enumerate every (nullable) column, e.g.
+        # ``chain_index`` added in da#282 — absent → null → coalesces to chain 0.
+        cols[field.name] = pa.array([r.get(field.name) for r in rows], type=field.type)
     pq.write_table(
         pa.table(cols, schema=NARRATOR_MENTIONS_RESOLVED_SCHEMA),
         output_dir / "narrator_mentions_resolved.parquet",
