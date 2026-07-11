@@ -481,21 +481,23 @@ class TestUnroutedCorpusHardFail:
         }
 
     def test_unrouted_staged_corpus_raises(self, tmp_path: Path) -> None:
-        """RED-FIRST: 'bihar' is a valid SourceCorpus with no NER route. Staged,
-        it must raise rather than be silently dropped. Pre-da#369 run() only ever
-        iterated the fixed route sets, so a bihar hadiths file was ignored with no
-        error (and, for a routed-but-isnad-null corpus, silently matn-mined)."""
+        """RED-FIRST: a staged corpus in NO route bucket must raise rather than be
+        silently dropped. Pre-da#369 run() only iterated the fixed route sets, so an
+        unrouted hadiths file was ignored with no error (and, for a routed-but-isnad-
+        null corpus, silently matn-mined). da#365 routed the four real offenders
+        (tusi / halimbahae / bihar / mis), so this uses a synthetic corpus name that
+        is in no bucket -- the contract must hold for any future unclassified corpus."""
         staging = tmp_path / "staging"
         staging.mkdir()
         output = tmp_path / "output"
         output.mkdir()
         write_hadiths(
-            staging / "hadiths_bihar.parquet",
-            [self._hadith("bihar", "حدثنا محمد عن علي")],
+            staging / "hadiths_uncharted.parquet",
+            [self._hadith("uncharted_corpus", "حدثنا محمد عن علي")],
         )
         with pytest.raises(UnroutedCorpusError) as excinfo:
             run(staging, output)
-        assert "bihar" in excinfo.value.unrouted
+        assert "uncharted_corpus" in excinfo.value.unrouted
         # The hard-fail fires before any mention output is written.
         assert not (output / "narrator_mentions_resolved.parquet").exists()
 
@@ -519,3 +521,131 @@ class TestUnroutedCorpusHardFail:
         # Must not raise; a routed corpus with a real isnad produces mentions.
         paths = run(staging, output)
         assert (output / "narrator_mentions_resolved.parquet") in paths
+
+
+# ---------------------------------------------------------------------------
+# Tests: per-corpus routing (da#365)
+# ---------------------------------------------------------------------------
+class TestPerCorpusRouting:
+    """da#365: every staged corpus that produces a globbed NER input declares an
+    explicit route, layered on top of da#369's unrouted-corpus hard-fail. The four
+    corpora that were staged-but-routed-nowhere (tusi / halimbahae / bihar / mis)
+    each get their correct destination: tusi -> Arabic extraction (real isnad
+    column); halimbahae + bihar -> splitter-deferred (isnad-in-matn, held for
+    da#366); mis -> skip (chains come from network_edges_mis.parquet, da#364)."""
+
+    @staticmethod
+    def _hadith(
+        source_corpus: str,
+        *,
+        isnad_ar: str | None = None,
+        full_text_ar: str | None = None,
+    ) -> dict:
+        return {
+            "source_id": f"{source_corpus}-1",
+            "source_corpus": source_corpus,
+            "collection_name": f"{source_corpus}-collection",
+            "isnad_raw_ar": isnad_ar,
+            "isnad_raw_en": None,
+            "full_text_ar": full_text_ar,
+            "full_text_en": None,
+            "matn_ar": None,
+            "matn_en": None,
+            "grade": None,
+            "sect": "shia",
+            "book_number": 1,
+            "chapter_number": 1,
+            "hadith_number": 1,
+            "chapter_name_ar": None,
+            "chapter_name_en": None,
+        }
+
+    # -- tusi: pure routing miss, real isnad column -> Arabic extraction ------
+    def test_tusi_routed_to_arabic(self) -> None:
+        from src.resolve.ner import _ARABIC_SOURCES
+
+        assert "tusi" in _ARABIC_SOURCES
+
+    def test_tusi_isnad_extracted_end_to_end(self, tmp_path: Path) -> None:
+        """RED-FIRST: before da#365, tusi was in no route set, so run() raised
+        UnroutedCorpusError and tusi's 17,089 real isnads yielded 0 mentions. Now a
+        staged tusi hadith with a populated isnad_raw_ar extracts through run()."""
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        output = tmp_path / "output"
+        output.mkdir()
+        write_hadiths(
+            staging / "hadiths_tusi.parquet",
+            [self._hadith("tusi", isnad_ar="حدثنا محمد عن علي")],
+        )
+        paths = run(staging, output)
+        resolved = output / "narrator_mentions_resolved.parquet"
+        assert resolved in paths
+        corpora = set(pq.read_table(resolved).column("source_corpus").to_pylist())
+        assert "tusi" in corpora
+
+    # -- halimbahae / bihar: isnad-in-matn, deferred pending da#366 -----------
+    def test_halimbahae_and_bihar_deferred_not_force_routed(self) -> None:
+        from src.resolve.ner import (
+            _ARABIC_SOURCES,
+            _ENGLISH_SOURCES,
+            _SPLITTER_DEFERRED_SOURCES,
+        )
+
+        assert "halimbahae" in _SPLITTER_DEFERRED_SOURCES
+        assert "bihar" in _SPLITTER_DEFERRED_SOURCES
+        # NOT force-routed into extraction on their null-isnad rows.
+        for corpus in ("halimbahae", "bihar"):
+            assert corpus not in _ARABIC_SOURCES
+            assert corpus not in _ENGLISH_SOURCES
+
+    def test_deferred_corpus_not_matn_mined_and_does_not_raise(self, tmp_path: Path) -> None:
+        """RED-FIRST: before da#365 a staged halimbahae hadiths file raised
+        UnroutedCorpusError. A splitter-dependent corpus staged with a null isnad but
+        an isnad-BEARING full_text_ar must (a) not raise and (b) yield 0 mentions --
+        the full_text (matn) is NOT mined (better silent than polluted, #928). Held
+        until the da#366 splitter lands."""
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        output = tmp_path / "output"
+        output.mkdir()
+        write_hadiths(
+            staging / "hadiths_halimbahae.parquet",
+            [self._hadith("halimbahae", isnad_ar=None, full_text_ar="حدثنا محمد عن علي")],
+        )
+        # Must not raise -- halimbahae is explicitly routed (deferred).
+        paths = run(staging, output)
+        resolved = output / "narrator_mentions_resolved.parquet"
+        if resolved.exists():
+            corpora = set(pq.read_table(resolved).column("source_corpus").to_pylist())
+            assert "halimbahae" not in corpora
+        else:
+            assert paths == []
+
+    # -- mis: skip; chains come from network_edges_mis.parquet (da#364) -------
+    def test_mis_routed_to_skip(self) -> None:
+        from src.resolve.ner import _SKIP_SOURCES
+
+        assert "mis" in _SKIP_SOURCES
+
+    def test_mis_staged_hadiths_yield_no_mentions_and_do_not_raise(self, tmp_path: Path) -> None:
+        """mis's hadiths_mis.parquet carries a null isnad; its transmission chains
+        are the separate network_edges_mis.parquet (da#364), not NER over hadith
+        rows. Staged, it must not raise and must contribute 0 NER mentions."""
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        output = tmp_path / "output"
+        output.mkdir()
+        write_hadiths(
+            staging / "hadiths_mis.parquet",
+            [self._hadith("mis", isnad_ar=None)],
+        )
+        paths = run(staging, output)
+        assert paths == []
+
+    # -- the whole staged offender set is routed -----------------------------
+    def test_all_issue_staged_corpora_are_routed(self) -> None:
+        from src.resolve.ner import _ROUTED_CORPORA
+
+        for corpus in ("tusi", "halimbahae", "bihar", "mis"):
+            assert corpus in _ROUTED_CORPORA
