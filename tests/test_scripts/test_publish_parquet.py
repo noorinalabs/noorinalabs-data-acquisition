@@ -207,6 +207,126 @@ def test_build_rclone_env_sets_native_vars(monkeypatch: pytest.MonkeyPatch) -> N
     assert env["RCLONE_CONFIG_PIPELINE_KEY"] == _FAKE_KEY
 
 
+# --- The gate is wired into main(), not merely defined (da#429 review) --------
+@pytest.mark.parametrize(
+    ("defect", "reason"),
+    [
+        ("incomplete", "did NOT complete"),
+        ("md5", "NOT the file resolve took its tally over"),
+        ("absent", "absent or malformed"),
+    ],
+)
+def test_main_refuses_a_bad_keep_set_and_uploads_NOTHING(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    defect: str,
+    reason: str,
+) -> None:
+    """``main()`` must actually CALL ``assert_run_publishable`` — and upload nothing.
+
+    Every other refusal test in this suite calls ``assert_run_publishable`` directly as a
+    unit, which pins the FUNCTION but not the BRANCH THAT CALLS IT. Oyunbileg Batbayar
+    deleted the call from ``_run()`` and all 38 publish tests still passed — while
+    ``rclone copyto ... narrators_canonical.parquet`` actually fired and an unbacked
+    keep-set reached the upload. That is the exact failure this PR names in
+    ``test_no_resolve_module_writes_the_canonical_master_directly`` and then committed
+    itself, one layer up.
+
+    The reason is asserted, not merely a non-zero exit: adding a guard EARLIER can
+    silently un-test every guard behind it, so "it refused" is not evidence that the door
+    under test is the one that fired.
+    """
+    curated = tmp_path / "curated"
+    _make_curated(curated)
+    _make_staging(tmp_path / "staging", full=True)
+    monkeypatch.setenv("PIPELINE_B2_KEY_ID", _FAKE_KEY_ID)
+    monkeypatch.setenv("PIPELINE_B2_KEY", _FAKE_KEY)
+    monkeypatch.setattr("scripts.publish_parquet.shutil.which", lambda _b: "/usr/bin/rclone")
+
+    if defect == "incomplete":
+        _write_run_record(curated, status="incomplete")
+    elif defect == "md5":
+        # The tally was taken over other bytes — a resume that skipped every canonical
+        # writer, or a scrub script that rewrote the parquet outside the sanctioned writer.
+        (curated / CANONICAL_PARQUET_NAME).write_bytes(b"PAR1-rewritten-after-the-tally")
+    elif defect == "absent":
+        (curated / RESOLVE_RUN_FILENAME).unlink()
+
+    calls: list[list[str]] = []
+
+    def _record(cmd: list[str], **_kwargs: object) -> object:
+        calls.append(cmd)
+        raise AssertionError(f"rclone must never be invoked for a refused keep-set: {cmd}")
+
+    monkeypatch.setattr("scripts.publish_parquet.subprocess.run", _record)
+
+    rc = main(
+        [
+            "--parquet-ref",
+            "staged/narrator-resolve/2026-07-11-abc1234",
+            "--curated-dir",
+            str(curated),
+            "--staging-dir",
+            str(tmp_path / "staging"),
+        ]
+    )
+
+    assert rc != 0, "publish ACCEPTED an artifact the consumer will refuse"
+    assert reason in capsys.readouterr().err, "refused — but NOT by the door under test"
+    assert calls == [], "an unbacked keep-set was uploaded to B2"
+
+
+def test_main_publishes_the_healthy_artifact(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The known-negative for the three refusals above.
+
+    Without it, deleting the gate's call site and replacing it with an unconditional
+    ``raise`` would satisfy every test above — a publisher that refuses EVERYTHING,
+    including the healthy artifact it exists to ship.
+    """
+    curated = tmp_path / "curated"
+    _make_curated(curated)
+    _make_staging(tmp_path / "staging", full=True)
+    monkeypatch.setenv("PIPELINE_B2_KEY_ID", _FAKE_KEY_ID)
+    monkeypatch.setenv("PIPELINE_B2_KEY", _FAKE_KEY)
+    monkeypatch.setattr("scripts.publish_parquet.shutil.which", lambda _b: "/usr/bin/rclone")
+
+    def _fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "lsf" in cmd:
+            listing = "\n".join(
+                [
+                    *(f"curated/{n}" for n in CURATED_REQUIRED),
+                    *(f"curated/{n}" for n in PROVENANCE_REQUIRED),
+                    "staging/hadiths_bukhari.parquet",
+                    "staging/collections_all.parquet",
+                    "staging/narrator_mentions_all.parquet",
+                    "staging/network_edges_studied.parquet",
+                    "staging/parallel_links.parquet",
+                ]
+            )
+            return subprocess.CompletedProcess(cmd, 0, stdout=listing, stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("scripts.publish_parquet.subprocess.run", _fake_run)
+
+    rc = main(
+        [
+            "--parquet-ref",
+            "staged/narrator-resolve/2026-07-11-abc1234",
+            "--curated-dir",
+            str(curated),
+            "--staging-dir",
+            str(tmp_path / "staging"),
+        ]
+    )
+
+    assert rc == 0, "the gate refused a HEALTHY artifact — a false-FAIL on the launch path"
+    # The tally is copied forward verbatim; the publisher declares no count of its own.
+    assert "canonical_ids=129234" in capsys.readouterr().err
+
+
 # --- CLI wiring -------------------------------------------------------------
 def test_dry_run_uploads_nothing_and_echoes_ref(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch

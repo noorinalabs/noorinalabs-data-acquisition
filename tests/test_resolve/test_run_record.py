@@ -346,39 +346,180 @@ def test_absent_record_reads_as_none_never_as_zero(tmp_path: Path) -> None:
     assert read_run_record(tmp_path) is None
 
 
-# --- The branch that calls it: no seventh writer may bypass write_canonical ---
-def _bypassing_writers(source: str) -> list[int]:
-    """Line numbers of ``write_parquet(...)`` calls that pass NARRATORS_CANONICAL_SCHEMA.
+# --- run_all actually CALLS finalize_run (da#429 review) ---------------------
+def _run_all_with_spies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, boom: bool = False
+) -> Path:
+    """Drive the real ``run_all`` with no-op stages, except a ``disambiguate`` that
+    genuinely mints a tally through the sanctioned writer.
 
-    Such a call writes the canonical master WITHOUT minting a tally, leaving the record
-    describing bytes that no longer exist. A guard is pinned by the branch that calls it,
-    not by the existence of the function — so this walks the AST of every resolve module.
+    ``boom=True`` makes a later stage raise, so ``run_all`` finishes its sweep and then
+    raises ``ResolveStageError`` (da#360) — the errored path.
+    """
+    from src.resolve import (
+        bio_promote,
+        date_reconcile,
+        dedup,
+        disambiguate,
+        fuzzy_cluster,
+        muhaddithat_links,
+        narrator_split,
+        ner,
+        parallels,
+        run_all,
+        tabaqa_dates,
+    )
+
+    staging = tmp_path / "staging"
+    output = tmp_path / "curated"
+    staging.mkdir()
+    output.mkdir()
+    pq.write_table(pa.table({"x": [1]}), staging / "hadiths_test.parquet")
+
+    def _mint(*_a: object, **_k: object) -> list[Path]:
+        write_canonical(
+            _canonical_table(["nar:a", "nar:b"]), output / CANONICAL, stage="disambiguate"
+        )
+        return []
+
+    monkeypatch.setattr(ner, "run", lambda *_a, **_k: [])
+    monkeypatch.setattr(disambiguate, "run", _mint)
+    monkeypatch.setattr(bio_promote, "promote_bios_to_canonical", lambda *_a, **_k: None)
+    metrics = type("M", (), {"merged_records": 0, "multi_member_clusters": 0})()
+    monkeypatch.setattr(fuzzy_cluster, "cluster_canonical_narrators", lambda *_a, **_k: metrics)
+    monkeypatch.setattr(narrator_split, "split_generic_narrators", lambda *_a, **_k: None)
+    monkeypatch.setattr(date_reconcile, "reconcile_canonical_dates", lambda *_a, **_k: None)
+    monkeypatch.setattr(tabaqa_dates, "apply_tabaqa_fallback", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        muhaddithat_links, "build_muhaddithat_mention_links", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(dedup, "run", lambda *_a, **_k: [])
+
+    def _boom(*_a: object, **_k: object) -> list[Path]:
+        raise ValueError("parallels blew up mid-run")
+
+    monkeypatch.setattr(parallels, "run", _boom if boom else (lambda *_a, **_k: []))
+
+    if boom:
+        from src.resolve import ResolveStageError
+
+        with pytest.raises(ResolveStageError):
+            run_all(tmp_path / "raw", staging, output)
+    else:
+        run_all(tmp_path / "raw", staging, output)
+    return output
+
+
+def test_run_all_finalizes_a_successful_run_to_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``run_all`` must actually CALL ``finalize_run`` — the seam, not the function.
+
+    ``write_canonical`` stamps ``incomplete`` on every write, so ``complete`` can ONLY
+    appear if ``run_all`` reached its finalize call. Replace that call with ``pass`` and
+    the entire 2,229-test suite stays green (Oyunbileg Batbayar): nothing asserted that a
+    successful run yields ``complete``. The failure is fail-CLOSED — publish would refuse
+    every healthy run — but it would land as a false-FAIL at the end of a 7.5-hour re-run,
+    on the launch path, which is precisely how an operator gets trained to weaken a gate.
+    """
+    output = _run_all_with_spies(tmp_path, monkeypatch)
+
+    record = read_run_record(output)
+    assert record is not None
+    assert record.run_status is RunStatus.COMPLETE, "run_all never finalized the record"
+    assert record.canonical_ids == 2, "the tally was recomputed, not preserved"
+    assert record.last_writer == "disambiguate"
+    # The per-stage forensics landed too — a hand-authored record cannot fake these.
+    assert any(s.startswith("step=ner ") for s in record.stages)
+
+
+def test_run_all_leaves_an_errored_run_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other direction. A one-sided assertion is half a control.
+
+    Without this, ``finalize_run(..., complete=True)`` unconditionally would satisfy the
+    test above while blessing a run that raised — the exact 'resolve stopped early' mode
+    that no count equality can see.
+    """
+    output = _run_all_with_spies(tmp_path, monkeypatch, boom=True)
+
+    record = read_run_record(output)
+    assert record is not None
+    assert record.run_status is RunStatus.INCOMPLETE, "a run with a raised stage was blessed"
+
+
+# --- The branch that calls it: no seventh writer may bypass write_canonical ---
+# Every function name that can put bytes into a parquet file, in any call form. The
+# detector matches the bare name (`write_parquet(...)`) AND the dotted attribute form
+# (`pq.write_table(...)`, `base.write_parquet(...)`) — a gate must match every syntactic
+# form of the thing it forbids, or it merely relocates the bypass to the form it cannot
+# see. `pq.write_table` is exactly the form the scrub scripts use and the most natural
+# way a future writer would reach for (Jean-Claude Habimana, da#429 review).
+_PARQUET_WRITE_FUNCS = frozenset({"write_parquet", "write_table"})
+
+# The two names that identify the CANONICAL master as the target. `canonical_path` is the
+# load-bearing one: it survives a call form that passes no schema at all.
+_CANONICAL_MARKERS = frozenset({"canonical_path", "NARRATORS_CANONICAL_SCHEMA"})
+
+
+def _bypassing_writers(source: str) -> list[int]:
+    """Line numbers of parquet writes that target the canonical master directly.
+
+    Such a call writes ``narrators_canonical.parquet`` WITHOUT minting a tally, leaving
+    the record describing bytes that no longer exist. A guard is pinned by the branch that
+    calls it, not by the existence of the function — so this walks the AST of every
+    resolve module rather than trusting a convention.
+
+    Residual limit, stated rather than hidden: a schema reached through an alias variable
+    and a path built inline (``pq.write_table(t, out / "narrators_canonical.parquet")``)
+    would slip past. That is a narrower early-warning signal, NOT a safety hole — the md5
+    binding in :func:`write_canonical` is form-agnostic (it hashes bytes and does not care
+    how they arrived), so any bypass still fails closed at publish.
     """
     found: list[int] = []
     for node in ast.walk(ast.parse(source)):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+        if not isinstance(node, ast.Call):
             continue
-        if node.func.id != "write_parquet":
+        func = node.func
+        if isinstance(func, ast.Name):
+            name = func.id
+        elif isinstance(func, ast.Attribute):
+            name = func.attr
+        else:
             continue
-        refs = {
-            n.id for n in ast.walk(node) if isinstance(n, ast.Name)
-        }  # args + keywords, any depth
-        if "NARRATORS_CANONICAL_SCHEMA" in refs:
+        if name not in _PARQUET_WRITE_FUNCS:
+            continue
+        refs = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+        if refs & _CANONICAL_MARKERS:
             found.append(node.lineno)
     return found
 
 
-def test_the_bypass_detector_separates_its_two_classes() -> None:
-    """Verify the instrument before reading it: it must FIRE on a bypass and stay silent
-    on the sanctioned writer. A detector that cannot separate the two classes it exists
-    to separate is not producing a measurement."""
-    bypass = "write_parquet(t, canonical_path, schema=NARRATORS_CANONICAL_SCHEMA)"
-    sanctioned = "write_canonical(t, canonical_path, stage='cluster')"
-    other_artifact = "write_parquet(t, audit_path, schema=NARRATOR_SPLITS_SCHEMA)"
+@pytest.mark.parametrize(
+    ("form", "is_bypass"),
+    [
+        # Known-POSITIVES — every call form that really does write the canonical master.
+        ("write_parquet(t, canonical_path, schema=NARRATORS_CANONICAL_SCHEMA)", True),
+        ("pq.write_table(t, canonical_path)", True),  # the form the scrub scripts use
+        ("base.write_parquet(t, canonical_path)", True),  # dotted
+        ("pyarrow.parquet.write_table(t, canonical_path, compression='snappy')", True),
+        # Known-NEGATIVES — must NOT fire.
+        ("write_canonical(t, canonical_path, stage='cluster')", False),
+        ("write_parquet(t, audit_path, schema=NARRATOR_SPLITS_SCHEMA)", False),
+        ("writer.write_table(table)", False),  # streaming ParquetWriter, other artifact
+        ("pq.read_table(canonical_path)", False),  # a READ of the canonical master
+    ],
+)
+def test_the_bypass_detector_separates_its_two_classes(form: str, is_bypass: bool) -> None:
+    """Verify the instrument on BOTH classes before reading it anywhere else.
 
-    assert _bypassing_writers(bypass) == [1], "detector is blind to a real bypass"
-    assert _bypassing_writers(sanctioned) == []
-    assert _bypassing_writers(other_artifact) == []
+    The first version of this detector matched only the bare-name ``write_parquet`` form
+    and was blind to ``pq.write_table(t, canonical_path)`` — a gate that cannot see the
+    most natural way to commit the very bypass it forbids. A detector that cannot separate
+    the two classes it exists to separate is not producing a measurement.
+    """
+    assert bool(_bypassing_writers(form)) is is_bypass
 
 
 # The ONE sanctioned site: write_canonical's own write_parquet call, which mints the
