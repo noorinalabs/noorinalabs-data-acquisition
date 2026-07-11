@@ -309,6 +309,7 @@ class TestReservedSetIsEnumerated:
             "DB_UNREACHABLE": 8,
             "UNROUTED_CORPUS": 9,
             "PARSE_PRODUCER_DEFECT": 10,
+            "RESOLVE_STAGE_FAILED": 11,
         }
 
     def test_the_ruling_table_is_pinned(self) -> None:
@@ -328,6 +329,7 @@ class TestReservedSetIsEnumerated:
         assert (
             ExitCode.PARSE_PRODUCER_DEFECT == 10
         )  # da#386: parse fails loud on the da#355 gate (9 taken by da#369 UNROUTED_CORPUS)
+        assert ExitCode.RESOLVE_STAGE_FAILED == 11  # da#360: 11 after 3-way 9-collision
 
     def test_every_member_documents_what_is_on_disk(self) -> None:
         """The DOCSTRINGS are the specification. There is no ordering claim.

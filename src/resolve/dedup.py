@@ -31,6 +31,11 @@ from src.resolve._checkpoint import (
     save_checkpoint,
 )
 from src.resolve._deps import MissingDependencyError, missing_dependencies
+from src.resolve._provenance import (
+    DetectorProvenance,
+    DetectorStatus,
+    write_parallel_links,
+)
 from src.resolve.schemas import PARALLEL_LINKS_SCHEMA
 from src.utils.logging import get_logger
 
@@ -713,7 +718,9 @@ def run_dedup(
                 "detector still runs. This is NOT a 'no parallels found' result."
             ),
         )
-        return _write_empty_output(staging_dir)
+        # da#378: stamp DEGRADED_NO_ML so this empty artifact is no longer
+        # byte-identical to a true negative (semantic=RAN, 0 rows).
+        return _write_empty_output(staging_dir, DetectorStatus.DEGRADED_NO_ML)
 
     # ------------------------------------------------------------------
     # 1. Load hadith texts
@@ -726,14 +733,14 @@ def run_dedup(
         # behaviour change tracked separately. Kept distinct from Case B below so
         # the two are no longer structurally indistinguishable.
         logger.warning("dedup_no_hadith_files", staging_dir=str(staging_dir))
-        return _write_empty_output(staging_dir)
+        return _write_empty_output(staging_dir, DetectorStatus.NO_INPUT)
 
     hadith_ids, texts, sects = _load_hadith_texts(staging_dir)
     if not texts:
         # Case B: input files exist, but no row carries a non-empty English matn.
         # A genuinely empty input for an English-matn semantic detector.
         logger.warning("dedup_no_texts", files=len(hadith_files))
-        return _write_empty_output(staging_dir)
+        return _write_empty_output(staging_dir, DetectorStatus.NO_TEXTS)
 
     # ------------------------------------------------------------------
     # 2. Generate embeddings
@@ -846,8 +853,20 @@ def run_dedup(
         schema=PARALLEL_LINKS_SCHEMA,
     )
 
-    output_path = staging_dir / "parallel_links.parquet"
-    pq.write_table(table, output_path)
+    # da#378: the semantic detector executed its real algorithm, so this is a
+    # true measurement — RAN with len(ids_a) rows (zero rows here IS a true
+    # negative, distinct from the DEGRADED_NO_ML empty above). ``deterministic``
+    # is NOT_RUN in dedup's own artifact; run_all's compose fills it in.
+    output_path = write_parallel_links(
+        table,
+        staging_dir / "parallel_links.parquet",
+        DetectorProvenance(
+            semantic=DetectorStatus.RAN,
+            semantic_rows=len(ids_a),
+            deterministic=DetectorStatus.NOT_RUN,
+            deterministic_rows=0,
+        ),
+    )
 
     # The search + collection phase completed and its output is on disk — drop the
     # checkpoint so the next cold run doesn't spuriously resume (da#272).
@@ -876,12 +895,25 @@ def run_dedup(
     return output_path
 
 
-def _write_empty_output(staging_dir: Path) -> Path:
-    """Write an empty parallel_links.parquet and return its path."""
+def _write_empty_output(staging_dir: Path, semantic_status: DetectorStatus) -> Path:
+    """Write an empty parallel_links.parquet stamped with ``semantic_status``.
+
+    ``semantic_status`` records *why* the semantic side is empty — the whole
+    point of da#378: a ``DEGRADED_NO_ML`` empty (dedup skipped its algorithm) is
+    no longer byte-identical to a ``RAN`` zero-row table (dedup found nothing).
+    """
     table = PARALLEL_LINKS_SCHEMA.empty_table()
-    output_path = staging_dir / "parallel_links.parquet"
-    pq.write_table(table, output_path)
-    logger.info("dedup_empty_output", path=str(output_path))
+    output_path = write_parallel_links(
+        table,
+        staging_dir / "parallel_links.parquet",
+        DetectorProvenance(
+            semantic=semantic_status,
+            semantic_rows=0,
+            deterministic=DetectorStatus.NOT_RUN,
+            deterministic_rows=0,
+        ),
+    )
+    logger.info("dedup_empty_output", path=str(output_path), semantic_status=semantic_status.value)
     return output_path
 
 

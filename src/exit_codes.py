@@ -46,7 +46,13 @@ code    name                   what is on disk when it fires
 ``8``   ``DB_UNREACHABLE``     nothing written by the command that raised it
 ``9``   ``UNROUTED_CORPUS``    nothing resolve would have written (NER Step-1 abort)
 ``10``  ``PARSE_PRODUCER_DEFECT`` the clean sources' staging; the defective source's is absent
+``11``  ``RESOLVE_STAGE_FAILED`` prior stages' artifacts; a stage raised (da#360)
 ======  =====================  ===================================================
+
+da#360, da#369 and da#386 all branched from a main whose next free code was ``9``
+— a three-way collision resolved centrally: da#369 kept ``9`` (``UNROUTED_CORPUS``),
+da#386 took ``10`` (``PARSE_PRODUCER_DEFECT``), this took ``11``. All three have
+since merged, so the table now carries all three.
 
 ``4`` is not a "nothing ran" code. ``MissingDependencyError`` is raised at
 ``run_dedup``'s entry, and dedup is **Step 4** of ``run_all``: NER,
@@ -160,6 +166,7 @@ __all__ = [
     "EXIT_MISSING_DEPENDENCY",
     "EXIT_PARSE_PRODUCER_DEFECT",
     "EXIT_REFUSED_ROWS",
+    "EXIT_STAGE_FAILED",
     "EXIT_STOPPED_AT_LIMIT",
     "EXIT_UNROUTED_CORPUS",
     "EXIT_VALIDATION_FINDINGS",
@@ -252,6 +259,30 @@ class ExitCode(enum.IntEnum):
     other value is doing any work here.
     """
 
+    RESOLVE_STAGE_FAILED = 11
+    """A ``resolve`` stage raised. Prior stages' artifacts are on disk; the failed
+    stage's output is absent or partial (da#360).
+
+    Value ``11``, not ``9``: da#360, da#369 (``UNROUTED_CORPUS``) and da#386
+    (``PARSE_PRODUCER_DEFECT``) all branched from a main whose next free code was
+    ``9``, a three-way collision ``@enum.unique`` would have caught only pairwise
+    on merge. Deconflicted centrally — da#369 keeps ``9``, da#386 takes ``10``,
+    this takes ``11``. The gap between ``8`` and ``11`` in the table below is those
+    two siblings' rows, which land in their own PRs; a member is not documented
+    here until it exists here.
+
+    Distinct from :attr:`MISSING_DEPENDENCY` (4), which is ``dedup``'s declared-
+    dependency guard — a ``BaseException`` raised at ``run_dedup``'s entry before
+    it reads input. This code is for a stage that raised a *plain* ``Exception``
+    mid-run: ``run_all`` used to wrap every stage in ``except Exception`` and
+    log-and-continue, reach ``resolve_pipeline_complete`` and exit ``0`` — a
+    7.5-hour run could report success having skipped a stage. ``run_all`` now
+    records each raise as a ``StageErrored`` outcome and raises
+    ``ResolveStageError`` at the end; ``_cmd_resolve`` maps that here. It fires
+    only after the best-effort continue-past-failure sweep, so it means "at least
+    one stage failed", aggregating every failed stage, not just the first.
+    """
+
     DB_UNREACHABLE = 8
     """The connectivity pre-check could not reach Neo4j (da#384 Amendment R).
 
@@ -316,3 +347,4 @@ EXIT_VALIDATION_FINDINGS = ExitCode.VALIDATION_FINDINGS
 EXIT_REFUSED_ROWS = ExitCode.REFUSED_ROWS
 EXIT_UNROUTED_CORPUS = ExitCode.UNROUTED_CORPUS
 EXIT_PARSE_PRODUCER_DEFECT = ExitCode.PARSE_PRODUCER_DEFECT
+EXIT_STAGE_FAILED = ExitCode.RESOLVE_STAGE_FAILED

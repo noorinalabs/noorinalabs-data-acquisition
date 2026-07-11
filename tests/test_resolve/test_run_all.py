@@ -137,6 +137,12 @@ def test_run_all_promoted_bio_only_narrator_survives(tmp_path: Path, monkeypatch
         ]
 
     monkeypatch.setattr(ner, "run", _fake_ner)
+    # Stub the semantic detector: this test is about bio_promote ordering + the
+    # deterministic parallels wiring, not dedup. Left un-stubbed, dedup either
+    # requires the ml group or trips an env-specific transformers/torch import —
+    # a raise that run_all now surfaces (da#360) instead of swallowing. The
+    # deterministic detector below still produces the cross-sect edge asserted.
+    monkeypatch.setattr(dedup, "run", lambda *_a, **_k: [])
 
     run_all(tmp_path / "raw", staging, curated)
 
