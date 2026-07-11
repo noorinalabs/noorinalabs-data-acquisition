@@ -7,10 +7,56 @@ import pytest
 from src.parse.name_quality import (
     clean_narrator_name,
     clean_narrator_name_display,
+    is_mubham_relational,
     split_compound_narrators,
     strip_markup,
 )
 from src.utils.arabic import normalize_arabic
+
+
+class TestIsMubhamRelational:
+    """The da#391 alias-list scrub predicate — exposes the step-6 bare-relational
+    drop so the resolve alias-union sites can apply the SAME lexicon to the
+    ``aliases`` ``list<string>`` the cleaner never reaches."""
+
+    # 3rd-person forms already in the lexicon + the da#391 1st-person/vocative set.
+    @pytest.mark.parametrize(
+        "deixis",
+        [
+            "ابيه",  # his father
+            "خالته",  # his maternal aunt
+            "عمته",  # his paternal aunt
+            # da#391 1st-person possessive (-ي) and vocative (-اه) additions
+            "عمتي",  # my paternal aunt (survived on the ʿĀʾisha chimera)
+            "امتاه",  # O mother! (survived on the ʿĀʾisha chimera)
+            "جدي",  # my grandfather
+            "عمي",  # my paternal uncle
+            "خالتي",  # my maternal aunt
+            "اماه",  # O mother! (variant)
+            "ابتاه",  # O father!
+            # normalization is applied internally — a diacritized surface still matches
+            "خَالَتُهُ",
+        ],
+    )
+    def test_bare_relational_is_mubham(self, deixis: str) -> None:
+        assert is_mubham_relational(deixis) is True
+
+    # PRECISION: the single-token boundary — a real multi-token kunya that merely
+    # CONTAINS a relational token, a real ism, and empty input are never mubham.
+    @pytest.mark.parametrize(
+        "not_deixis",
+        [
+            "ابي اسحاق",  # Abū Isḥāq — real narrator, not "my father"
+            "عاءشه بنت سعد",  # a real nasab
+            "عاءشه",  # a real ism
+            "هشام",  # a real (male) ism
+            "سعد",
+            "",
+            None,
+        ],
+    )
+    def test_real_name_or_empty_is_not_mubham(self, not_deixis: str | None) -> None:
+        assert is_mubham_relational(not_deixis) is False
 
 
 class TestStripMarkup:

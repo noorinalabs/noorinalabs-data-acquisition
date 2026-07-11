@@ -26,6 +26,7 @@ from rapidfuzz.distance import Levenshtein
 from src.models.enums import DatePrecision
 from src.parse.base import safe_str, write_parquet
 from src.parse.identity import make_canonical_id
+from src.parse.name_quality import is_mubham_relational
 from src.resolve._checkpoint import (
     CheckpointController,
     checkpoint_dir,
@@ -1038,8 +1039,16 @@ def _upsert_canonical(
     # The mention's own surface, and (da#356) the matched bio's spelling, both stay
     # searchable as aliases. Pre-fix the *correct* spelling was demoted to an alias
     # of a corrupt-bio-named node; now the corrupt spelling is the alias.
+    # da#391: a bare relational-pronoun surface ("خالته"/"عمتي"/"امتاه") is dropped
+    # here — clean_narrator_name already drops it from the NAME at NER time, but the
+    # aliases list<string> is the blind spot it never reaches, so the deixis survives
+    # as an alias of a real narrator. Same closed kinship lexicon, no name adjudication.
     for candidate_alias in (alias, bio_alias):
-        if candidate_alias and candidate_alias != norm_name:
+        if (
+            candidate_alias
+            and candidate_alias != norm_name
+            and not is_mubham_relational(candidate_alias)
+        ):
             aliases = rec.get("aliases")
             if isinstance(aliases, list) and candidate_alias not in aliases:
                 aliases.append(candidate_alias)
