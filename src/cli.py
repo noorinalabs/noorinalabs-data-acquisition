@@ -525,6 +525,112 @@ def _cmd_migrate_transmitted_hadith_ids(*, batch_size: int = 1000) -> None:
         print("\nMigration complete.")
 
 
+def _cmd_prune_narrators(
+    *,
+    canonical: str,
+    dry_run: bool = False,
+    max_missing_fraction: float | None = None,
+    max_orphan_fraction: float | None = None,
+) -> None:
+    """DETACH DELETE Narrator nodes whose id is not in narrators_canonical.parquet (da#413).
+
+    The canonical-set SHRINK: after a re-resolve collapses ids, the graph still holds
+    the orphaned ``Narrator`` nodes (many WITH edges — a zero-degree predicate misses
+    them). The only correct orphan predicate is canonical-set membership, which lives
+    in the parquet, so this is a da-side subcommand rather than a cypher-only job
+    (deploy#557). ``--dry-run`` reports the count that would be deleted and deletes
+    nothing.
+
+    Refuses — non-zero exit :attr:`ExitCode.UNUSABLE_CANONICAL_SET`, ZERO deletion — when
+    the keep-set cannot be trusted, on any of three axes:
+
+    * it is empty / unreadable / missing (:class:`EmptyCanonicalSetError`);
+    * it is well-formed but is not **this graph's** — a stale ``--canonical``, caught by
+      the ``missing`` provenance signal (:class:`ForeignCanonicalSetError`);
+    * it *is* this graph's but keeps so little of it that the prune is a wipe — a
+      TRUNCATED parquet, caught by the delete magnitude (:class:`ExcessiveDeletionError`).
+      Note this one has ``missing == 0``: every id-provenance check passes on it.
+
+    A bad read must never wipe the graph — and neither must the wrong parquet, nor half
+    of the right one.
+    """
+    from pathlib import Path
+
+    from src.graph.prune import (
+        DEFAULT_MAX_MISSING_FRACTION,
+        DEFAULT_MAX_ORPHAN_FRACTION,
+        UnusableCanonicalSetError,
+        prune_narrators,
+        summary_line,
+    )
+    from src.utils.neo4j_client import Neo4jClient
+
+    # `None` (not the literal) is the CLI default, so each ceiling has exactly one home:
+    # src.graph.prune. A hardcoded default here — the shape of migrate's `--batch-size`
+    # — is a second copy of a number that must not drift, and cli.py lazy-imports the
+    # module precisely so `--help` need not pay for pyarrow + the neo4j driver.
+    if max_missing_fraction is None:
+        max_missing_fraction = DEFAULT_MAX_MISSING_FRACTION
+    if max_orphan_fraction is None:
+        max_orphan_fraction = DEFAULT_MAX_ORPHAN_FRACTION
+
+    # This command reads the canonical parquet and writes ONLY to the graph and
+    # stdout. It never writes back into the parquet's directory (no manifest, no audit
+    # entry, unlike `load`) — deploy#557 mounts that dir read-only, so a stray write
+    # would trip the :ro mount (da#348).
+
+    canonical_path = Path(canonical)
+
+    # Both guards run inside prune_narrators, BEFORE any graph WRITE. Catch their common
+    # supertype here to exit the named code rather than crash — nothing was deleted.
+    try:
+        # The first guard reads the parquet, not the DB. Check connectivity first (like
+        # load/migrate) so an unreachable DB is DB_UNREACHABLE, not a later crash.
+        _check_neo4j()
+        with Neo4jClient() as client:
+            result = prune_narrators(
+                client,
+                canonical_path,
+                dry_run=dry_run,
+                max_missing_fraction=max_missing_fraction,
+                max_orphan_fraction=max_orphan_fraction,
+            )
+    except UnusableCanonicalSetError as guard:
+        print(f"\nERROR: {guard}", file=sys.stderr)
+        sys.exit(ExitCode.UNUSABLE_CANONICAL_SET)
+
+    print("=== prune-narrators (canonical-set shrink, da#413) ===")
+    print(f"  Canonical ids (keep-set)   : {result.canonical_ids_seen}")
+    print(f"  Orphans (id ∉ canonical)   : {result.orphans_identified}")
+    # The keep-set provenance reading. ~0 says the parquet is this graph's; a large value
+    # says it is a stale/foreign one — the one thing no post-op gate can check, because
+    # every one of them is derived from this same keep-set.
+    print(f"  Missing (canonical ∉ graph): {result.missing}")
+    if result.sample:
+        shown = ", ".join(result.sample)
+        more = result.orphans_identified - len(result.sample)
+        suffix = f" (+{more} more)" if more > 0 else ""
+        print(f"  Sample orphan ids          : {shown}{suffix}")
+    if dry_run:
+        print(f"  Narrator nodes in graph    : {result.graph_total}")
+        print(
+            f"\nDRY RUN: {result.orphans_identified} Narrator node(s) WOULD be "
+            "DETACH DELETEd. Nothing was deleted."
+        )
+    else:
+        print(f"  Narrator nodes deleted     : {result.deleted}")
+        print(f"  Narrator nodes remaining   : {result.graph_total}")
+        print(f"  Orphans remaining (post)   : {result.orphans}")
+        if result.orphans_identified == 0:
+            print("\nNo orphans — every Narrator in the graph is in the canonical set.")
+        else:
+            print("\nPrune complete.")
+
+    # The load-bearing machine-readable line deploy#557's verify greps. Emitted on
+    # BOTH modes and last, so it is unmissable on stdout.
+    print(summary_line(result))
+
+
 def _cmd_enrich(
     *,
     only: list[str] | None = None,
@@ -706,6 +812,22 @@ def _cmd_pipeline() -> None:
     print("=== Full Pipeline Complete ===")
 
 
+def _unit_fraction(raw: str) -> float:
+    """argparse type for a fraction in [0.0, 1.0].
+
+    An out-of-range ceiling is operator error, so it must be argparse's usage exit (2),
+    not a traceback and not a silently clamped value that would quietly weaken a
+    destructive-op guard.
+    """
+    try:
+        value = float(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{raw!r} is not a number") from None
+    if not 0.0 <= value <= 1.0:
+        raise argparse.ArgumentTypeError(f"must be in [0.0, 1.0], got {value}")
+    return value
+
+
 def main() -> None:
     """Run the isnad-ingest CLI."""
     from src.graph.validate import _DEFAULT_VALIDATION_TIMEOUT_SECONDS
@@ -858,6 +980,61 @@ def main() -> None:
         help="Edges rewritten per write batch (default: 1000)",
     )
 
+    prune_parser = subparsers.add_parser(
+        "prune-narrators",
+        help=(
+            "DETACH DELETE Narrator nodes whose id is not in narrators_canonical.parquet "
+            "(canonical-set shrink; da#413)"
+        ),
+    )
+    prune_parser.add_argument(
+        "--canonical",
+        type=str,
+        required=True,
+        metavar="PARQUET",
+        help=(
+            "Path to narrators_canonical.parquet. Its canonical_id set is the "
+            "authoritative keep-set: every Narrator whose id is absent from it is "
+            "DETACH DELETEd. Refuses (exit 12, zero deletion) if it is empty, missing "
+            "or unreadable — or if it is not THIS graph's keep-set (see "
+            "--max-missing-fraction). Point it at the parquet the live graph was "
+            "loaded from: a stale one deletes the narrators it fails to mention."
+        ),
+    )
+    prune_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report the count that would be deleted (and a sample); delete nothing.",
+    )
+    prune_parser.add_argument(
+        "--max-missing-fraction",
+        type=_unit_fraction,
+        default=None,
+        metavar="FRACTION",
+        help=(
+            "Ceiling on 'missing' (canonical ids the graph has never seen), as a "
+            "fraction of the keep-set. Above it the keep-set is refused as belonging to "
+            "a DIFFERENT graph (exit 12, zero deletion) — the stale --canonical guard. "
+            "Default: half the keep-set. Raise it (up to 1.0, which disables the "
+            "ceiling) only when a genuinely large partial load is intended."
+        ),
+    )
+    prune_parser.add_argument(
+        "--max-orphan-fraction",
+        type=_unit_fraction,
+        default=None,
+        metavar="FRACTION",
+        help=(
+            "Ceiling on the share of the Narrator graph this prune may DELETE. Above it "
+            "the prune is refused (exit 12, zero deletion) — the TRUNCATED --canonical "
+            "guard, which --max-missing-fraction cannot catch because a truncated "
+            "keep-set's ids are all genuinely this graph's ('missing' is 0). Default: "
+            "0.9 — a legitimate post-re-mint cleanup can orphan ~55%% of an accumulated "
+            "graph, so a tighter ceiling would refuse real work; a truncated keep-set "
+            "deletes 97%%+. Raise it (1.0 disables) only when a wipe is genuinely meant."
+        ),
+    )
+
     audit_parser = subparsers.add_parser("audit", help="View recent pipeline audit entries")
     audit_parser.add_argument(
         "--last",
@@ -937,6 +1114,13 @@ def main() -> None:
             sys.exit(ExitCode.VALIDATION_FINDINGS)
     elif args.command == "migrate-transmitted-hadith-ids":
         _cmd_migrate_transmitted_hadith_ids(batch_size=args.batch_size)
+    elif args.command == "prune-narrators":
+        _cmd_prune_narrators(
+            canonical=args.canonical,
+            dry_run=args.dry_run,
+            max_missing_fraction=args.max_missing_fraction,
+            max_orphan_fraction=args.max_orphan_fraction,
+        )
     elif args.command == "audit":
         _cmd_audit(last_n=args.last)
     elif args.command == "pipeline":
