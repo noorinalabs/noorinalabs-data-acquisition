@@ -41,31 +41,69 @@ _PHASE1_MENTION_SOURCES: dict[str, str] = {
 #
 # fawaz (da#271): extracted from its Arabic full text, NOT its English translation.
 # fawaz ships an empty ``isnad_raw_en``/``isnad_raw_ar`` but a fully-populated
-# voweled ``full_text_ar`` (the extractor falls back to full text when the isnad
-# column is empty). The old English path produced romanized names ("Anas bin
-# Malik") that never share canonical identity with the Arabic corpora — the da#271
-# cross-script under-merge — and, because the English "Narrated X:" pattern only
-# surfaces the lead companion, it recovered ~1 narrator/hadith versus the full
+# voweled ``full_text_ar`` (isnad+matn). The old English path produced romanized
+# names ("Anas bin Malik") that never share canonical identity with the Arabic
+# corpora -- the da#271 cross-script under-merge -- and, because the English
+# "Narrated X:" pattern only surfaces the lead companion, it recovered ~1
+# narrator/hadith versus the full
 # ~5-narrator Arabic chain. Extracting the Arabic text is strictly better than
 # transliterating Latin→Arabic (lossy: no short vowels, bin/ibn, apostrophes) or a
 # cross-script match-key hack: it yields genuinely Arabic names that merge natively
 # AND the complete isnad chain. (sunnah stays English below: its ``full_text_ar``
 # is a samāʿ/reading-certificate blob with biographical dates, not a clean isnad.)
-_ARABIC_SOURCES: set[str] = {"thaqalayn", "open_hadith", "fawaz"}
+#
+# NOTE (da#369): the full_text fallback that once mined fawaz's empty-isnad blob
+# is removed, so fawaz currently yields 0 mentions; it stays routed here (not an
+# unrouted hard-fail) pending the same da#366 isnad/matn split the
+# _SPLITTER_DEFERRED_SOURCES corpora below await.
+#
+# tusi (da#365): a pure routing miss -- ships a fully separated ``isnad_raw_ar``
+# (17,089 of 17,421 rows, 98.1%; ~99% carry a transmission phrase, 100% segment
+# cleanly), yet was in no route set and so contributed 0 mentions. It needs no
+# splitter -- extracted straight from its isnad column like any Arabic corpus. Its
+# ~332 null-isnad rows hit the da#369 null-skip, never the removed matn mine.
+_ARABIC_SOURCES: set[str] = {"thaqalayn", "open_hadith", "fawaz", "tusi"}
 
 # Sources with English text needing keyword-based extraction.
 _ENGLISH_SOURCES: set[str] = {"sunnah"}
 
-# Sources to skip entirely (no raw isnads).
-_SKIP_SOURCES: set[str] = {"muhaddithat"}
+# Sources whose isnad chains are embedded INSIDE ``full_text_ar`` with no separate
+# ``isnad_raw_ar`` column (halimbahae and bihar are both 100% null-isnad yet
+# isnad-bearing in full_text). They CANNOT be extracted until a validated
+# isnad/matn splitter (da#366) lands: routing them through NER today extracts
+# nothing (null isnad column), and reinstating the removed full_text fallback would
+# re-import the matn pollution da#369 deleted (main#352). They are EXPLICITLY routed
+# to this deferred bucket -- not left unrouted -- so the da#369 hard-fail does not
+# fire on a known-held corpus, while a *genuinely* unrouted corpus (in no bucket at
+# all) still fails loud. They contribute 0 mentions until da#366: better silent-but-
+# declared than matn-polluted (#928). The value is the issue blocking each corpus.
+_SPLITTER_DEFERRED_SOURCES: dict[str, str] = {
+    "halimbahae": "da#366",
+    "bihar": "da#366",
+}
+
+# Sources to skip entirely -- no isnad chain is reachable via NER over hadith rows.
+#   muhaddithat: bio/network data only, no raw isnads.
+#   mis (da#365): its ``hadiths_mis.parquet`` rows carry a null ``isnad_raw_ar`` and
+#     no ``full_text_ar``; mis's transmission chains are staged separately as
+#     ``network_edges_mis.parquet`` and loaded on their own path (da#364), never
+#     mined from raw isnad text here. Routed to skip (not unrouted) so the da#369
+#     hard-fail does not fire; it contributes 0 NER mentions by construction.
+_SKIP_SOURCES: set[str] = {"muhaddithat", "mis"}
 
 # The union of every corpus with an explicit NER route. A staged corpus outside
 # this set has no way to have its narrators extracted and MUST fail loud (da#369)
 # rather than be silently dropped or (pre-da#369) matn-mined via the removed
-# full_text fallback. da#365 layers the correct per-corpus routing on top of this
-# guard; the guard is what makes an unrouted corpus impossible to miss until then.
+# full_text fallback. da#365 completes the routing: every corpus that stages a
+# globbed NER input (hadiths_* / narrator_mentions_*) now declares a route --
+# extract (phase1 / arabic / english), splitter-deferred, or skip. A brand-new
+# staged corpus in none of these buckets still trips the guard.
 _ROUTED_CORPORA: frozenset[str] = frozenset(
-    set(_PHASE1_MENTION_SOURCES) | _ARABIC_SOURCES | _ENGLISH_SOURCES | _SKIP_SOURCES
+    set(_PHASE1_MENTION_SOURCES)
+    | _ARABIC_SOURCES
+    | _ENGLISH_SOURCES
+    | set(_SPLITTER_DEFERRED_SOURCES)
+    | _SKIP_SOURCES
 )
 
 
@@ -95,8 +133,9 @@ class UnroutedCorpusError(BaseException):
         super().__init__(
             f"staged corpora with no NER extraction route: {self.unrouted}. "
             f"Routed corpora: {self.routed}. Every staged corpus must be explicitly "
-            "opted in to a NER route (phase1 / arabic / english) or the skip list "
-            "(add per-corpus routing — da#365). NER never falls back to mining "
+            "opted in to a NER route (phase1 / arabic / english), the "
+            "splitter-deferred bucket (da#366), or the skip list — add a "
+            "per-corpus route (da#365). NER never falls back to mining "
             "full_text_ar (matn) for an unrouted or isnad-null corpus (da#369)."
         )
 
@@ -348,11 +387,22 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
         rows = _extract_from_hadiths(staging_dir, corpus, language="en")
         all_rows.extend(rows)
 
-    # Step 4: Log skipped sources.
+    # Step 4: Log deferred sources -- isnad-in-matn corpora explicitly held until
+    # the da#366 splitter lands. Routed (no hard-fail) but not extracted; logged
+    # loudly so their absence from the graph is visible, never a silent omission.
+    for corpus, blocked_on in sorted(_SPLITTER_DEFERRED_SOURCES.items()):
+        logger.info(
+            "ner_deferred_source",
+            corpus=corpus,
+            blocked_on=blocked_on,
+            reason="isnad_in_matn_needs_splitter",
+        )
+
+    # Step 5: Log skipped sources.
     for corpus in sorted(_SKIP_SOURCES):
         logger.info("ner_skip_source", corpus=corpus, reason="no_raw_isnads")
 
-    # Step 5: Per-source metrics summary.
+    # Step 6: Per-source metrics summary.
     source_counts: dict[str, int] = {}
     for r in all_rows:
         src = str(r["source_corpus"])
@@ -361,7 +411,7 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
         logger.info("ner_source_summary", source_corpus=src, total_mentions=count)
     logger.info("ner_total_mentions", total=len(all_rows))
 
-    # Step 6: Build output table.
+    # Step 7: Build output table.
     output_paths: list[Path] = []
 
     if all_rows:
@@ -389,7 +439,7 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
     else:
         logger.warning("ner_no_mentions", msg="No narrator mentions extracted from any source")
 
-    # Step 7: Name audit CSV.
+    # Step 8: Name audit CSV.
     if all_rows:
         audit_path = _write_name_audit_csv(all_rows, output_dir)
         output_paths.append(audit_path)
