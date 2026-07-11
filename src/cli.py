@@ -525,6 +525,62 @@ def _cmd_migrate_transmitted_hadith_ids(*, batch_size: int = 1000) -> None:
         print("\nMigration complete.")
 
 
+def _cmd_prune_narrators(*, canonical: str, dry_run: bool = False) -> None:
+    """DETACH DELETE Narrator nodes whose id is not in narrators_canonical.parquet (da#413).
+
+    The canonical-set SHRINK: after a re-resolve collapses ids, the graph still holds
+    the orphaned ``Narrator`` nodes (many WITH edges — a zero-degree predicate misses
+    them). The only correct orphan predicate is canonical-set membership, which lives
+    in the parquet, so this is a da-side subcommand rather than a cypher-only job
+    (deploy#557). ``--dry-run`` reports the count that would be deleted and deletes
+    nothing.
+
+    Refuses — non-zero exit :attr:`ExitCode.EMPTY_CANONICAL_SET`, ZERO deletion — when
+    the canonical set is empty or its parquet is unreadable/missing. A bad read must
+    never wipe the graph.
+    """
+    from pathlib import Path
+
+    from src.graph.prune import EmptyCanonicalSetError, prune_narrators
+    from src.utils.neo4j_client import Neo4jClient
+
+    canonical_path = Path(canonical)
+
+    # The guard runs inside prune_narrators, BEFORE the graph is touched. Catch it
+    # here to exit the named code rather than crash — nothing was deleted.
+    try:
+        # _check_neo4j only after the guard would have a chance to fire? No: the guard
+        # reads the parquet, not the DB, and reads nothing destructive. Check
+        # connectivity first (like load/migrate) so an unreachable DB is DB_UNREACHABLE.
+        _check_neo4j()
+        with Neo4jClient() as client:
+            result = prune_narrators(client, canonical_path, dry_run=dry_run)
+    except EmptyCanonicalSetError as guard:
+        print(f"\nERROR: {guard}", file=sys.stderr)
+        sys.exit(ExitCode.EMPTY_CANONICAL_SET)
+
+    print("=== prune-narrators (canonical-set shrink, da#413) ===")
+    print(f"  Canonical ids (keep-set)   : {result.canonical_ids_seen}")
+    print(f"  Narrator nodes in graph    : {result.graph_narrators_seen}")
+    print(f"  Orphans (id ∉ canonical)   : {result.orphans_identified}")
+    if result.sample:
+        shown = ", ".join(result.sample)
+        more = result.orphans_identified - len(result.sample)
+        suffix = f" (+{more} more)" if more > 0 else ""
+        print(f"  Sample orphan ids          : {shown}{suffix}")
+    if dry_run:
+        print(
+            f"\nDRY RUN: {result.orphans_identified} Narrator node(s) WOULD be "
+            "DETACH DELETEd. Nothing was deleted."
+        )
+    else:
+        print(f"  Narrator nodes deleted     : {result.deleted}")
+        if result.orphans_identified == 0:
+            print("\nNo orphans — every Narrator in the graph is in the canonical set.")
+        else:
+            print("\nPrune complete.")
+
+
 def _cmd_enrich(
     *,
     only: list[str] | None = None,
@@ -858,6 +914,30 @@ def main() -> None:
         help="Edges rewritten per write batch (default: 1000)",
     )
 
+    prune_parser = subparsers.add_parser(
+        "prune-narrators",
+        help=(
+            "DETACH DELETE Narrator nodes whose id is not in narrators_canonical.parquet "
+            "(canonical-set shrink; da#413)"
+        ),
+    )
+    prune_parser.add_argument(
+        "--canonical",
+        type=str,
+        required=True,
+        metavar="PARQUET",
+        help=(
+            "Path to narrators_canonical.parquet. Its canonical_id set is the "
+            "authoritative keep-set: every Narrator whose id is absent from it is "
+            "DETACH DELETEd. Refuses (exit 12, zero deletion) if empty/unreadable."
+        ),
+    )
+    prune_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report the count that would be deleted (and a sample); delete nothing.",
+    )
+
     audit_parser = subparsers.add_parser("audit", help="View recent pipeline audit entries")
     audit_parser.add_argument(
         "--last",
@@ -937,6 +1017,8 @@ def main() -> None:
             sys.exit(ExitCode.VALIDATION_FINDINGS)
     elif args.command == "migrate-transmitted-hadith-ids":
         _cmd_migrate_transmitted_hadith_ids(batch_size=args.batch_size)
+    elif args.command == "prune-narrators":
+        _cmd_prune_narrators(canonical=args.canonical, dry_run=args.dry_run)
     elif args.command == "audit":
         _cmd_audit(last_n=args.last)
     elif args.command == "pipeline":
