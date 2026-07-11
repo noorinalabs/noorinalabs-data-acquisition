@@ -128,6 +128,7 @@ import pyarrow.parquet as pq
 from src.models.enums import DatePrecision, NarratorGeneration
 from src.parse.base import safe_str, write_parquet
 from src.parse.identity import make_canonical_id, make_discriminated_canonical_id
+from src.resolve._inputs import require_input
 from src.resolve.generic_name import is_generic_name
 from src.resolve.mononym_split import _MAX_GAP, _MIN_GAP, is_registered_mononym
 from src.resolve.schemas import NARRATOR_MENTIONS_RESOLVED_SCHEMA, NARRATORS_CANONICAL_SCHEMA
@@ -600,17 +601,31 @@ def split_generic_narrators(output_dir: Path, *, staging_dir: Path | None = None
     is accepted for run_all call-shape parity; this stage keeps no checkpoint (it is a
     single idempotent pass, like reconcile/tabaqa_dates).
     """
+    # Required input (da#361): the canonical table, produced by disambiguate/bio_promote
+    # earlier THIS run. By the time narrator_split runs (step 3.55) at least one of
+    # those has run in any non-empty resolve, so an absent canonical table is an
+    # upstream defect — raise, not a success-shaped ``None``. A canonical table that
+    # EXISTS but is empty (zero records) is the honest no-op below.
     canonical_path = output_dir / "narrators_canonical.parquet"
     mentions_path = output_dir / "narrator_mentions_resolved.parquet"
-    if not canonical_path.exists():
-        logger.warning("narrator_split_no_canonical", path=str(canonical_path))
-        return None
+    require_input(
+        stage="narrator_split",
+        present=canonical_path.exists(),
+        input_desc=f"{canonical_path.name} (canonical narrators)",
+        produced_by="resolve disambiguate/bio_promote stages",
+        remediation="re-run resolve from `disambiguate`; the canonical table is absent",
+    )
     if not mentions_path.exists():
+        # da#361: an absent mentions file is NOT a missing input here — NER
+        # legitimately produces zero mentions for a bio-only corpus (bio_promote
+        # still writes a canonical table with no chain mentions to split). A genuine
+        # no-op, not a defect, so it returns ``None`` rather than raising.
         logger.warning("narrator_split_no_mentions", path=str(mentions_path))
         return None
 
     records = pq.read_table(canonical_path).to_pylist()
     if not records:
+        # Canonical table present but empty — an honest no-op, not a missing input.
         return None
 
     name_by_id: dict[str, str] = {}

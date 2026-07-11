@@ -20,9 +20,11 @@ from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from src.models.enums import DatePrecision
 from src.parse.identity import make_canonical_id, make_discriminated_canonical_id
+from src.resolve import MissingInputError
 from src.resolve.generic_name import is_generic_name
 from src.resolve.narrator_split import (
     MID_GAP,
@@ -231,8 +233,38 @@ def _read_canonical(out: Path) -> dict[str, dict[str, Any]]:
     }
 
 
-def test_stage_no_canonical_is_noop(tmp_path: Path) -> None:
-    assert split_generic_narrators(tmp_path) is None
+def test_stage_no_canonical_raises_missing_input(tmp_path: Path) -> None:
+    """da#361: an absent canonical table = an upstream defect (disambiguate/bio_promote
+    did not run this pass), not a no-op. RED before da#361: returned ``None``."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    with pytest.raises(MissingInputError) as excinfo:
+        split_generic_narrators(tmp_path)
+    assert excinfo.value.stage == "narrator_split"
+    assert "narrators_canonical.parquet" in str(excinfo.value)
+
+
+def test_stage_canonical_present_no_mentions_is_honest_noop(tmp_path: Path) -> None:
+    """da#361 carve-out: canonical present but the NER mention output ABSENT is NOT a
+    missing input — a bio-only corpus has a canonical table (from bio_promote) and no
+    chain mentions to split, so the stage no-ops honestly (``None``), never raises."""
+    out = tmp_path / "out"
+    out.mkdir(parents=True, exist_ok=True)
+    # Write only the canonical table; leave narrator_mentions_resolved.parquet absent.
+    c = [_canonical_row("nar:x", normalize_arabic("محمد"), 3)]
+    c_arrays = {f.name: [r[f.name] for r in c] for f in NARRATORS_CANONICAL_SCHEMA}
+    pq.write_table(
+        pa.table(c_arrays, schema=NARRATORS_CANONICAL_SCHEMA),
+        out / "narrators_canonical.parquet",
+    )
+    assert split_generic_narrators(out) is None
+
+
+def test_stage_empty_canonical_is_honest_noop(tmp_path: Path) -> None:
+    """da#361 distinction: both inputs PRESENT but the canonical table is genuinely
+    empty (zero records) — an honest no-op ``None``, NOT a raise."""
+    out = tmp_path / "out"
+    _write(out, canonical=[], mentions=[])
+    assert split_generic_narrators(out) is None
 
 
 def test_stage_splits_two_bands_and_peels(tmp_path: Path) -> None:

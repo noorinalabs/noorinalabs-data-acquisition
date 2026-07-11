@@ -31,6 +31,7 @@ from src.resolve._checkpoint import (
     save_checkpoint,
 )
 from src.resolve._deps import MissingDependencyError, missing_dependencies
+from src.resolve._inputs import require_input
 from src.resolve._provenance import (
     DetectorProvenance,
     DetectorStatus,
@@ -728,17 +729,28 @@ def run_dedup(
     hadith_files = _hadith_files(staging_dir)
     if not hadith_files:
         # Case A: no input files at all. This is an upstream defect (parse never
-        # ran / wrong staging_dir), NOT a true negative -- but `run_dedup` is also
-        # called directly on empty tmp dirs by unit tests, so making it fatal is a
-        # behaviour change tracked separately. Kept distinct from Case B below so
-        # the two are no longer structurally indistinguishable.
+        # ran / wrong staging_dir), NOT a true negative. da#309 split this from
+        # Case B and stamped it ``NO_INPUT`` but left it non-fatal, noting the fatal
+        # turn was "tracked separately" -- that follow-up is da#361, now landable
+        # because da#360 makes ``run_all`` surface a raise instead of swallowing it.
+        # ``require_input`` raises ``MissingInputError`` (an ``Exception``), which
+        # ``run_all`` records as a ``StageErrored`` -> ``ResolveStageError`` -> exit
+        # ``EXIT_STAGE_FAILED``. Case B below (files present, no English matn) stays
+        # an honest empty success, so the two remain distinguishable.
         logger.warning("dedup_no_hadith_files", staging_dir=str(staging_dir))
-        return _write_empty_output(staging_dir, DetectorStatus.NO_INPUT)
+        require_input(
+            stage="dedup",
+            present=False,
+            input_desc=f"{_HADITH_GLOB} under {staging_dir}",
+            produced_by="parse (hadith adapters)",
+            remediation="re-run `parse`; an absent hadith staging set is an upstream defect",
+        )
 
     hadith_ids, texts, sects = _load_hadith_texts(staging_dir)
     if not texts:
         # Case B: input files exist, but no row carries a non-empty English matn.
-        # A genuinely empty input for an English-matn semantic detector.
+        # A genuinely empty input for an English-matn semantic detector -- an honest
+        # empty success, NOT a missing input, so it is written, not raised (da#361).
         logger.warning("dedup_no_texts", files=len(hadith_files))
         return _write_empty_output(staging_dir, DetectorStatus.NO_TEXTS)
 

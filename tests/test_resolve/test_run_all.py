@@ -20,7 +20,7 @@ import pyarrow.parquet as pq
 
 from src.parse.identity import make_canonical_id
 from src.parse.schemas import NARRATOR_BIO_SCHEMA
-from src.resolve import bio_promote, dedup, disambiguate, ner, parallels, run_all
+from src.resolve import bio_promote, dedup, disambiguate, narrator_split, ner, parallels, run_all
 from src.utils.arabic import normalize_arabic
 from tests.test_graph.conftest import write_hadiths, write_narrator_mentions_resolved
 
@@ -61,6 +61,9 @@ def test_run_all_invokes_bio_promote_and_parallels_disambiguate_first(
     monkeypatch.setattr(ner, "run", _rec("ner", [staging / "mentions"]))
     monkeypatch.setattr(disambiguate, "run", _rec("disambiguate", []))
     monkeypatch.setattr(bio_promote, "promote_bios_to_canonical", _rec("bio_promote", None))
+    # narrator_split now fails loud on an absent canonical table (da#361); this
+    # disambiguate spy writes no canonical, so spy it too or run_all raises.
+    monkeypatch.setattr(narrator_split, "split_generic_narrators", _rec("narrator_split", None))
     monkeypatch.setattr(dedup, "run", _rec("dedup", []))
     monkeypatch.setattr(parallels, "run", _rec("parallels", []))
 

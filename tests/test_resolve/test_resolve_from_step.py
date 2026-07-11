@@ -26,6 +26,7 @@ from src.resolve import (
     disambiguate,
     fuzzy_cluster,
     muhaddithat_links,
+    narrator_split,
     ner,
     parallels,
     run_all,
@@ -64,6 +65,7 @@ def _install_spies(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     monkeypatch.setattr(
         fuzzy_cluster, "cluster_canonical_narrators", spy("cluster", cluster_metrics)
     )
+    monkeypatch.setattr(narrator_split, "split_generic_narrators", spy("narrator_split", None))
     monkeypatch.setattr(date_reconcile, "reconcile_canonical_dates", spy("reconcile", None))
     monkeypatch.setattr(tabaqa_dates, "apply_tabaqa_fallback", spy("tabaqa_dates", None))
     monkeypatch.setattr(

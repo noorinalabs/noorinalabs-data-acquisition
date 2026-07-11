@@ -23,6 +23,7 @@ from src.exit_codes import EXIT_UNROUTED_CORPUS
 from src.parse.base import safe_str, write_parquet
 from src.parse.name_quality import clean_narrator_name, strip_markup
 from src.parse.narrator_extraction import IsnadSegmentationError, extract_narrator_mentions
+from src.resolve._inputs import require_input
 from src.resolve.schemas import NARRATOR_MENTIONS_RESOLVED_SCHEMA
 from src.utils.arabic import is_arabic, normalize_arabic
 from src.utils.logging import get_logger
@@ -166,11 +167,35 @@ def _load_phase1_mentions(
     staging_dir: Path,
     corpus: str,
     filename: str,
+    *,
+    required: bool = False,
 ) -> list[dict[str, str | int | None]]:
-    """Load pre-extracted Phase 1 narrator mentions and map to resolved schema."""
+    """Load pre-extracted Phase 1 narrator mentions and map to resolved schema.
+
+    ``required`` (da#361): when the corpus is actually staged (present in
+    ``_discover_staged_corpora``) its Phase-1 mentions file MUST exist — its
+    absence is an upstream defect (parse mis-wrote or never ran), not an empty
+    result, so :func:`require_input` raises. When the corpus is merely a
+    *configured* Phase-1 source that is not part of this (partial) staging subset,
+    ``required`` is ``False`` and the absent file is a legitimate skip: ``run``
+    loops over every configured source, and resolving a subset of corpora is a
+    supported mode (this is why ``run`` on an empty staging dir must NOT raise).
+    """
     path = staging_dir / filename
     if not path.exists():
-        logger.warning("phase1_mentions_missing", corpus=corpus, path=str(path))
+        require_input(
+            stage="ner",
+            present=not required,
+            input_desc=f"{filename} (Phase-1 mentions for staged corpus {corpus!r})",
+            produced_by="parse (Phase-1 mention extractor)",
+            remediation=(
+                f"corpus {corpus!r} is staged but its Phase-1 mentions file is absent; "
+                "re-run `parse` for it"
+            ),
+        )
+        # required is False: a configured Phase-1 source simply absent from this
+        # (partial) staging subset — a legitimate skip, not a defect.
+        logger.info("phase1_mentions_absent_unstaged", corpus=corpus, path=str(path))
         return []
 
     table = pq.read_table(path)
@@ -226,12 +251,31 @@ def _extract_from_hadiths(
     staging_dir: Path,
     corpus: str,
     language: str,
+    *,
+    required: bool = False,
 ) -> list[dict[str, str | int | None]]:
-    """Extract narrator mentions from hadith Parquet files for a given corpus."""
+    """Extract narrator mentions from hadith Parquet files for a given corpus.
+
+    ``required`` (da#361): same discrimination as :func:`_load_phase1_mentions`. A
+    staged corpus (present in ``_discover_staged_corpora``) routed here MUST have
+    its ``hadiths_{corpus}*.parquet`` — its absence is an upstream defect and
+    :func:`require_input` raises. A configured Arabic/English source that is not in
+    this staging subset (``required=False``) is a legitimate skip.
+    """
     pattern = f"hadiths_{corpus}*.parquet"
     hadith_files = sorted(staging_dir.glob(pattern))
     if not hadith_files:
-        logger.warning("no_hadith_files", corpus=corpus, pattern=pattern)
+        require_input(
+            stage="ner",
+            present=not required,
+            input_desc=f"{pattern} (isnad text for staged corpus {corpus!r})",
+            produced_by="parse (hadith adapters)",
+            remediation=(
+                f"corpus {corpus!r} is staged but has no {pattern}; re-run `parse` for it"
+            ),
+        )
+        # required is False: configured source absent from this staging subset.
+        logger.info("hadiths_absent_unstaged", corpus=corpus, pattern=pattern)
         return []
 
     rows: list[dict[str, str | int | None]] = []
@@ -384,19 +428,26 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
 
     all_rows: list[dict[str, str | int | None]] = []
 
+    # da#361: a configured source is *required* only when it is actually staged.
+    # ``run`` loops over every configured source, but resolving a partial staging
+    # subset is supported, so an absent file for a non-staged source is a legitimate
+    # skip while an absent file for a STAGED corpus is an upstream defect that must
+    # fail loud (``require_input`` inside each helper). ``staged`` is already
+    # computed above for the da#369 routing guard.
+
     # Step 1: Load Phase 1 pre-extracted mentions (sanadset, lk).
     for corpus, filename in _PHASE1_MENTION_SOURCES.items():
-        rows = _load_phase1_mentions(staging_dir, corpus, filename)
+        rows = _load_phase1_mentions(staging_dir, corpus, filename, required=corpus in staged)
         all_rows.extend(rows)
 
     # Step 2: Extract from Arabic-text sources.
     for corpus in sorted(_ARABIC_SOURCES):
-        rows = _extract_from_hadiths(staging_dir, corpus, language="ar")
+        rows = _extract_from_hadiths(staging_dir, corpus, language="ar", required=corpus in staged)
         all_rows.extend(rows)
 
     # Step 3: Extract from English-only sources.
     for corpus in sorted(_ENGLISH_SOURCES):
-        rows = _extract_from_hadiths(staging_dir, corpus, language="en")
+        rows = _extract_from_hadiths(staging_dir, corpus, language="en", required=corpus in staged)
         all_rows.extend(rows)
 
     # Step 4: Log deferred sources -- isnad-in-matn corpora explicitly held until

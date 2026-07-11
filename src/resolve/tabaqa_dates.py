@@ -195,6 +195,11 @@ def apply_tabaqa_fallback(output_dir: Path) -> Path | None:
     Returns the canonical path, or ``None`` when it does not yet exist (the stage
     is a no-op until the prior resolve stages have produced the table).
     """
+    # OPTIONAL input (da#361): like date_reconcile, this is a pure date-enricher —
+    # with no canonical table there are no narrators to estimate ṭabaqa windows for,
+    # so an absent table is an honest no-op, not an upstream defect. Confirmed as
+    # intended (da#361 carved date_reconcile + tabaqa_dates out of the fail-loud
+    # set): it does NOT call ``require_input`` and returns ``None`` by design.
     canonical_path = output_dir / "narrators_canonical.parquet"
     if not canonical_path.exists():
         logger.warning("tabaqa_fallback_no_canonical", path=str(canonical_path))
