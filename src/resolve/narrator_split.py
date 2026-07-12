@@ -32,7 +32,9 @@ Algorithm (per eligible canonical id ``C``, name ``N``)
 -------------------------------------------------------
 1. Gather every mention with ``canonical_narrator_id == C``.
 2. **Isnad-adjacency evidence** — for each such mention, look at the chain neighbours
-   at ``position_in_chain`` ±1 in the same ``hadith_id`` and map them to their
+   at ``position_in_chain`` ±1 in the same ``(hadith_id, chain_index)`` chain (da#411 —
+   the composite key the graph loaders use; NOT ``hadith_id`` alone, which would
+   fabricate cross-chain neighbours in a multi-isnad hadith) and map them to their
    *attested* ``death_year_ah`` (precision ≠ ``tabaqa_estimate`` — an *estimated*
    window is never used as evidence, which also keeps the pass cascade-free on
    re-run). A teacher (neighbour at position−1) dies a transmission gap *earlier*;
@@ -448,87 +450,123 @@ def _remap_split_mentions(mentions_path: Path, remap: dict[str, str]) -> int:
     return remapped
 
 
+def _coalesce_chain_index(value: Any) -> int:
+    """Per-hadith isnad-chain ordinal, coalescing a missing/None value to 0.
+
+    Mirrors :func:`src.graph.load_edges._chain_index` (da#282) so this splitter groups
+    chains on the SAME ``(hadith_id, chain_index)`` key the edge/chain loaders use. A
+    ``None`` ``chain_index`` (a single-isnad producer that left it unset, or a legacy
+    pre-da#282 file) coalesces to 0, so single-chain hadiths are unaffected.
+    """
+    return int(value) if value is not None else 0
+
+
 def _build_chain_index(
     mentions_path: Path,
     candidate_ids: set[str],
-) -> tuple[dict[str, list[tuple[int, str]]], dict[str, list[tuple[str, int, str]]]]:
+) -> tuple[
+    dict[tuple[str, int], list[tuple[int, str]]],
+    dict[str, list[tuple[str, int, int, str]]],
+]:
     """Stream the mentions (two bounded passes) → (chains, candidate_mentions).
 
-    ``chains``: ``hadith_id -> [(position, canonical_id), ...]`` for neighbour lookup.
-    ``candidate_mentions``: ``candidate_id -> [(hadith_id, position, mention_id), ...]``.
+    ``chains``: ``(hadith_id, chain_index) -> [(position, canonical_id), ...]`` for
+    neighbour lookup — keyed on the composite ``(hadith_id, chain_index)`` the graph
+    loaders use (:func:`src.graph.load_edges._chain_index`, da#282), NOT ``hadith_id``
+    alone. A multi-isnad hadith (one ``hadith_id``, several ``chain_index`` values —
+    today lk's Arabic + English isnads, each numbered from position 0) therefore keeps
+    its isnads separate. Keying on ``hadith_id`` alone would flatten them into one
+    position-sorted list and fabricate cross-chain ±1 neighbours that exist in no real
+    chain, corrupting the death-band evidence (da#411).
+    ``candidate_mentions``:
+    ``candidate_id -> [(hadith_id, chain_index, position, mention_id), ...]`` — the
+    ``chain_index`` is carried through so :func:`_collect_datable` can confine each
+    mention's ±1 lookup to its own chain.
 
     Memory (da#337 PR-3a — OOM audit, cf. #723). ``chains`` is deliberately restricted
-    to *only* the hadiths that contain ≥1 candidate mention. A candidate's per-mention
-    death estimate is derived solely from its ±1 neighbours **within the same hadith**,
-    so a hadith with no candidate mention can never contribute a neighbour lookup and is
-    pure dead weight in ``chains``. The earlier one-pass build kept every hadith's full
-    chain resident — i.e. the *entire* mentions table — which is exactly the class of
-    full-table-resident structure that OOM'd resolve in #723. Restricting to
-    candidate-touching hadiths bounds the resident footprint to O(mentions in hadiths
-    that name a generic-name candidate) + O(candidate mentions), both a small fraction
-    of the multi-million-row corpus (generic-name candidates are a curated minority),
-    instead of O(all mentions).
+    to *only* the chains that contain ≥1 candidate mention. A candidate's per-mention
+    death estimate is derived solely from its ±1 neighbours **within the same
+    ``(hadith_id, chain_index)`` chain**, so a chain with no candidate mention can never
+    contribute a neighbour lookup and is pure dead weight in ``chains``. The earlier
+    one-pass build kept every hadith's full chain resident — i.e. the *entire* mentions
+    table — which is exactly the class of full-table-resident structure that OOM'd
+    resolve in #723. Restricting to candidate-touching chains bounds the resident
+    footprint to O(mentions in chains that name a generic-name candidate) + O(candidate
+    mentions), both a small fraction of the multi-million-row corpus (generic-name
+    candidates are a curated minority), instead of O(all mentions).
 
     The cost is two streaming passes (2× sequential read) instead of one, each with a
     one-row-group working set — the standard time-for-memory trade, mirroring
     ``fuzzy_cluster``'s multi-pass streaming IO shell. Pass 1 collects the candidate
-    mentions and the set of hadiths they occur in; pass 2 fills ``chains`` for only
-    those hadiths (retaining every position in them, so non-candidate neighbours are
-    still present for the ±1 lookup).
+    mentions and the set of ``(hadith_id, chain_index)`` chains they occur in; pass 2
+    fills ``chains`` for only those chains (retaining every position in them, so
+    non-candidate neighbours are still present for the ±1 lookup).
     """
-    chains: dict[str, list[tuple[int, str]]] = {}
-    candidate_mentions: dict[str, list[tuple[str, int, str]]] = {}
+    chains: dict[tuple[str, int], list[tuple[int, str]]] = {}
+    candidate_mentions: dict[str, list[tuple[str, int, int, str]]] = {}
     if not mentions_path.exists():
         return chains, candidate_mentions
 
     pf = pq.ParquetFile(mentions_path)
-    cols = ["mention_id", "hadith_id", "position_in_chain", "canonical_narrator_id"]
+    cols = ["mention_id", "hadith_id", "chain_index", "position_in_chain", "canonical_narrator_id"]
 
-    # Pass 1 — candidate mentions + the hadiths that contain them.
-    candidate_hadith_ids: set[str] = set()
+    # Pass 1 — candidate mentions + the (hadith_id, chain_index) chains that contain them.
+    candidate_chain_keys: set[tuple[str, int]] = set()
     for rg_idx in range(pf.metadata.num_row_groups):
         table = pf.read_row_group(rg_idx, columns=cols)
         mention_ids = table.column("mention_id").to_pylist()
         hadith_ids = table.column("hadith_id").to_pylist()
+        chain_indexes = table.column("chain_index").to_pylist()
         positions = table.column("position_in_chain").to_pylist()
         cids = table.column("canonical_narrator_id").to_pylist()
-        for mid, hid, pos, cid in zip(mention_ids, hadith_ids, positions, cids, strict=True):
+        for mid, hid, cidx, pos, cid in zip(
+            mention_ids, hadith_ids, chain_indexes, positions, cids, strict=True
+        ):
             if cid is None or hid is None or pos is None:
                 continue
             if cid in candidate_ids:
-                candidate_mentions.setdefault(cid, []).append((hid, int(pos), mid))
-                candidate_hadith_ids.add(hid)
+                ci = _coalesce_chain_index(cidx)
+                candidate_mentions.setdefault(cid, []).append((hid, ci, int(pos), mid))
+                candidate_chain_keys.add((hid, ci))
 
-    if not candidate_hadith_ids:
+    if not candidate_chain_keys:
         return chains, candidate_mentions
 
-    # Pass 2 — full chains, but only for candidate-touching hadiths (bounded footprint).
-    chain_cols = ["hadith_id", "position_in_chain", "canonical_narrator_id"]
+    # Pass 2 — full chains, but only for candidate-touching (hadith_id, chain_index)
+    # chains (bounded footprint).
+    chain_cols = ["hadith_id", "chain_index", "position_in_chain", "canonical_narrator_id"]
     for rg_idx in range(pf.metadata.num_row_groups):
         table = pf.read_row_group(rg_idx, columns=chain_cols)
         hadith_ids = table.column("hadith_id").to_pylist()
+        chain_indexes = table.column("chain_index").to_pylist()
         positions = table.column("position_in_chain").to_pylist()
         cids = table.column("canonical_narrator_id").to_pylist()
-        for hid, pos, cid in zip(hadith_ids, positions, cids, strict=True):
+        for hid, cidx, pos, cid in zip(hadith_ids, chain_indexes, positions, cids, strict=True):
             if cid is None or hid is None or pos is None:
                 continue
-            if hid in candidate_hadith_ids:
-                chains.setdefault(hid, []).append((int(pos), cid))
+            key = (hid, _coalesce_chain_index(cidx))
+            if key in candidate_chain_keys:
+                chains.setdefault(key, []).append((int(pos), cid))
     return chains, candidate_mentions
 
 
 def _collect_datable(
-    mentions: list[tuple[str, int, str]],
-    chains: dict[str, list[tuple[int, str]]],
+    mentions: list[tuple[str, int, int, str]],
+    chains: dict[tuple[str, int], list[tuple[int, str]]],
     attested_by_id: dict[str, int],
     name_by_id: dict[str, str],
 ) -> list[DatableMention]:
-    """Per-mention death estimates from attested chain neighbours (undatable dropped)."""
+    """Per-mention death estimates from attested chain neighbours (undatable dropped).
+
+    A neighbour is only ever the mention's ±1 position **within the same
+    ``(hadith_id, chain_index)`` chain** — never another isnad of the same hadith
+    (da#411) — mirroring the graph loaders' composite chain key.
+    """
     datable: list[DatableMention] = []
-    for hadith_id, position, mention_id in mentions:
+    for hadith_id, chain_index, position, mention_id in mentions:
         estimates: list[int] = []
         anchors: list[str] = []
-        for npos, nid in chains.get(hadith_id, ()):
+        for npos, nid in chains.get((hadith_id, chain_index), ()):
             if npos == position - 1:
                 sign = 1  # neighbour is the teacher (dies earlier) → C dies later
             elif npos == position + 1:
