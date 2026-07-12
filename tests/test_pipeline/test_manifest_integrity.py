@@ -14,6 +14,7 @@ Every choice below is biased toward re-loading.
 
 from __future__ import annotations
 
+import errno
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -182,6 +183,31 @@ class TestManifestWriteIsAtomic:
         # The previous manifest survives intact and no debris is left in the dir.
         assert json.loads(target.read_text()) == {"staging/a.parquet": {"md5": "old"}}
         assert list(tmp_path.iterdir()) == [target]
+
+    def test_save_manifest_is_best_effort_on_read_only_filesystem(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A read-only /app/data must degrade to a warning, never crash the load (da#432).
+
+        On the ``:ro`` graph-load mount the tmp write raises ``OSError(EROFS)``.
+        da#349 caught that, but its cleanup ``tmp.unlink(missing_ok=True)`` is itself
+        a write op that *also* raises ``EROFS`` on a read-only FS -- and ``missing_ok``
+        only swallows ``FileNotFoundError``, not ``EROFS`` -- so the cleanup re-raised
+        and aborted the whole ``load``. Model both failures and assert ``save_manifest``
+        returns ``None`` without propagating.
+        """
+        target = tmp_path / LAST_LOADED_MANIFEST_FILENAME
+
+        def _erofs(*_args: Any, **_kwargs: Any) -> None:
+            raise OSError(errno.EROFS, "Read-only file system")
+
+        # Both the write AND the cleanup unlink fail with EROFS, exactly as a
+        # read-only filesystem behaves (unlink of any name raises EROFS before ENOENT).
+        monkeypatch.setattr(Path, "write_text", _erofs)
+        monkeypatch.setattr(Path, "unlink", _erofs)
+
+        # Must not raise; best-effort write returns None.
+        assert save_manifest({"staging/b.parquet": {"md5": "new"}}, target) is None
 
 
 class TestCorruptManifestFailsSafe:

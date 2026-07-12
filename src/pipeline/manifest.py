@@ -134,7 +134,14 @@ def save_manifest(manifest: dict[str, dict[str, Any]], path: Path) -> Path | Non
         tmp.replace(path)
     except OSError:
         logger.warning("manifest_write_failed", path=str(path))
-        tmp.unlink(missing_ok=True)
+        # The cleanup unlink is itself a write op: on a read-only filesystem (the
+        # graph-load `/app/data:ro` mount) it raises OSError(EROFS), which
+        # missing_ok= does NOT swallow (that catches only FileNotFoundError). Guard
+        # it so save_manifest stays truly best-effort and never aborts the load (da#432).
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
         return None
 
     return path
