@@ -242,6 +242,14 @@ def promote_bios_to_canonical(
     skipped_source = 0
     skipped_pollution = 0
     skipped_truncated_merge = 0
+    # The ACCEPTED truncated-residue residual (da#385). The guard only refuses a
+    # truncated residue that would claim an *attested* node (mention_count > 0);
+    # every other truncated residue is accepted — it either lands on a zero-mention
+    # catalog node or mints a new node keyed on the truncation. Both are deliberate
+    # (the guard's scope is narrow by design, da#379) but were previously uncounted,
+    # so "we accepted it" was indistinguishable from "it never happened". Count them.
+    truncated_residue_onto_unattested = 0
+    truncated_residue_minted = 0
     # Canonical ids a bio actually promoted into this run — the anchor set aliases
     # attach to (da#389). Excludes pollution-drops and truncation-skips, which mint
     # no node (or refuse the merge), so their aliases have nothing to anchor to.
@@ -283,14 +291,33 @@ def promote_bios_to_canonical(
             bio_id = safe_str(row.get("bio_id"))
             cid = make_canonical_id(norm)
 
-            # When the cleaner CUT INTO the name the source asserted, the residue is
-            # not a name — it is whatever survived a truncation, and it is routinely
-            # a bare ism (da#379). Such a residue may not claim an *attested*
-            # narrator: `عبيدة مولى رسول الله ذكره بن شاهين …` cleans to `عبيده` and
-            # would otherwise merge onto ʿAbīda al-Salmānī (1,695 mentions),
-            # back-filling an obscure client's jarḥ grade and death year onto him via
-            # _BACKFILL_FIELDS. A bare ism is not a person. Refusing the merge is
-            # always safe; asserting it is not.
+            # When `cleaner_removed_content` is True the cleaner removed name-span
+            # material beyond its affix normalizations. That covers TWO classes the
+            # guard treats alike, and a maintainer must not read this refusal as
+            # "the residue is not a name" — for most of these rows it is (da#397/da#398):
+            #
+            #   1. CUT INTO the name → a bare-ism residue that is genuinely not the
+            #      asserted name. `عبيدة مولى رسول الله ذكره بن شاهين …` cleans to
+            #      `عبيده` and would otherwise merge onto ʿAbīda al-Salmānī (1,695
+            #      mentions), back-filling an obscure client's jarḥ grade and death year
+            #      onto him via _BACKFILL_FIELDS. A bare ism is not a person; refusing is
+            #      the only safe call. This is what the guard exists for.
+            #   2. A COMPLETE name that merely lost an isnad/gloss TAIL → e.g.
+            #      `اسحاق بن مره عن انس` → `اسحاق بن مره`, the full nasab intact, only the
+            #      teacher-key `عن انس` cut. Roughly 40% of the mention-bearing refusals
+            #      are this class (full-nasab residues, not bare isms).
+            #
+            # For class 2 refusal is NON-CORRUPTING but it is NOT "always safe" in the
+            # symmetric sense — it withholds correct enrichment from real narrators. So
+            # why refuse it too? Because `make_canonical_id` folds Arabic inflection
+            # (da#376) but NOT homonymy, and full-nasab homonyms are pervasive here: a
+            # blast-radius measurement over the staging corpus found 45 of 240 accept-
+            # target names carry CONFLICTING jarḥ grades across their bio entries (one
+            # name-key graded both thiqa and kadhdhab — provably >1 person). Accepting a
+            # class-2 merge on the name alone back-fills a verdict onto a possibly-
+            # different bearer — the da#423 direction (feedback_drop_gate_bidirectional_ab).
+            # So the conservative refusal is the right DEFAULT for both classes; safely
+            # recovering class 2 needs biographical disambiguation, deferred to da#397/398.
             #
             # `cleaner_removed_content` compares against the cleaner's OWN
             # pre-truncation tokens, not a re-tokenization of `norm`. A bracketed
@@ -319,6 +346,10 @@ def promote_bios_to_canonical(
                 continue
 
             if cid not in canonical_map:
+                # da#385: a truncated residue that mints a brand-new node names that
+                # node after a truncation, not after an asserted name. Count it.
+                if truncated:
+                    truncated_residue_minted += 1
                 canonical_map[cid] = {
                     "canonical_id": cid,
                     "name_ar": name_ar,
@@ -339,6 +370,12 @@ def promote_bios_to_canonical(
                     "source_corpora": [corpus] if corpus else [],
                 }
             else:
+                # da#385: a truncated residue reaching this branch merges onto a node
+                # that is NOT attested — a mention_count > 0 target was already refused
+                # above, so this is a zero-mention catalog node (curated or minted this
+                # run). Two catalog entries fuse under a truncated key; count it.
+                if truncated:
+                    truncated_residue_onto_unattested += 1
                 rec = canonical_map[cid]
                 src_ids = rec.setdefault("source_ids", [])
                 if bio_id and bio_id not in src_ids:
@@ -393,6 +430,28 @@ def promote_bios_to_canonical(
             note="aliases whose cleaned canonical name matched no promoted bio",
         )
 
+    # da#385: surface the ACCEPTED truncated-residue residual once, loudly, and name
+    # the deferred name/prose extraction as its owner. These are not defects the guard
+    # should have caught — the da#379 guard is deliberately scoped to attested targets —
+    # but they DO name canonical nodes after a truncation (a bare ism or a residue that
+    # fused two catalog entries), so they must be observable rather than silent. The
+    # real cure is upstream: a name/prose extractor that never emits the truncated span
+    # (da#299, kaggle; the deferred itqan prose extraction). Until then, this is the
+    # measurement that keeps the residual honest (feedback_silent_zero_is_not_a_measurement).
+    truncated_residue_accepted = truncated_residue_onto_unattested + truncated_residue_minted
+    if truncated_residue_accepted:
+        logger.warning(
+            "bio_promote_truncated_residue_accepted",
+            onto_unattested=truncated_residue_onto_unattested,
+            minted_new=truncated_residue_minted,
+            total=truncated_residue_accepted,
+            note=(
+                "truncated bio residues accepted onto a zero-mention node or minting a "
+                "new node keyed on the truncation; owner = deferred name/prose extraction "
+                "(da#299 kaggle + itqan prose)"
+            ),
+        )
+
     logger.info(
         "bio_promote_complete",
         bio_files=len(bio_files),
@@ -403,6 +462,8 @@ def promote_bios_to_canonical(
         skipped_source=skipped_source,
         skipped_pollution=skipped_pollution,
         skipped_truncated_merge=skipped_truncated_merge,
+        truncated_residue_onto_unattested=truncated_residue_onto_unattested,
+        truncated_residue_minted=truncated_residue_minted,
         aliases_added=alias_stats.added,
         aliases_unmatched_pollution=alias_stats.unmatched_pollution,
         aliases_unmatched_no_bio=alias_stats.unmatched_no_bio,
