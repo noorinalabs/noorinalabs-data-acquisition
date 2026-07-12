@@ -1834,7 +1834,7 @@ def asserted_name_tokens(name_normalized: str | None) -> tuple[str, ...]:
 
 
 def cleaner_removed_content(name_normalized: str | None, cleaned: str | None) -> bool:
-    """True when :func:`clean_narrator_name` cut into the name the source asserted (da#379).
+    """True when :func:`clean_narrator_name` removed name-span material, not just an affix (da#379).
 
     ``clean_narrator_name`` does two categorically different things that its return
     value alone does not distinguish:
@@ -1842,18 +1842,32 @@ def cleaner_removed_content(name_normalized: str | None, cleaned: str | None) ->
     * **Normalization** — markup, honorifics, editorial connectives and a bracketed
       catalog entry number are affixes *around* a name. Stripping them leaves the
       name the source asserted, whole: ``"( 4875 ) عبد الله بن موسى"`` →
-      ``"عبد الله بن موسى"``, still that narrator's full name.
-    * **Truncation** — an isnad/matn tail or a colon-joined body is *part of the same
-      span* as the name, and cutting it keeps only a head. The residue is not a name
-      the source asserted, and it is frequently a bare ism:
-      ``"عبيدة مولى رسول الله ذكره بن شاهين …"`` (an obscure client of the Prophet)
-      reduces to ``"عبيده"`` — the name of a different, heavily-attested narrator.
+      ``"عبد الله بن موسى"``, still that narrator's full name. This returns ``False``.
+    * **Truncation** — an isnad/matn tail or a colon-joined body is cut off, keeping
+      only a head. This returns ``True``. Note it does NOT imply the cleaner "cut into
+      the name" (da#398): truncation splits into two sub-cases the return value again
+      does not separate —
 
-    A caller that keys identity on the cleaner's output must tell these apart. An
-    affix is not a tail. Comparing against :func:`asserted_name_tokens` — rather than
-    against a re-tokenization of the raw input — is what makes that distinction; a
-    re-tokenization sees the entry number, the connective and the honorific as
-    "content removed" and refuses a merge the source fully supports.
+        - *cut into the name*: the residue is a fragment, frequently a bare ism —
+          ``"عبيدة مولى رسول الله ذكره بن شاهين …"`` (an obscure client of the Prophet)
+          reduces to ``"عبيده"``, the name of a different, heavily-attested narrator.
+        - *tail after a complete name*: the asserted name is INTACT and only a chain
+          continuation after it was removed — ``"اسحاق بن مره عن انس"`` → ``"اسحاق بن
+          مره"`` (the full nasab; only the teacher-key ``عن انس`` cut). The name was
+          not cut *into*; a tail *after* it was removed. Roughly 40% of the corpus's
+          truncations are this class (da#397/da#398).
+
+    So a ``True`` means "removed more than an affix", NOT "the residue is not a name".
+    A caller keying identity on the cleaner's output must not over-read it (da#398):
+    it separates affix-normalization from name-material removal, and no finer. Deciding
+    whether a tail-after-complete-name residue is the SAME person as an existing record
+    is a homonymy question this function cannot answer — it needs biographical
+    disambiguation, not a token diff.
+
+    Comparing against :func:`asserted_name_tokens` — rather than a re-tokenization of
+    the raw input — is what draws the affix/removal line; a re-tokenization sees the
+    entry number, the connective and the honorific as "content removed" and refuses a
+    merge the source fully supports.
     """
     if not name_normalized or not cleaned:
         return False

@@ -458,3 +458,44 @@ class TestNameNormalizedDrift:
         assert make_discriminated_canonical_id(raw, "d37") == make_discriminated_canonical_id(
             cleaned, "d37"
         )
+
+
+class TestResidualNoiseFold:
+    """da#434 — two residual letter-level noise classes at the mint surface.
+
+    ``normalize_arabic`` folds ؤ ئ → ء but leaves two orthographic-noise classes that
+    otherwise fragment one name across canonical ids: a dotless final ya (alif-maqsura
+    ى) and the standalone hamza ء left over after the ؤئ→ء fold. :func:`canonical_surface`
+    now folds ى→ي and drops ء so the surface forms of one name converge on one key. This
+    is pure normalization — never an identity merge of distinct people (Kavitha's
+    blast-radius: 192 clusters, ~1,689 mentions move, 0 distinct-person collisions).
+    """
+
+    # ---- POSITIVE: the two folds change the mint key --------------------------
+
+    def test_alif_maqsura_folds_to_ya_in_the_key(self) -> None:
+        # A final ى (alif-maqsura) folds to ي, so a dotless and a dotted spelling of
+        # the same name mint one id. normalize_arabic leaves ى untouched, so pre-fix
+        # these were two distinct nar: ids.
+        assert canonical_surface("موسى") == canonical_surface("موسي")
+        assert make_canonical_id("موسى") == make_canonical_id("موسي")
+
+    def test_standalone_hamza_dropped_in_the_key(self) -> None:
+        # The issue's own example: عاءشه and عائشة differ only by the standalone hamza
+        # (after normalize_arabic folds ئ→ء and ة→ه). Dropping ء collapses them.
+        assert canonical_surface("عاءشه") == canonical_surface("عائشة")
+        assert make_canonical_id("عاءشه") == make_canonical_id("عائشة")
+
+    # ---- CONTROL: genuinely different names still mint different ids ----------
+
+    def test_distinct_names_sharing_only_the_folded_char_stay_distinct(self) -> None:
+        # موسى (Musa) and عيسى (Isa) share only the trailing ى; the fold must not
+        # collapse them. This is the guard that the fold is normalization, not merge.
+        assert make_canonical_id("موسى") != make_canonical_id("عيسى")
+
+    def test_fold_is_idempotent(self) -> None:
+        # ي is not itself a fold trigger and no ء survives, so the folded surface is a
+        # fixed point — an already-folded name does not move.
+        for name in ("موسى", "عائشة", "يحيى", "عطاء"):
+            once = canonical_surface(name)
+            assert canonical_surface(once) == once, name

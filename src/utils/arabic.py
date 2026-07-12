@@ -605,6 +605,25 @@ def _fold_token(token: str) -> list[str]:
     return [token]
 
 
+# Two residual letter-level noise classes that :func:`normalize_arabic` leaves
+# behind and that fragment one name across canonical ids (da#434). Pure
+# normalization, never an identity merge of distinct people:
+#   ى (U+0649 alif-maqsura) → ي (U+064A ya) — the same name mints two ids when a
+#      final ي is spelled dotless.
+#   ء (U+0621 standalone hamza) dropped — after normalize_arabic has folded
+#      ؤ ئ → ء, the bare hamza that remains is orthographic noise, so e.g.
+#      ``عاءشه`` and ``عائشة`` collapse to the same key instead of two.
+# Applied at the mint surface only, NOT in normalize_arabic (which also feeds
+# display-name normalization). Idempotent: ي is not itself a fold trigger and no
+# ء survives, so both are fixed points on their own output.
+_RESIDUAL_NOISE_MAP = str.maketrans({"ى": "ي", "ء": ""})
+
+
+def _fold_residual_noise(text: str) -> str:
+    """Fold alif-maqsura ى→ي and drop the standalone hamza ء (da#434)."""
+    return text.translate(_RESIDUAL_NOISE_MAP)
+
+
 def canonical_surface(name: str) -> str:
     """The string a canonical narrator id is minted from.
 
@@ -620,6 +639,7 @@ def canonical_surface(name: str) -> str:
     normalized = normalize_arabic(name)
     if not normalized:
         return ""
+    normalized = _fold_residual_noise(normalized)
     folded: list[str] = []
     for token in normalized.split():
         folded.extend(_fold_token(token))

@@ -163,7 +163,11 @@ class TestCanonicalIdentityInvariant:
             f"got nodes {[(c, r['name_ar_normalized']) for c, r in canon.items()]}"
         )
         node = canon[expected_id]
-        assert node["name_ar_normalized"] == mention_norm
+        # da#434/#438: the node is named on the mention's `canonical_surface`, so assert
+        # against that, not the bare `normalize_arabic` form the fold now moves
+        # (عائشة→عاشه). The guard's substance is unchanged — the name is the MENTION's,
+        # never the corrupt bio's (asserted below); only the surface it lives on moved.
+        assert node["name_ar_normalized"] == canonical_surface(AISHA)
         assert node["name_ar"] == AISHA, "display name must be the mention's, not the bio's"
         assert make_canonical_id(normalize_arabic(AISHA_CORRUPT)) not in canon
 
@@ -265,7 +269,13 @@ class TestCanonicalIdentityInvariant:
             cid = m["canonical_narrator_id"]
             assert cid is not None
             raw = m["name_normalized"] or m["name_raw"] or ""
-            surfaces.setdefault(str(cid), set()).add(normalize_arabic(str(raw)))
+            # da#434/#438: a node is minted and named on its `canonical_surface`, so the
+            # chimera check must compare the stored name against the mentions' canonical
+            # SURFACE, not the bare `normalize_arabic` form. Using normalize_arabic here
+            # false-flags every node whose surface the fold moved (e.g. عائشة→عاشه) as a
+            # chimera; using canonical_surface keeps the guard exact — a genuinely
+            # bio-sourced name still fails to appear among its mentions' surfaces.
+            surfaces.setdefault(str(cid), set()).add(canonical_surface(str(raw)))
 
         refined = {p.norm_name for persons in MONONYM_REGISTRY.values() for p in persons}
         chimeric = [
