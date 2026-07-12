@@ -164,13 +164,22 @@ def _anchor_row(cid: str, death: int) -> dict[str, Any]:
     )
 
 
-def _mention_row(mention_id: str, hadith_id: str, position: int, cid: str) -> dict[str, Any]:
+def _mention_row(
+    mention_id: str,
+    hadith_id: str,
+    position: int,
+    cid: str,
+    chain_index: int | None = None,
+) -> dict[str, Any]:
     base: dict[str, Any] = {f.name: None for f in NARRATOR_MENTIONS_RESOLVED_SCHEMA}
     base["mention_id"] = mention_id
     base["hadith_id"] = hadith_id
     base["source_corpus"] = "bukhari"
     base["position_in_chain"] = position
     base["canonical_narrator_id"] = cid
+    # None coalesces to chain 0 (single-isnad hadith / legacy file), so callers that
+    # do not care about multi-isnad grouping are unaffected.
+    base["chain_index"] = chain_index
     return base
 
 
@@ -493,3 +502,67 @@ def test_stage_hub_peels_small_spurious_band_keeps_ge_90pct(tmp_path: Path) -> N
     assert peeled[0]["mention_count"] == small
     assert peeled[0]["death_year_ah"] == 260
     assert peeled[0]["death_date_precision"] == DatePrecision.ISNAD_ESTIMATE.value
+
+
+# --------------------------------------------------------------------------- #
+# da#411 — multi-isnad chain keying (no cross-chain ±1 neighbours)
+# --------------------------------------------------------------------------- #
+def test_multi_isnad_no_cross_chain_neighbour(tmp_path: Path) -> None:
+    """da#411: a multi-isnad hadith must keep its isnads separate for the ±1 lookup.
+
+    One ``hadith_id`` carries two isnads (``chain_index`` 0 and 1), each numbered from
+    position 0 with distinct narrators; the split candidate sits at position 1 in BOTH.
+    Keying the splitter's chain index on ``hadith_id`` alone (the pre-da#411 bug)
+    flattens the two isnads into one position-sorted list, so the candidate's pos±1
+    neighbour lookup picks up the *other* isnad's narrators — teacher/student
+    adjacencies that exist in no real chain and that corrupt the death-band evidence.
+    Grouping on the composite ``(hadith_id, chain_index)`` key the graph loaders use
+    (``src.graph.load_edges._chain_index``, da#282) confines each mention's neighbours
+    to its own chain.
+
+    RED on the old hadith_id-only code (each mention's anchors leak across chains);
+    GREEN after the composite-key fix. Exercises ``_build_chain_index`` (the keying)
+    and ``_collect_datable`` (the neighbour window) directly.
+    """
+    from src.resolve.narrator_split import _build_chain_index, _collect_datable
+
+    cand = make_canonical_id(_ABU_ABDALLAH)
+    # Distinct attested anchors per isnad of the SAME hadith. Chain 0: teacher d.100
+    # (pos 0) + student d.170 (pos 2). Chain 1: teacher d.250 (pos 0) + student d.320
+    # (pos 2). Their death years are far apart so a cross-chain leak is unmistakable.
+    ta0 = _anchor_row("nar:t_a0", 100)
+    sa0 = _anchor_row("nar:s_a0", 170)
+    tb1 = _anchor_row("nar:t_b1", 250)
+    sb1 = _anchor_row("nar:s_b1", 320)
+    canonical = [_canonical_row(cand, _ABU_ABDALLAH, 2), ta0, sa0, tb1, sb1]
+    mentions = [
+        # isnad 0
+        _mention_row("m-t-a0", "h1", 0, "nar:t_a0", chain_index=0),
+        _mention_row("m-c-0", "h1", 1, cand, chain_index=0),
+        _mention_row("m-s-a0", "h1", 2, "nar:s_a0", chain_index=0),
+        # isnad 1 — same hadith_id, different chain_index
+        _mention_row("m-t-b1", "h1", 0, "nar:t_b1", chain_index=1),
+        _mention_row("m-c-1", "h1", 1, cand, chain_index=1),
+        _mention_row("m-s-b1", "h1", 2, "nar:s_b1", chain_index=1),
+    ]
+    out = tmp_path / "curated"
+    _write(out, canonical, mentions)
+
+    attested_by_id = {r["canonical_id"]: r["death_year_ah"] for r in (ta0, sa0, tb1, sb1)}
+    name_by_id = {r["canonical_id"]: r["name_ar_normalized"] for r in canonical}
+
+    chains, candidate_mentions = _build_chain_index(
+        out / "narrator_mentions_resolved.parquet", {cand}
+    )
+    datable = _collect_datable(candidate_mentions[cand], chains, attested_by_id, name_by_id)
+
+    by_mention = {d.mention_id: d for d in datable}
+    chain0_anchors = {name_by_id["nar:t_a0"], name_by_id["nar:s_a0"]}
+    chain1_anchors = {name_by_id["nar:t_b1"], name_by_id["nar:s_b1"]}
+
+    # Each mention draws its ±1 anchors ONLY from its own isnad…
+    assert set(by_mention["m-c-0"].anchor_names) == chain0_anchors
+    assert set(by_mention["m-c-1"].anchor_names) == chain1_anchors
+    # …with no cross-chain leak in either direction (the load-bearing assertion).
+    assert not (set(by_mention["m-c-0"].anchor_names) & chain1_anchors)
+    assert not (set(by_mention["m-c-1"].anchor_names) & chain0_anchors)
