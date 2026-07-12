@@ -17,10 +17,11 @@ composition (relayed via the Program Director) keeps each book once:
 * ``fawaz`` — its UNIQUE collections only (Nawawi, Dehlawi, Qudsi).
 * ``mis`` — its multi-isnad CHAINS only. Its Sahih Muslim matn duplicates ``lk``,
   so NO ``mis`` Hadith nodes are loaded. Its transmission edges are staged as
-  ``network_edges_mis.parquet`` but are currently consumed by no loader (produced,
-  not loaded), pending a name-reconciliation crosswalk (mis Latin-transliteration
-  ids ↔ Arabic-normalized canonical keys); tracked as a separate follow-up to
-  da#364.
+  ``network_edges_mis.parquet`` and read by the STUDIED_UNDER glob but skipped
+  row-by-row (they declare TRANSMITTED_TO, not STUDIED_UNDER), so no mis edge is
+  persisted (produced, not loaded as a graph edge), pending a name-reconciliation
+  crosswalk (mis Latin-transliteration ids ↔ Arabic-normalized canonical keys);
+  tracked as a separate follow-up to da#364.
 * every other source — all collections (value ``None``).
 
 This is the **per-source** half of the dedup and is the deterministic part that
@@ -70,8 +71,10 @@ from src.utils.arabic import is_arabic, normalize_arabic
 #   frozenset(...) = load only these collections.
 #   frozenset()    = load NO Hadith nodes for this source (e.g. ``mis``: its
 #                    transmission edges are staged as ``network_edges_mis.parquet``
-#                    but are currently loaded by no loader — produced, not loaded —
-#                    pending a name-reconciliation crosswalk; da#364).
+#                    and read by the STUDIED_UNDER glob but skipped (they declare
+#                    TRANSMITTED_TO), so no mis edge is persisted — produced, not
+#                    loaded as a graph edge — pending a name-reconciliation
+#                    crosswalk; da#364).
 HADITH_COMPOSITION: dict[str, frozenset[str] | None] = {
     "halimbahae": frozenset({"musnad_ahmad_ibn-hanbal", "sunan_al-darimi", "maliks_muwataa"}),
     "fawaz": frozenset({"nawawi", "dehlawi", "qudsi"}),

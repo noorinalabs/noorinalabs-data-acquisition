@@ -298,10 +298,13 @@ def _load_transmitted_to(
                 # unaffected here for a different reason: it produces no narrator
                 # mentions at all (absent from NER routing), so it never reaches this
                 # narrator-mention path. Its transmission pairs are staged as
-                # ``network_edges_mis.parquet`` but are consumed by NO loader —
-                # produced, not loaded — pending a name-reconciliation crosswalk (mis
-                # Latin-transliteration ids ↔ Arabic-normalized canonical keys);
-                # tracked as a separate follow-up to da#364.
+                # ``network_edges_mis.parquet`` and ARE read by the STUDIED_UNDER glob
+                # (:func:`_load_studied_under`), but skipped row-by-row because they
+                # declare TRANSMITTED_TO, not STUDIED_UNDER — so no mis edge is
+                # persisted (produced, not loaded as a graph edge), pending a
+                # name-reconciliation crosswalk (mis Latin-transliteration ids ↔
+                # Arabic-normalized canonical keys); tracked as a separate follow-up
+                # to da#364.
                 dropped_noncanonical += 1
                 continue
             if row.get("provenance"):
@@ -436,9 +439,12 @@ def _load_narrated(
                 # (no Hadith node exists for it); dropping it at the source keeps the
                 # edge path consistent with the node loader. ``mis`` never reaches
                 # here because it produces no narrator mentions; its transmission
-                # pairs are staged as ``network_edges_mis.parquet`` but are loaded by
-                # no loader (produced, not loaded), pending a name-reconciliation
-                # crosswalk; tracked as a separate follow-up to da#364.
+                # pairs are staged as ``network_edges_mis.parquet`` and read by the
+                # STUDIED_UNDER glob but skipped row-by-row (they declare
+                # TRANSMITTED_TO, not STUDIED_UNDER), so no mis edge is persisted
+                # (produced, not loaded as a graph edge), pending a
+                # name-reconciliation crosswalk; tracked as a separate follow-up to
+                # da#364.
                 dropped_noncanonical += 1
                 continue
             key = (hid, _chain_index(row))
