@@ -1201,3 +1201,96 @@ def test_unmatched_no_bio_is_counted_and_warns(
         event == "bio_promote_aliases_unmatched_no_bio" and kw.get("unmatched_no_bio") == 1
         for event, kw in warnings_seen
     ), warnings_seen
+
+
+def test_truncated_residue_minting_a_new_node_is_counted_and_warns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """da#385: an ACCEPTED truncated residue that mints a new node must be counted + warned.
+
+    The da#379 guard only refuses a truncated residue that would claim an ATTESTED node;
+    a residue whose canonical id is absent is accepted and mints a node named after the
+    truncation. That outcome is deliberate but was previously silent — indistinguishable
+    from "it never happened" (feedback_silent_zero_is_not_a_measurement). Drive it POSITIVE
+    with the verbatim itqan prose fixture (cleans to the bare ism `عبيده`) against an empty
+    curated dir, and assert both the `bio_promote_complete` count and the aggregate WARN.
+    """
+    from src.resolve import bio_promote as bp
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+
+    assert cleaner_removed_content(
+        normalize_arabic(_ITQAN_60592_PROSE),
+        clean_narrator_name(normalize_arabic(_ITQAN_60592_PROSE)),
+    )
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:60592",
+                "source": "itqan",
+                "name_ar": _ITQAN_60592_PROSE,
+                "name_ar_normalized": normalize_arabic(_ITQAN_60592_PROSE),
+                "trustworthiness": "thiqa",
+            }
+        ],
+    )
+
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(bp.logger, "info", lambda event, **kw: events.append((event, kw)))
+    monkeypatch.setattr(bp.logger, "warning", lambda event, **kw: events.append((event, kw)))
+
+    assert bp.promote_bios_to_canonical(staging, out_dir) is not None
+    complete = next(kw for event, kw in events if event == "bio_promote_complete")
+    assert complete["truncated_residue_minted"] == 1
+    assert complete["truncated_residue_onto_unattested"] == 0
+    assert any(
+        event == "bio_promote_truncated_residue_accepted"
+        and kw.get("minted_new") == 1
+        and kw.get("total") == 1
+        for event, kw in events
+    ), events
+
+
+def test_truncated_residue_onto_zero_mention_node_is_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """da#385: a truncated residue merging onto a ZERO-mention node is the other counted class.
+
+    A mention_count == 0 target is not attested, so the guard does not refuse — the residue
+    fuses two catalog entries under a truncated key (deliberate; da#299 owns the real fix).
+    That path increments `truncated_residue_onto_unattested`, never `_minted`.
+    """
+    from src.resolve import bio_promote as bp
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+
+    _write_attested_narrator(out_dir, "عبيده", mentions=0)
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:60592",
+                "source": "itqan",
+                "name_ar": _ITQAN_60592_PROSE,
+                "name_ar_normalized": normalize_arabic(_ITQAN_60592_PROSE),
+                "trustworthiness": "thiqa",
+            }
+        ],
+    )
+
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(bp.logger, "info", lambda event, **kw: events.append((event, kw)))
+
+    assert bp.promote_bios_to_canonical(staging, out_dir) is not None
+    complete = next(kw for event, kw in events if event == "bio_promote_complete")
+    assert complete["truncated_residue_onto_unattested"] == 1
+    assert complete["truncated_residue_minted"] == 0
