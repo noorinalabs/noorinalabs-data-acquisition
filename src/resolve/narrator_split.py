@@ -108,6 +108,34 @@ are excluded from the attested pool, a re-run's evidence for every candidate is 
 subset of the first run's — splitting only ever gets *harder* — so no candidate newly
 splits. The stage returns ``None`` (no-op).
 
+Second axis — isnad-neighbour *context* discriminator (da#337/#346 PR-B)
+-----------------------------------------------------------------------
+The date axis above **abstains** whenever dates cannot carve referents apart even though
+multi-referent evidence clearly exists — Gate 2 (*too many* well-supported bands ⇒
+"generic bucket") and Gate 3 (bands too *close* ⇒ contemporaries). PR-B adds an
+orthogonal discriminator that runs *only* on those two abstains (never on Gate 1, the
+genuinely-single al-Zuhrī guard): it separates the mentions by **who they keep company
+with** — the identities of their specific teacher/student neighbours — instead of by
+date. Two people who share a generic name but ran in different scholarly circles surface
+as two dense, mutually-disjoint neighbour communities; one real hub does not.
+
+* :func:`_collect_context` — per mention, the set of *specific* (discriminating) neighbour
+  names, on the loader's **consecutive-resolved** adjacency (:func:`_chain_neighbours`,
+  #439), not the date axis's exact ``position ±1``.
+* :func:`_cluster_by_context` — union-find on ≥ :data:`CTX_MIN_SHARED` shared specific
+  neighbours (Layer 1), then a Jaccard (:data:`CTX_MAX_JACCARD`) agglomeration guard
+  folding artificially-fragmented referents back together (Layer 2).
+* :func:`plan_split_by_context` — peels every non-largest qualifying community onto a
+  ``"ctx:"``-discriminated id (reusing :class:`PeeledBand` / :class:`SplitPlan` / the audit
+  schema unchanged); abstains outside ``[2, SPLIT_MAX_PEEL]`` communities. The
+  ``SPLIT_MAX_PEEL`` ceiling is a HARD abstain, not a truncating top-K, so a re-run stays a
+  strict no-op. The peeled row still carries a death window (context mentions are datable,
+  §1) and ``ISNAD_ESTIMATE`` precision exactly as the date axis does.
+
+Both axes produce the same :class:`SplitPlan` shape, so everything downstream (append
+peeled rows, ``mention_id``-keyed remap, audit write, the PURE-SPLIT conservation/no-merge
+asserts) is shared and unchanged.
+
 Accepted v1 limitation (documented, NOT fixed here per da#337 scope)
 -------------------------------------------------------------------
 The chain-edge loaders (``load_edges._build_chain_pairs`` / ``_load_narrated``) key on
@@ -139,6 +167,7 @@ from src.resolve.tabaqa_dates import _GENERATION_DEATH_WINDOW_AH
 from src.utils.logging import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 logger = get_logger(__name__)
@@ -148,12 +177,18 @@ __all__ = [
     "SPLIT_MIN_SUPPORT",
     "SPLIT_MIN_SEPARATION",
     "SPLIT_MAX_CLUSTERS",
+    "SPLIT_MAX_PEEL",
+    "CTX_MIN_SHARED",
+    "CTX_MAX_JACCARD",
+    "CTX_MAX_NEIGHBOUR_DF",
     "MID_GAP",
     "NARRATOR_SPLITS_SCHEMA",
     "DatableMention",
+    "ContextMention",
     "PeeledBand",
     "SplitPlan",
     "plan_split",
+    "plan_split_by_context",
     "split_generic_narrators",
 ]
 
@@ -183,6 +218,43 @@ SPLIT_MIN_SEPARATION = 50
 # More than this many *qualifying* bands means the name is a generic bucket we cannot
 # cleanly resolve into a few people — abstain and log for audit rather than shatter it.
 SPLIT_MAX_CLUSTERS = 6
+
+# ---------------------------------------------------------------------------
+# Context-discriminator thresholds (da#337/#346 PR-B — the isnad-neighbour axis)
+# ---------------------------------------------------------------------------
+# The context axis runs ONLY where the date axis abstained multi-referent-likely (Gate 2
+# noise / Gate 3 contemporaries): it separates an over-merged generic name by *who its
+# mentions keep company with* — the identities of their specific teacher/student
+# neighbours — rather than by date. All four are tunable, to be re-tuned against staging
+# in da#337 PR-3 (same status as the date thresholds above).
+
+# Union two candidate mentions into one referent only if they share at least this many
+# *specific* neighbour identities. Two independent shared narrators is a strong
+# same-person signal; a single shared narrator can be coincidental co-transmission — so
+# the floor is 2, which is also what keeps the Layer-2 Jaccard gate non-redundant
+# (components can still incidentally share one neighbour).
+CTX_MIN_SHARED = 2
+
+# Layer-2 over-split guard (the context analogue of the date axis's Gate 3): two raw
+# components whose aggregate specific-neighbour sets have Jaccard >= this are one referent
+# artificially fragmented, so they agglomerate back together rather than peeling as two
+# people.
+CTX_MAX_JACCARD = 0.15
+
+# Stop-neighbour cap: a neighbour appearing in more than this fraction of *this
+# candidate's* mentions co-occurs with every referent, so it is non-discriminative for
+# this candidate and must contribute ZERO union evidence (exclude, never down-weight —
+# the أبيه "his father" lesson, project_relational_pollution_scrub_equiv). Also bounds the
+# Layer-1 pair cost (no single neighbour can induce a quadratic blow-up).
+CTX_MAX_NEIGHBOUR_DF = 0.50
+
+# Context-axis ceiling (the analogue of SPLIT_MAX_CLUSTERS on the date axis, but higher —
+# resolving a many-referent generic bucket is the whole point of this path). More than
+# this many *qualifying* communities ⇒ a generic bucket we still cannot cleanly resolve
+# ⇒ HARD abstain (a strict no-op, NOT a truncating top-K: a top-K would leave a tail that
+# re-splits on the next run and break idempotence). SPLIT_MAX_CLUSTERS is unchanged — it
+# stays the date-axis ceiling; the context axis gets its own, higher one.
+SPLIT_MAX_PEEL = 50
 
 # Precisions that mark an *estimated* (non-attested) death window and so must never be
 # used as isnad-adjacency evidence: the ṭabaqa layer's estimate AND this stage's own
@@ -225,6 +297,25 @@ class DatableMention:
 
 
 @dataclass(frozen=True)
+class ContextMention:
+    """One mention of a context candidate: its specific-neighbour set + a date estimate.
+
+    Sibling of :class:`DatableMention` for the isnad-neighbour (context) axis (da#337/#346
+    PR-B). ``specific_neighbours`` are the normalized **names** (cascade-free, matching the
+    date-axis anchor tie-break) of the mention's *usable* teacher/student neighbours — the
+    identities two mentions of the *same* person keep sharing. ``estimate`` is an optional
+    death-year estimate (``None`` when the mention has no *attested* context neighbour, e.g.
+    a mention datable only across a chain gap) used only to fill the audit row's death
+    window; the split decision itself is driven entirely by ``specific_neighbours``, never
+    by the estimate.
+    """
+
+    mention_id: str
+    estimate: int | None
+    specific_neighbours: frozenset[str]
+
+
+@dataclass(frozen=True)
 class PeeledBand:
     """A qualifying death-band that peels onto its own discriminated canonical id."""
 
@@ -248,6 +339,12 @@ class SplitPlan:
     primary_id: str
     name_ar_normalized: str
     peeled: tuple[PeeledBand, ...] = field(default_factory=tuple)
+    # Why the candidate abstained, when it did (``peeled`` empty). ``None`` on a real
+    # split. The context axis (da#337/#346 PR-B) reads this to fire ONLY on the date
+    # axis's Gate-2 (``"gate2_noise"``) / Gate-3 (``"gate3_unseparated"``) abstains, never
+    # on Gate-1 (``"gate1_single"`` — the genuinely-single al-Zuhrī guard). A pure
+    # annotation on the date path: no date behaviour changes.
+    abstain_reason: str | None = None
 
     @property
     def is_split(self) -> bool:
@@ -322,7 +419,13 @@ def plan_split(name_ar_normalized: str, datable: list[DatableMention]) -> SplitP
     which case each non-largest qualifying band peels onto a discriminated id.
     """
     primary_id = make_canonical_id(name_ar_normalized)
-    abstain = SplitPlan(primary_id=primary_id, name_ar_normalized=name_ar_normalized)
+
+    def _abstain(reason: str) -> SplitPlan:
+        # ``reason`` is what the context axis (da#337/#346 PR-B) keys on: it runs only on
+        # "gate2_noise"/"gate3_unseparated", never on the "gate1_single" genuinely-single guard.
+        return SplitPlan(
+            primary_id=primary_id, name_ar_normalized=name_ar_normalized, abstain_reason=reason
+        )
 
     bands = _cut_bands(datable)
     qualifying = [b for b in bands if len(b) >= SPLIT_MIN_SUPPORT]
@@ -330,7 +433,7 @@ def plan_split(name_ar_normalized: str, datable: list[DatableMention]) -> SplitP
     # Gate 1: need ≥2 well-supported bands. A single-band name (a genuinely single
     # person like Sufyān al-Thawrī / al-Zuhrī) abstains here — the load-bearing guard.
     if len(qualifying) < 2:
-        return abstain
+        return _abstain("gate1_single")
     # Gate 2: too many well-supported bands ⇒ generic bucket, not a few people.
     if len(qualifying) > SPLIT_MAX_CLUSTERS:
         logger.info(
@@ -339,12 +442,12 @@ def plan_split(name_ar_normalized: str, datable: list[DatableMention]) -> SplitP
             qualifying_bands=len(qualifying),
             max_clusters=SPLIT_MAX_CLUSTERS,
         )
-        return abstain
+        return _abstain("gate2_noise")
     # Gate 3: adjacent qualifying midpoints must be well separated.
     qsorted = sorted(qualifying, key=_band_midpoint)
     mids = [_band_midpoint(b) for b in qsorted]
     if any(b - a <= SPLIT_MIN_SEPARATION for a, b in zip(mids, mids[1:], strict=False)):
-        return abstain
+        return _abstain("gate3_unseparated")
 
     # The largest qualifying band (ties → lower midpoint) keeps the primary id; the
     # undatable/below-support remainder is already off the peel list by construction.
@@ -591,6 +694,290 @@ def _collect_datable(
     return datable
 
 
+def _chain_neighbours(chain: list[tuple[int, str]], position: int) -> tuple[str | None, str | None]:
+    """The mention's (teacher, student) using the loader's *consecutive-resolved* adjacency.
+
+    #439 (raised in the #437 review): the graph loader's ``TRANSMITTED_TO`` edges pair
+    *consecutive resolved* narrators (``load_edges._build_chain_pairs`` sorts by position,
+    drops null-``canonical_narrator_id`` mentions, pairs ``resolved[i] → resolved[i+1]``),
+    so on a chain with a position GAP — an intermediate mention left unresolved and dropped
+    — the loader still makes an edge *across* the gap. The context axis is the split basis
+    and is meaningful only insofar as it mirrors that who-taught-whom topology, so it
+    matches the loader here rather than the date axis's exact ``position ±1``: it returns
+    the immediate predecessor / successor of the mention **in the resolved-and-sorted list**
+    (teacher, student), NOT ``position − 1`` / ``position + 1``. Exact-±1 would under-count
+    real adjacencies on gappy chains and *erase* a gappy-chain-only referent (or, worse,
+    falsely split a single person held together only across a gap). ``chains`` already
+    excludes null-canonical mentions (built by :func:`_build_chain_index`), so the gap is
+    already collapsed — sorting the survivors by position reproduces the loader's adjacency.
+    Do NOT "fix" this back to exact-±1: the divergence from ``_collect_datable`` (which
+    stays exact-±1 for its date bands) is intentional and #439-resolved for the context path.
+    """
+    ordered = sorted(chain, key=lambda pc: pc[0])
+    idx = next((i for i, (pos, _) in enumerate(ordered) if pos == position), None)
+    if idx is None:
+        return None, None
+    teacher = ordered[idx - 1][1] if idx > 0 else None
+    student = ordered[idx + 1][1] if idx + 1 < len(ordered) else None
+    return teacher, student
+
+
+def _collect_context(
+    mentions: list[tuple[str, int, int, str]],
+    chains: dict[tuple[str, int], list[tuple[int, str]]],
+    attested_by_id: dict[str, int],
+    name_by_id: dict[str, str],
+    is_specific: Callable[[str], bool],
+) -> list[ContextMention]:
+    """Per-mention *specific-neighbour* sets (+ an optional date estimate) for the context axis.
+
+    Sibling of :func:`_collect_datable` sharing the same ``(hadith_id, chain_index)``-keyed
+    ``chains`` (no second scan). For each candidate mention it takes the consecutive-resolved
+    teacher/student (:func:`_chain_neighbours`, #439) and keeps a neighbour's normalized name
+    iff ``is_specific`` accepts it (filters 1-2 of §2: not generic, not a split-candidate /
+    registered mononym). It then applies the stop-neighbour document-frequency cap (filter 3,
+    :data:`CTX_MAX_NEIGHBOUR_DF`): a neighbour appearing in > that fraction of *this*
+    candidate's mentions is non-discriminative and is dropped from **every** mention's set
+    (zero union evidence — never down-weighted).
+
+    ``estimate`` reuses the date-estimation logic (neighbour attested death ±
+    :data:`MID_GAP`, teacher earlier / student later) but on the *context* window, so a
+    mention datable only across a gap still carries a window for the audit row; it is
+    ``None`` when no context neighbour is attested and is used only for the audit
+    death-window, never for the split decision. Every mention is yielded (even with an empty
+    neighbour set) so the §5 conservation invariant holds over the candidate's full mention set.
+    """
+    # Pass 1 — raw specific-neighbour names + a context-window date estimate per mention.
+    raw: list[tuple[str, int | None, set[str]]] = []
+    df: dict[str, int] = {}
+    for hadith_id, chain_index, position, mention_id in mentions:
+        teacher, student = _chain_neighbours(chains.get((hadith_id, chain_index), []), position)
+        names: set[str] = set()
+        estimates: list[int] = []
+        for nid, sign in ((teacher, 1), (student, -1)):
+            if nid is None:
+                continue
+            year = attested_by_id.get(nid)
+            if year is not None:
+                estimates.append(year + sign * MID_GAP)
+            if is_specific(nid):
+                nname = name_by_id.get(nid)
+                if nname:
+                    names.add(nname)
+        estimate = round(sum(estimates) / len(estimates)) if estimates else None
+        for nname in names:
+            df[nname] = df.get(nname, 0) + 1
+        raw.append((mention_id, estimate, names))
+
+    # Pass 2 — drop stop-neighbours (df cap) from every mention's set, then materialize.
+    cap = CTX_MAX_NEIGHBOUR_DF * len(raw)
+    stop = {name for name, count in df.items() if count > cap}
+    return [
+        ContextMention(
+            mention_id=mid,
+            estimate=estimate,
+            specific_neighbours=frozenset(names - stop),
+        )
+        for mid, estimate, names in raw
+    ]
+
+
+def _cluster_by_context(ctx: list[ContextMention]) -> list[frozenset[str]]:
+    """Two-layer, deterministic, order-independent clustering of context mentions.
+
+    **Layer 1 (union-find):** union two mentions that share >= :data:`CTX_MIN_SHARED`
+    specific neighbours — via an inverted ``neighbour_name -> {mention_id}`` index and
+    pairwise shared counts (the :data:`CTX_MAX_NEIGHBOUR_DF` cap keeps every posting list
+    small, bounding the pair cost). **Layer 2 (single-linkage agglomeration):** merge two
+    raw components whose aggregate specific-neighbour sets have Jaccard >=
+    :data:`CTX_MAX_JACCARD` — the over-split guard that folds an artificially-fragmented
+    single referent back together. Returns the merged communities with >=
+    :data:`SPLIT_MIN_SUPPORT` mentions (qualifying); the below-support remainder is dropped
+    here and stays on the primary (peel-not-partition) in the caller.
+    """
+    parent: dict[str, str] = {cm.mention_id: cm.mention_id for cm in ctx}
+
+    def find(x: str) -> str:
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            hi, lo = (ra, rb) if ra > rb else (rb, ra)  # smaller id as root → deterministic
+            parent[hi] = lo
+
+    # Layer 1 — inverted index → pairwise shared counts → union at the CTX_MIN_SHARED floor.
+    index: dict[str, list[str]] = {}
+    for cm in ctx:
+        for name in cm.specific_neighbours:
+            index.setdefault(name, []).append(cm.mention_id)
+    shared: dict[tuple[str, str], int] = {}
+    for mids in index.values():
+        ordered_mids = sorted(set(mids))
+        for i in range(len(ordered_mids)):
+            for j in range(i + 1, len(ordered_mids)):
+                key = (ordered_mids[i], ordered_mids[j])
+                shared[key] = shared.get(key, 0) + 1
+    for (a, b), count in shared.items():
+        if count >= CTX_MIN_SHARED:
+            union(a, b)
+
+    # Raw components + their aggregate specific-neighbour sets.
+    nbr_by_mid = {cm.mention_id: cm.specific_neighbours for cm in ctx}
+    comp_members: dict[str, set[str]] = {}
+    for cm in ctx:
+        comp_members.setdefault(find(cm.mention_id), set()).add(cm.mention_id)
+    comp_ids = sorted(comp_members)
+    comp_nbrs: dict[str, frozenset[str]] = {}
+    for c in comp_ids:
+        acc: set[str] = set()
+        for m in comp_members[c]:
+            acc |= nbr_by_mid[m]
+        comp_nbrs[c] = frozenset(acc)
+
+    # Layer 2 — agglomerate components with Jaccard >= threshold (single-linkage, on a
+    # second union-find so the merge is order-independent for a fixed threshold).
+    cparent: dict[str, str] = {c: c for c in comp_ids}
+
+    def cfind(x: str) -> str:
+        while cparent[x] != x:
+            cparent[x] = cparent[cparent[x]]
+            x = cparent[x]
+        return x
+
+    def cunion(a: str, b: str) -> None:
+        ra, rb = cfind(a), cfind(b)
+        if ra != rb:
+            hi, lo = (ra, rb) if ra > rb else (rb, ra)
+            cparent[hi] = lo
+
+    for i in range(len(comp_ids)):
+        for j in range(i + 1, len(comp_ids)):
+            na, nb = comp_nbrs[comp_ids[i]], comp_nbrs[comp_ids[j]]
+            if not na or not nb:
+                continue
+            inter = len(na & nb)
+            if inter and inter / len(na | nb) >= CTX_MAX_JACCARD:
+                cunion(comp_ids[i], comp_ids[j])
+
+    merged: dict[str, set[str]] = {}
+    for c in comp_ids:
+        merged.setdefault(cfind(c), set()).update(comp_members[c])
+
+    return [
+        frozenset(members)
+        for _, members in sorted(merged.items())
+        if len(members) >= SPLIT_MIN_SUPPORT
+    ]
+
+
+def _context_discriminator(anchors: tuple[str, ...], used: set[str]) -> str:
+    """A deterministic ``"ctx:"`` discriminator from a community's specific anchors.
+
+    The community's lexicographically-smallest specific anchor name (cascade-free, matching
+    the date axis's anchor tie-break at ``narrator_split.py`` §6); on the
+    structurally-near-impossible chance two peeled communities produce the same label,
+    append the next-smallest anchor names until unique — deterministic, no running ordinals.
+    """
+    disc = "ctx:" + (anchors[0] if anchors else "")
+    extra = 1
+    while disc in used and extra < len(anchors):
+        disc = disc + "|" + anchors[extra]
+        extra += 1
+    return disc
+
+
+def plan_split_by_context(name_ar_normalized: str, ctx: list[ContextMention]) -> SplitPlan:
+    """Decide whether/how to split ``name_ar_normalized`` on the isnad-neighbour context axis.
+
+    The date-axis *fallback* (da#337/#346 PR-B): the caller runs this only where
+    :func:`plan_split` abstained at Gate 2/Gate 3. Mirrors ``plan_split``'s shape and reuses
+    :class:`PeeledBand` / :class:`SplitPlan` / the audit schema unchanged. Abstains (empty
+    ``SplitPlan``) unless there are between 2 and :data:`SPLIT_MAX_PEEL` qualifying
+    communities; otherwise the **largest** community keeps the bare id (the primary) and
+    every other qualifying community peels onto a ``"ctx:"``-discriminated id. Below-support
+    fragments and the un-clustered remainder stay on the primary (peel-not-partition).
+    """
+    primary_id = make_canonical_id(name_ar_normalized)
+
+    communities = _cluster_by_context(ctx)
+    # Gate A: < 2 communities ⇒ one referent or a diffuse hub (al-Zuhrī) → stay whole.
+    if len(communities) < 2:
+        return SplitPlan(
+            primary_id=primary_id,
+            name_ar_normalized=name_ar_normalized,
+            abstain_reason="ctx_single",
+        )
+    # Gate B: too many well-separated communities ⇒ still-unresolvable generic bucket ⇒
+    # HARD abstain (a no-op, not a truncating top-K — keeps the re-run idempotent).
+    if len(communities) > SPLIT_MAX_PEEL:
+        logger.info(
+            "narrator_split_context_abstain_noise",
+            name=name_ar_normalized,
+            communities=len(communities),
+            max_peel=SPLIT_MAX_PEEL,
+        )
+        return SplitPlan(
+            primary_id=primary_id,
+            name_ar_normalized=name_ar_normalized,
+            abstain_reason="ctx_noise",
+        )
+
+    ctx_by_mid = {cm.mention_id: cm for cm in ctx}
+
+    def community_anchors(members: frozenset[str]) -> tuple[str, ...]:
+        return tuple(sorted({a for m in members for a in ctx_by_mid[m].specific_neighbours}))
+
+    # Retain the largest community (ties → lexicographically-smallest specific anchor,
+    # deterministic); every other qualifying community peels.
+    def sort_key(members: frozenset[str]) -> tuple[int, str]:
+        anchors = community_anchors(members)
+        return (-len(members), anchors[0] if anchors else "")
+
+    ordered = sorted(communities, key=sort_key)
+    peel_communities = ordered[1:]
+
+    used_disc: set[str] = set()
+    peeled: list[PeeledBand] = []
+    for members in peel_communities:
+        anchors = community_anchors(members)
+        disc = _context_discriminator(anchors, used_disc)
+        used_disc.add(disc)
+        # Death window (informational only — these referents are contemporaries, which is
+        # WHY the date axis abstained): the mean/min/max of the community's datable estimates.
+        estimates: list[int] = []
+        for m in members:
+            est = ctx_by_mid[m].estimate
+            if est is not None:
+                estimates.append(est)
+        if estimates:
+            midpoint = round(sum(estimates) / len(estimates))
+            earliest, latest = min(estimates), max(estimates)
+        else:
+            midpoint = earliest = latest = 0
+        peeled.append(
+            PeeledBand(
+                new_id=make_discriminated_canonical_id(name_ar_normalized, disc),
+                discriminator=disc,
+                midpoint_ah=midpoint,
+                earliest_ah=earliest,
+                latest_ah=latest,
+                mention_ids=tuple(sorted(members)),
+                exemplar_anchors=anchors[:3],
+            )
+        )
+    return SplitPlan(
+        primary_id=primary_id,
+        name_ar_normalized=name_ar_normalized,
+        peeled=tuple(peeled),
+    )
+
+
 def _peeled_record(primary_rec: dict[str, Any], band: PeeledBand, name_norm: str) -> dict[str, Any]:
     """A new canonical row for a peeled band, conforming to NARRATORS_CANONICAL_SCHEMA.
 
@@ -696,17 +1083,40 @@ def split_generic_narrators(output_dir: Path, *, staging_dir: Path | None = None
 
     chains, candidate_mentions = _build_chain_index(mentions_path, candidate_ids)
 
+    def is_specific(neighbour_id: str) -> bool:
+        """A context neighbour discriminates iff it is a *specific* narrator (§2 filters 1-2):
+        not a split candidate, not a registered mononym, not itself a generic name."""
+        if neighbour_id in candidate_ids:
+            return False
+        nname = name_by_id.get(neighbour_id)
+        if nname is None or is_registered_mononym(nname):
+            return False
+        nmc = _as_int(record_by_id.get(neighbour_id, {}).get("mention_count")) or 0
+        return not is_generic_name(nname, nmc)
+
     plans: list[SplitPlan] = []
+    mentions_by_primary: dict[str, set[str]] = {}
     for cid in sorted(candidate_ids):
         name_norm = name_by_id.get(cid)
         if name_norm is None:
             continue
-        datable = _collect_datable(
-            candidate_mentions.get(cid, []), chains, attested_by_id, name_by_id
-        )
-        plan = plan_split(name_norm, datable)
-        if plan.is_split:
-            plans.append(plan)
+        cand_mentions = candidate_mentions.get(cid, [])
+        datable = _collect_datable(cand_mentions, chains, attested_by_id, name_by_id)
+        date_plan = plan_split(name_norm, datable)
+        if date_plan.is_split:
+            plans.append(date_plan)
+            mentions_by_primary[cid] = {m[3] for m in cand_mentions}
+            continue
+        # Context fallback (da#337/#346 PR-B): runs ONLY where the DATE axis found the name
+        # multi-referent-likely (≥2 datable bands) but couldn't resolve it — Gate 2 (noise)
+        # / Gate 3 (contemporaries). Gate 1 (a single clean band, or undatable) is the
+        # genuinely-single guard (al-Zuhrī) and is NEVER sent to context.
+        if date_plan.abstain_reason in {"gate2_noise", "gate3_unseparated"}:
+            ctx = _collect_context(cand_mentions, chains, attested_by_id, name_by_id, is_specific)
+            ctx_plan = plan_split_by_context(name_norm, ctx)
+            if ctx_plan.is_split:
+                plans.append(ctx_plan)
+                mentions_by_primary[cid] = {m[3] for m in cand_mentions}
 
     if not plans:
         logger.info(
@@ -715,6 +1125,29 @@ def split_generic_narrators(output_dir: Path, *, staging_dir: Path | None = None
             canonical_total=len(records),
         )
         return None
+
+    # PURE-SPLIT invariant (da#337/#346 §5) — asserted for BOTH axes (a shared safety net,
+    # per project_canonical_identity_invariant: "de-keying alone trades over-merge for
+    # under-merge"). No-merge: every peel mints a fresh, distinct id, absent from the
+    # pre-existing canonical table — never routes two distinct nodes onto one.
+    # Conservation: the peeled mention_id sets are pairwise disjoint and a subset of the
+    # candidate's own mentions, so peeled + retained-primary == original.
+    pre_existing_ids = set(record_by_id)
+    for plan in plans:
+        peel_ids = [b.new_id for b in plan.peeled]
+        assert len(peel_ids) == len(set(peel_ids)), "peeled ids must be distinct"
+        seen_mids: set[str] = set()
+        for band in plan.peeled:
+            assert band.new_id != plan.primary_id
+            assert band.new_id not in pre_existing_ids, (
+                "a peel must mint a new node, never merge onto an existing canonical id"
+            )
+            mids = set(band.mention_ids)
+            assert seen_mids.isdisjoint(mids), "peeled mention sets must be disjoint"
+            seen_mids |= mids
+        assert seen_mids <= mentions_by_primary[plan.primary_id], (
+            "peeled mentions must be a subset of the candidate's own mentions"
+        )
 
     # Apply: reduce each primary's mention_count, append peeled rows, build the remap.
     remap: dict[str, str] = {}
