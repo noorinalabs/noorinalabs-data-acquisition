@@ -324,6 +324,51 @@ def test_stage_splits_two_bands_and_peels(tmp_path: Path) -> None:
     assert audit[0]["new_id"] == peeled[0]["canonical_id"]
 
 
+def test_stage_peel_re_derives_attestation(tmp_path: Path) -> None:
+    """da#370: narrator_split mutates mention_count AFTER the last derivation site
+    (fuzzy_cluster), so it must re-derive attestation on BOTH the reduced primary and
+    each peeled band. Without the two re-derivations the primary keeps a stale tag and
+    every peeled band loads as the loader's "unknown" default.
+
+    The peeled band carries real isnad mentions -> isnad_attested. The primary's
+    recorded count is set equal to the peeled total, so the ``max(0, ...)`` reduction
+    lands it at 0 -> biographical_only — the branch a primary hits when peeling consumes
+    its whole recorded count. The assertion is that each tag follows the FINAL count.
+
+    Two equal bands of GENERIC_MIN_MENTIONS: the recorded count (50) both screens the
+    name in as generic AND equals the single peeled band, so the residual clamps to 0."""
+    out = tmp_path / "curated"
+    cand = make_canonical_id(_ABU_ABDALLAH)
+    early_death = 150 - MID_GAP
+    late_death = 250 - MID_GAP
+    canonical = [
+        # Recorded count == the peeled (late) band, so the reduction clamps to 0.
+        _canonical_row(cand, _ABU_ABDALLAH, 50),
+        _anchor_row("nar:early", early_death),
+        _anchor_row("nar:late", late_death),
+    ]
+    mentions = _hadiths_against_anchor(cand, "nar:early", 50, 0, "e")
+    mentions += _hadiths_against_anchor(cand, "nar:late", 50, 0, "l")
+    _write(out, canonical, mentions)
+
+    assert split_generic_narrators(out) is not None
+
+    by_id = _read_canonical(out)
+    peeled = [
+        r
+        for r in by_id.values()
+        if r["name_ar_normalized"] == _ABU_ABDALLAH and r["canonical_id"] != cand
+    ]
+    assert len(peeled) == 1
+    # Site 1 — _peeled_record: a band with real isnad mentions is isnad_attested.
+    assert peeled[0]["mention_count"] == 50
+    assert peeled[0]["attestation"] == "isnad_attested"
+    # Site 2 — apply loop: the primary reduced to 0 re-tags to biographical_only
+    # (a stale carried-over "isnad_attested" would be wrong).
+    assert by_id[cand]["mention_count"] == 0
+    assert by_id[cand]["attestation"] == "biographical_only"
+
+
 def test_stage_undatable_remainder_stays_on_primary(tmp_path: Path) -> None:
     out = tmp_path / "curated"
     cand = make_canonical_id(_ABU_ABDALLAH)

@@ -11,14 +11,22 @@ Why this is derived at every canonical-table build site, not once
 ----------------------------------------------------------------
 ``narrators_canonical.parquet`` has more than one producer that (re)computes
 ``mention_count``: ``disambiguate`` mints rows from mentions, ``bio_promote`` MERGEs
-bio rows in (``mention_count = 0``), and ``fuzzy_cluster`` collapses ids and **sums**
-the survivors' ``mention_count``. A tag computed once and carried across those steps
-would go stale exactly when a merge changes ``mention_count`` (a bio-only record
-folded into an attested one). So — mirroring :func:`derive_sect_affiliation`, which
-is likewise re-derived from the merged ``source_corpora`` at each of those sites — the
-attestation is re-derived from the row's **final** ``mention_count`` wherever the
-canonical table is built. It is a pure function of that one field, so re-deriving is
-always consistent and never depends on producer ordering.
+bio rows in (``mention_count = 0``), ``fuzzy_cluster`` collapses ids and **sums** the
+survivors' ``mention_count``, and ``narrator_split`` (da#337) reduces a generic
+primary's count and mints peeled band rows. A tag computed once and carried across
+those steps would go stale exactly when one of them changes ``mention_count`` (a
+bio-only record folded into an attested one; a primary peeled down to zero). So —
+mirroring :func:`derive_sect_affiliation`, which is likewise re-derived from the
+merged ``source_corpora`` at each of those sites — the attestation is re-derived from
+the row's **final** ``mention_count`` at every one of those four sites. It is a pure
+function of that one field, so re-deriving is always consistent and never depends on
+producer ordering.
+
+The remaining canonical writers in ``RESOLVE_STEP_ORDER`` — ``date_reconcile`` and
+``tabaqa_dates`` — carry the tag through untouched, and that is safe **only because
+they never recompute ``mention_count``**: they round-trip the schema and edit date
+columns, so a value an earlier site derived stays valid. A future step that mutates
+``mention_count`` MUST add a re-derivation, exactly like the four above.
 
 Note the tag is about *isnad* attestation, not graph degree: a ``biographical_only``
 narrator whose name later resolves to a ``STUDIED_UNDER`` network endpoint at load
