@@ -87,9 +87,10 @@ _SPLITTER_DEFERRED_SOURCES: dict[str, str] = {
 #   muhaddithat: bio/network data only, no raw isnads.
 #   mis (da#365): its ``hadiths_mis.parquet`` rows carry a null ``isnad_raw_ar`` and
 #     no ``full_text_ar``; mis's transmission chains are staged separately as
-#     ``network_edges_mis.parquet`` and loaded on their own path (da#364), never
-#     mined from raw isnad text here. Routed to skip (not unrouted) so the da#369
-#     hard-fail does not fire; it contributes 0 NER mentions by construction.
+#     ``network_edges_mis.parquet`` but are consumed by no loader (produced, not
+#     loaded), pending a name-reconciliation crosswalk (da#364), never mined from raw
+#     isnad text here. Routed to skip (not unrouted) so the da#369 hard-fail does not
+#     fire; it contributes 0 NER mentions by construction.
 _SKIP_SOURCES: set[str] = {"muhaddithat", "mis"}
 
 # The union of every corpus with an explicit NER route. A staged corpus outside
