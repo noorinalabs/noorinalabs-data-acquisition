@@ -218,6 +218,35 @@ def test_merged_record_routes_through_make_canonical_id(tmp_path: Path) -> None:
     assert merged["external_id"] == "320"
 
 
+def test_merge_retags_bio_only_survivor_as_attested(tmp_path: Path) -> None:
+    """da#370: folding a bio-only (mention_count 0) variant into an attested narrator
+    lifts the summed mention_count above 0, so the survivor must RE-DERIVE to
+    isnad_attested — a carried-over biographical_only would be stale."""
+    attested = _rec(
+        "محمد بن اسماعيل البخاري",
+        mention_count=5,
+        attestation="isnad_attested",
+        death_year_ah=256,
+    )
+    bio_only = _rec(
+        "محمد بن اسماعيل",
+        mention_count=0,
+        attestation="biographical_only",
+        death_year_ah=256,
+    )
+    canonical = tmp_path / "narrators_canonical.parquet"
+    _write_canonical(canonical, [attested, bio_only])
+
+    metrics = cluster_canonical_narrators(canonical)
+    assert metrics.merged_records == 1
+
+    rows = pq.read_table(canonical).to_pylist()
+    assert len(rows) == 1
+    merged = rows[0]
+    assert merged["mention_count"] == 5
+    assert merged["attestation"] == "isnad_attested"
+
+
 def test_merge_cluster_drops_bare_relational_alias() -> None:
     """da#391: the cluster alias-union never carries a bare relational-pronoun.
 

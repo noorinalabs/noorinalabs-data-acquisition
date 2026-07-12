@@ -28,6 +28,13 @@ class TestValidationQueryFiles:
         path = QUERIES_DIR / "orphan_narrators.cypher"
         assert path.exists(), f"Missing {path}"
 
+    def test_orphan_query_excludes_biographical_only(self) -> None:
+        """da#370: kept bio-only narrators are zero-degree by design and must NOT be
+        flagged as orphans, or the contract stays uninformatively red."""
+        text = (QUERIES_DIR / "orphan_narrators.cypher").read_text()
+        assert "biographical_only" in text
+        assert "attestation" in text
+
     def test_chain_integrity_exists(self) -> None:
         path = QUERIES_DIR / "chain_integrity.cypher"
         assert path.exists(), f"Missing {path}"

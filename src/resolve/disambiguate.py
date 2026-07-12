@@ -38,6 +38,7 @@ from src.resolve._checkpoint import (
 )
 from src.resolve._inputs import require_input
 from src.resolve._run_record import write_canonical
+from src.resolve.attestation import derive_attestation
 from src.resolve.geography import regions_plausible, resolve_region
 from src.resolve.mononym_split import refine_mononym_name
 from src.resolve.schemas import (
@@ -917,6 +918,13 @@ def _build_canonical_table(
             [r.get("death_year_provenance") for r in rows], type=pa.string()
         ),
         "mention_count": pa.array([r.get("mention_count", 0) for r in rows], type=pa.int32()),
+        # Attestation tag derived from the row's final mention_count (da#370). A
+        # disambiguated narrator comes from real chain mentions, so this is
+        # "isnad_attested" for every row here; derived (not hard-coded) so the one
+        # helper stays the single source of truth across all producers.
+        "attestation": pa.array(
+            [derive_attestation(r.get("mention_count", 0)) for r in rows], type=pa.string()
+        ),
         # Sect/corpus provenance finalized from the accumulated corpora set (da#103).
         "source_corpus": pa.array([primary_corpus(_corpora(r)) for r in rows], type=pa.string()),
         "source_corpora": pa.array(

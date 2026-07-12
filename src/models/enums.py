@@ -83,6 +83,30 @@ class SectAffiliation(StrEnum):
     UNKNOWN = "unknown"
 
 
+class Attestation(StrEnum):
+    """How a canonical narrator is attested in the corpus (da#370).
+
+    Distinguishes a narrator we have an isnad transmission for from a
+    ``biographical_only`` record — a real historical person carried by a rijal /
+    biographical source (itqan / kaggle / muhaddithat) with **no** surviving isnad
+    mention. Bio-only narrators are deliberately kept ("tag & keep", owner ruling on
+    da#370): they are real, searchable people whose absence of an isnad is our
+    corpus's incompleteness, not theirs. The tag lets the UI present them as
+    biography-only entries and lets ``orphan_narrators.cypher`` exclude them so the
+    zero-degree contract stays meaningful for genuine orphans.
+
+    Derived from ``mention_count`` (see :func:`src.resolve.attestation.derive_attestation`):
+    a bio is provenance, not a chain hit, so a bio-promoted record carries
+    ``mention_count == 0``. ``UNKNOWN`` is not a derived value — every canonical
+    narrator has a known ``mention_count`` — it exists only as the loader's default
+    for a legacy canonical parquet written before this column existed.
+    """
+
+    ISNAD_ATTESTED = "isnad_attested"
+    BIOGRAPHICAL_ONLY = "biographical_only"
+    UNKNOWN = "unknown"
+
+
 class TrustworthinessGrade(StrEnum):
     """Narrator trustworthiness grade from classical rijal criticism."""
 

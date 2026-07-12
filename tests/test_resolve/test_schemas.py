@@ -70,13 +70,14 @@ class TestSampleData:
             "external_id": pa.array([None], type=pa.string()),
             "death_year_provenance": pa.array(["corroborated"], type=pa.string()),
             "mention_count": pa.array([5], type=pa.int32()),
+            "attestation": pa.array(["isnad_attested"], type=pa.string()),
             "source_corpus": pa.array(["sunnah"], type=pa.string()),
             "source_corpora": pa.array([["sunnah", "thaqalayn"]], type=pa.list_(pa.string())),
             "sect_affiliation": pa.array(["neutral"], type=pa.string()),
         }
         table = pa.table(data, schema=NARRATORS_CANONICAL_SCHEMA)
         assert table.num_rows == 1
-        assert {"source_corpus", "source_corpora", "sect_affiliation"} <= set(
+        assert {"source_corpus", "source_corpora", "sect_affiliation", "attestation"} <= set(
             NARRATORS_CANONICAL_SCHEMA.names
         )
 
