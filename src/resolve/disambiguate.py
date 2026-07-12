@@ -50,7 +50,7 @@ from src.resolve.sect_affiliation import (
     normalize_corpus,
     primary_corpus,
 )
-from src.utils.arabic import canonical_surface, normalize_arabic
+from src.utils.arabic import canonical_surface
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -713,8 +713,11 @@ def _disambiguate_mention(
     if not raw_name:
         return None, []
 
-    # Normalize Arabic once; all stages receive the pre-normalized form.
-    name = normalize_arabic(raw_name) if raw_name else ""
+    # da#438: match on the `canonical_surface` identity surface, the SAME surface the
+    # candidate index (`_load_candidates`) and the mint (`_make_canonical_id`) key on —
+    # not bare `normalize_arabic`, which left Stage 1 unable to exact-match a byte-
+    # identical bio across a fold the mint had already applied. All stages receive it.
+    name = canonical_surface(raw_name) if raw_name else ""
     if not name:
         return None, []
 
@@ -791,7 +794,7 @@ def _disambiguate_mention_indexed(
     if not raw_name:
         return None, []
 
-    name = normalize_arabic(raw_name) if raw_name else ""
+    name = canonical_surface(raw_name) if raw_name else ""
     if not name:
         return None, []
 
