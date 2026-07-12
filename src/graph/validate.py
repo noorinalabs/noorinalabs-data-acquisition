@@ -301,13 +301,33 @@ def _classify_collection_coverage(
     rows: list[dict[str, object]],
     deviation_threshold: float,
 ) -> ValidationResult:
+    """Compare expected vs actual hadith counts per collection.
+
+    A collection fails the gate two ways:
+
+    * ``deviation_pct`` exceeds ``deviation_threshold`` — the loaded count
+      strayed too far from the collection's ``expected_count``.
+    * ``deviation_pct`` is NULL — the collection carries no ``expected_count``
+      (the cypher's ``CASE ... ELSE null`` arm), so coverage is **un-evaluable**.
+      The predecessor *skipped* those rows and then reported "all within
+      threshold", so a collection that loaded 0 of its 650,986 rows was rolled
+      into a green summary — a false PASS hiding a total load failure (da#382).
+      An un-evaluable collection is not a healthy one: it fails the gate. Only a
+      numeric deviation within threshold is a positive PASS.
+    """
     count = len(rows)
     failures: list[str] = []
     for row in rows:
+        cid = row.get("collection_id", "?")
         dev = row.get("deviation_pct")
-        if dev is not None and isinstance(dev, int | float) and dev > deviation_threshold:
-            cid = row.get("collection_id", "?")
-            failures.append(f"{cid}: {dev:.1f}% deviation")
+        if isinstance(dev, int | float):
+            if dev > deviation_threshold:
+                failures.append(f"{cid}: {dev:.1f}% deviation")
+        else:
+            actual = row.get("actual", "?")
+            failures.append(
+                f"{cid}: expected_count missing — coverage un-evaluable (actual={actual})"
+            )
     passed = len(failures) == 0
     details = "all within threshold" if passed else "; ".join(failures)
     return ValidationResult(query_name, passed, details, count)

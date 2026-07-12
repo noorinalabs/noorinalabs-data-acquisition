@@ -181,12 +181,39 @@ class TestCollectionCoverageClassification:
         result = _classify("collection_coverage", rows)
         assert result.passed is False
 
-    def test_null_expected_is_pass(self) -> None:
+    def test_null_expected_is_fail(self) -> None:
+        """da#382: a NULL/missing ``expected_count`` makes coverage un-evaluable.
+
+        The cypher returns ``deviation_pct = null`` for a collection whose
+        ``expected_count`` is NULL. The old classifier *skipped* that row and
+        reported "all within threshold" — so a collection that loaded 0 of its
+        650,986 rows was silently reported healthy. An un-evaluable collection
+        must FAIL the gate, not silently pass.
+        """
         rows: list[dict[str, object]] = [
-            {"collection_id": "col:unknown", "expected": None, "actual": 42, "deviation_pct": None},
+            {"collection_id": "col:unknown", "expected": None, "actual": 0, "deviation_pct": None},
         ]
         result = _classify("collection_coverage", rows)
-        assert result.passed is True
+        assert result.passed is False
+        assert result.is_fatal is True
+        assert "col:unknown" in result.details
+
+    def test_null_expected_not_masked_by_healthy_sibling(self) -> None:
+        """The un-evaluable collection must fail the whole run even when another
+        collection is genuinely within threshold — the failure cannot be rolled
+        into a green 'all within threshold' summary (da#382)."""
+        rows: list[dict[str, object]] = [
+            {
+                "collection_id": "col:bukhari",
+                "expected": 7563,
+                "actual": 7500,
+                "deviation_pct": 0.83,
+            },
+            {"collection_id": "col:empty", "expected": None, "actual": 0, "deviation_pct": None},
+        ]
+        result = _classify("collection_coverage", rows)
+        assert result.passed is False
+        assert "col:empty" in result.details
 
 
 class TestCypherFileLoading:
