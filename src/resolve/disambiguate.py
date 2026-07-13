@@ -936,6 +936,11 @@ def _build_canonical_table(
         "sect_affiliation": pa.array(
             [derive_sect_affiliation(_corpora(r)) for r in rows], type=pa.string()
         ),
+        # Over-merge flag (da#445) is set later by the ``over_merged_flag`` stage from
+        # the curated seed, never here — a freshly-disambiguated node defaults to
+        # unflagged (None; the graph loader reads that as False).
+        "over_merged": pa.array([r.get("over_merged") for r in rows], type=pa.bool_()),
+        "over_merge_note": pa.array([r.get("over_merge_note") for r in rows], type=pa.string()),
     }
     return pa.table(arrays, schema=NARRATORS_CANONICAL_SCHEMA)
 

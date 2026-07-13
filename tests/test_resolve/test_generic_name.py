@@ -99,3 +99,28 @@ class TestDegenerateInput:
     @pytest.mark.parametrize("name", ["", "   ", "\t\n"])
     def test_empty_or_whitespace_is_false_without_crash(self, name: str) -> None:
         assert is_generic_name(name, _MC) is False
+
+
+class TestOverMergeFlagCandidacy:
+    """da#445 / #337 flag-now: pin that bare Sufyān screens IN (it already does).
+
+    The flag-now spec's aside (i) asked to ensure bare Sufyān is caught by the screen.
+    It ALREADY is: a bare single-token ism screens in via the existing thin/short-fragment
+    path, so ``is_generic_name`` needs no change (a redundant "bare-ism branch" would
+    alter no output). Pinned here against a regression, with the real caveat recorded: the
+    reason bare Sufyān is nonetheless skipped by ``narrator_split`` is a DIFFERENT screen,
+    ``is_registered_mononym`` (da#248 mononym registry) — not this function. And note this
+    screen is recall-first: it returns True for genuine hubs too (al-Zuhrī, Mālik), so it
+    never separates chimeras from hubs — the da#445 curated ``over_merged`` list does that.
+    """
+
+    def test_bare_sufyan_screens_in_at_leaderboard_scale(self) -> None:
+        # The exact da#445 acceptance assertion — already true at HEAD.
+        assert is_generic_name(normalize_arabic("سفيان"), 26876) is True
+
+    def test_full_ism_nasab_is_the_unaffected_specific_form(self) -> None:
+        # The genuinely-unaffected case is a full ism+nasab (≥3 significant tokens), which
+        # stays screened OUT. (A 2-token ism+nisba like سفيان الثوري still screens IN by
+        # design — see TestRecallFirstCandidacy — so "distinguishing nisba ⇒ False" is only
+        # true once the name is a full ism+nasab.)
+        assert is_generic_name(normalize_arabic("سفيان بن سعيد الثوري"), 26876) is False

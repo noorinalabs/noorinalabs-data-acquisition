@@ -131,6 +131,41 @@ class TestLoadNarrators:
         assert isinstance(batch, list)
         assert batch[0]["attestation"] == "unknown"
 
+    def test_narrator_carries_over_merged_flag(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """da#445: a flagged canonical row SETs over_merged + note on the Narrator node."""
+        write_narrators_canonical(
+            curated_dir,
+            [
+                {
+                    "canonical_id": "nar:over-merged",
+                    "name_en": "Over Merged",
+                    "over_merged": True,
+                    "over_merge_note": "bare generic; betweenness inflated",
+                },
+            ],
+        )
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        query, batch = next((q, b) for q, b in mock_client.calls if "MERGE (n:Narrator" in q)
+        assert "n.over_merged" in query
+        assert "n.over_merge_note" in query
+        assert batch[0]["over_merged"] is True
+        assert batch[0]["over_merge_note"] == "bare generic; betweenness inflated"
+
+    def test_narrator_over_merged_defaults_false_when_absent(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """A legacy/unflagged canonical row loads as over_merged=False (property present)."""
+        write_narrators_canonical(
+            curated_dir,
+            [{"canonical_id": "nar:unflagged", "name_en": "Unflagged"}],
+        )
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        _, batch = next((q, b) for q, b in mock_client.calls if "MERGE (n:Narrator" in q)
+        assert batch[0]["over_merged"] is False
+        assert batch[0]["over_merge_note"] is None
+
     def test_invalid_canonical_id_skipped(
         self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
     ) -> None:

@@ -128,6 +128,8 @@ def write_narrators_canonical(curated: Path, rows: list[dict[str, Any]]) -> Path
             [r.get("source_corpora", []) for r in rows], type=pa.list_(pa.string())
         ),
         "sect_affiliation": pa.array([r.get("sect_affiliation") for r in rows], type=pa.string()),
+        "over_merged": pa.array([r.get("over_merged") for r in rows], type=pa.bool_()),
+        "over_merge_note": pa.array([r.get("over_merge_note") for r in rows], type=pa.string()),
     }
     table = pa.table(arrays, schema=NARRATORS_CANONICAL_SCHEMA)
     path = curated / "narrators_canonical.parquet"
