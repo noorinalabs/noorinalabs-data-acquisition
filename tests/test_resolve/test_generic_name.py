@@ -115,12 +115,18 @@ class TestOverMergeFlagCandidacy:
     """
 
     def test_bare_sufyan_screens_in_at_leaderboard_scale(self) -> None:
-        # The exact da#445 acceptance assertion — already true at HEAD.
+        # The exact da#445 acceptance assertion — already true at HEAD (bare ism).
         assert is_generic_name(normalize_arabic("سفيان"), 26876) is True
 
-    def test_full_ism_nasab_is_the_unaffected_specific_form(self) -> None:
-        # The genuinely-unaffected case is a full ism+nasab (≥3 significant tokens), which
-        # stays screened OUT. (A 2-token ism+nisba like سفيان الثوري still screens IN by
-        # design — see TestRecallFirstCandidacy — so "distinguishing nisba ⇒ False" is only
-        # true once the name is a full ism+nasab.)
-        assert is_generic_name(normalize_arabic("سفيان بن سعيد الثوري"), 26876) is False
+    def test_two_token_ism_nisba_screens_in_by_design(self) -> None:
+        # A 2-token ism+nisba (سفيان الثوري) is included BY DESIGN, NOT excluded: a naive
+        # "2nd token is ال-prefixed ⇒ nisba ⇒ safe" rule would wrongly protect عبد الله
+        # (الله is ال-prefixed too), so 2-token compounds are deliberately screened IN and
+        # the (non-)split is deferred to downstream evidence. Pinned so no future change
+        # mistakes "has a nisba" for "is specific".
+        assert is_generic_name(normalize_arabic("سفيان الثوري"), _MC) is True
+
+    def test_full_ism_nasab_is_the_specificity_cutoff(self) -> None:
+        # The real "stays False" control is a full ism+nasab with ≥3 significant tokens —
+        # NOT a 2-token nisba form. This is the only shape specific enough to screen out.
+        assert is_generic_name(normalize_arabic("محمد بن اسماعيل البخاري"), _MC) is False
