@@ -109,6 +109,20 @@ NARRATORS_CANONICAL_SCHEMA = pa.schema(
         pa.field("source_corpus", pa.string(), nullable=True),
         pa.field("source_corpora", pa.list_(pa.string()), nullable=True),
         pa.field("sect_affiliation", pa.string(), nullable=True),
+        # Over-merge flag (da#445 / #337/#346 flag-now). An honest-leaderboard
+        # annotation that this canonical node is a bare-generic name (bare ism/kunya)
+        # fusing many historically-distinct people, so its betweenness/centrality is
+        # inflated and it is NOT a single person. PURE annotation — no node is split or
+        # minted (algorithmic split proved infeasible on corpus-internal evidence; see
+        # the #337 flag-now spec / the external-evidence split da#443). Set by the
+        # ``over_merged_flag`` resolve stage from the curated ``over_merged_narrators.yaml``
+        # (a hand-verified, bidirectionally-gated list — no corpus-internal threshold
+        # separates chimeras from genuine hubs). Nullable so every prior canonical
+        # producer leaves it None; the graph loader defaults an unset value to False so
+        # the node property is always present. ``over_merge_note`` carries the confirming
+        # spike/rijāl evidence for a flagged node (None when unflagged).
+        pa.field("over_merged", pa.bool_(), nullable=True),
+        pa.field("over_merge_note", pa.string(), nullable=True),
     ]
 )
 

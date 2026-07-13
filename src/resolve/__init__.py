@@ -172,6 +172,7 @@ RESOLVE_STEP_ORDER = (
     "narrator_split",
     "reconcile",
     "tabaqa_dates",
+    "over_merged_flag",
     "muhaddithat_links",
     "dedup",
     "parallels",
@@ -472,6 +473,7 @@ def run_all(
         muhaddithat_links,
         narrator_split,
         ner,
+        over_merged_flag,
         parallels,
         tabaqa_dates,
     )
@@ -714,6 +716,38 @@ def run_all(
     else:
         outcomes["tabaqa_dates"] = StageSkipped("tabaqa_dates", "precomputed")
         logger.info("resolve_step_skipped_precomputed", step="tabaqa_dates")
+
+    # Step 3.67: Over-merged bare-generic flag (da#445 / #337 flag-now). The LAST writer
+    # of narrators_canonical.parquet: after every date stage has finalized the canonical
+    # table, set the ``over_merged`` boolean (+ note) on the curated bare-generic hubs
+    # (bare ʿAbd Allāh, Sufyān, …) so the honest leaderboard can disclose their inflated
+    # betweenness. PURE annotation — no node is split or minted; the flagged set is a
+    # hand-verified curated list under a bidirectional acceptance fixture (no
+    # corpus-internal threshold separates chimeras from genuine hubs). Goes through
+    # write_canonical like every canonical writer, so the da#428 completeness tally is
+    # re-minted; a no-op (None) when the seed matches no row.
+    if _do("over_merged_flag"):
+        try:
+            logger.info("resolve_step", step="over_merged_flag", status="running")
+            flagged = over_merged_flag.apply_over_merged_flags(output_dir)
+            flag_files = [flagged] if flagged is not None else []
+            outcomes["over_merged_flag"] = StageRan("over_merged_flag", flag_files)
+            logger.info(
+                "resolve_step",
+                step="over_merged_flag",
+                status="complete",
+                files=len(flag_files),
+            )
+        except Exception as exc:  # noqa: BLE001
+            outcomes["over_merged_flag"] = StageErrored(
+                "over_merged_flag", type(exc).__name__, traceback.format_exc()
+            )
+            logger.error(
+                "resolve_step_failed", step="over_merged_flag", traceback=traceback.format_exc()
+            )
+    else:
+        outcomes["over_merged_flag"] = StageSkipped("over_merged_flag", "precomputed")
+        logger.info("resolve_step_skipped_precomputed", step="over_merged_flag")
 
     # Step 3.7: Curated muhaddithat orphan mention-links (da#228 / ADR-004 item #3).
     # The 8 bio-only muhaddithat narrators promoted by bio_promote carry no chain

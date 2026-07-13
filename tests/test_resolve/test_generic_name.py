@@ -99,3 +99,34 @@ class TestDegenerateInput:
     @pytest.mark.parametrize("name", ["", "   ", "\t\n"])
     def test_empty_or_whitespace_is_false_without_crash(self, name: str) -> None:
         assert is_generic_name(name, _MC) is False
+
+
+class TestOverMergeFlagCandidacy:
+    """da#445 / #337 flag-now: pin that bare Sufyān screens IN (it already does).
+
+    The flag-now spec's aside (i) asked to ensure bare Sufyān is caught by the screen.
+    It ALREADY is: a bare single-token ism screens in via the existing thin/short-fragment
+    path, so ``is_generic_name`` needs no change (a redundant "bare-ism branch" would
+    alter no output). Pinned here against a regression, with the real caveat recorded: the
+    reason bare Sufyān is nonetheless skipped by ``narrator_split`` is a DIFFERENT screen,
+    ``is_registered_mononym`` (da#248 mononym registry) — not this function. And note this
+    screen is recall-first: it returns True for genuine hubs too (al-Zuhrī, Mālik), so it
+    never separates chimeras from hubs — the da#445 curated ``over_merged`` list does that.
+    """
+
+    def test_bare_sufyan_screens_in_at_leaderboard_scale(self) -> None:
+        # The exact da#445 acceptance assertion — already true at HEAD (bare ism).
+        assert is_generic_name(normalize_arabic("سفيان"), 26876) is True
+
+    def test_two_token_ism_nisba_screens_in_by_design(self) -> None:
+        # A 2-token ism+nisba (سفيان الثوري) is included BY DESIGN, NOT excluded: a naive
+        # "2nd token is ال-prefixed ⇒ nisba ⇒ safe" rule would wrongly protect عبد الله
+        # (الله is ال-prefixed too), so 2-token compounds are deliberately screened IN and
+        # the (non-)split is deferred to downstream evidence. Pinned so no future change
+        # mistakes "has a nisba" for "is specific".
+        assert is_generic_name(normalize_arabic("سفيان الثوري"), _MC) is True
+
+    def test_full_ism_nasab_is_the_specificity_cutoff(self) -> None:
+        # The real "stays False" control is a full ism+nasab with ≥3 significant tokens —
+        # NOT a 2-token nisba form. This is the only shape specific enough to screen out.
+        assert is_generic_name(normalize_arabic("محمد بن اسماعيل البخاري"), _MC) is False

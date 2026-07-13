@@ -74,6 +74,8 @@ class TestSampleData:
             "source_corpus": pa.array(["sunnah"], type=pa.string()),
             "source_corpora": pa.array([["sunnah", "thaqalayn"]], type=pa.list_(pa.string())),
             "sect_affiliation": pa.array(["neutral"], type=pa.string()),
+            "over_merged": pa.array([None], type=pa.bool_()),
+            "over_merge_note": pa.array([None], type=pa.string()),
         }
         table = pa.table(data, schema=NARRATORS_CANONICAL_SCHEMA)
         assert table.num_rows == 1

@@ -230,7 +230,9 @@ SET n.name_ar           = row.name_ar,
     n.attestation       = row.attestation,
     n.source_corpus     = row.source_corpus,
     n.source_corpora    = row.source_corpora,
-    n.sect_affiliation  = row.sect_affiliation
+    n.sect_affiliation  = row.sect_affiliation,
+    n.over_merged       = row.over_merged,
+    n.over_merge_note   = row.over_merge_note
 """
 
 
@@ -301,6 +303,14 @@ def _load_narrators(
                 "source_corpus": _val(row, "source_corpus", ""),
                 "source_corpora": _val(row, "source_corpora", []),
                 "sect_affiliation": _val(row, "sect_affiliation", "unknown"),
+                # Over-merge flag (da#445 / #337 flag-now). Defaults to False so the
+                # property is always present on the node (mirrors attestation/
+                # sect_affiliation) — an unset/legacy value reads as "not flagged", and
+                # the honest-leaderboard consumer (ig#1183) can filter
+                # `WHERE n.over_merged = true`. The note is left None when unflagged (a
+                # null SET simply carries no note property on those nodes).
+                "over_merged": _val(row, "over_merged", False),
+                "over_merge_note": _val(row, "over_merge_note"),
             }
         )
 
