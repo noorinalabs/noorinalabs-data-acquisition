@@ -79,7 +79,6 @@ over_merged:
     over_merge_note: >-
       Bare kunya borne by many traditionists (e.g. Abu Bakr b. Abi Shayba, Abu Bakr b.
       Ayyash) across generations; neighbour diffuseness 0.39; over-merged by
-      construction. COMPANION-ADJACENT NAME: the bare kunya is NOT the Companion Abu
-      Bakr al-Siddiq (who carries a nasab), so flagging the fused bare-kunya node does
-      not touch the Companion; routed to the Arabic/rijal reviewer for confirmation.
-      Annotation only, no split.
+      construction. Companion-adjacent: this bare kunya is a DISTINCT canonical node
+      from the Companion Abu Bakr al-Siddiq (who carries a nasab), so the flag does not
+      touch the Companion. Annotation only, no split.
