@@ -35,6 +35,7 @@ from src.parse.name_quality import (
 )
 from src.resolve._inputs import require_input
 from src.resolve._run_record import write_canonical
+from src.resolve.attestation import derive_attestation
 from src.resolve.schemas import NARRATORS_CANONICAL_SCHEMA
 from src.resolve.sect_affiliation import (
     derive_sect_affiliation,
@@ -406,6 +407,11 @@ def promote_bios_to_canonical(
         rec["source_corpora"] = corpora
         rec["source_corpus"] = primary_corpus(corpora)
         rec["sect_affiliation"] = derive_sect_affiliation(corpora)
+        # Attestation from the row's FINAL mention_count (da#370): re-derived for
+        # every row — new bio records (mention_count 0 -> biographical_only) AND
+        # existing rows merged in from disambiguate — so a value the prior producer
+        # wrote can never go stale here. See src.resolve.attestation.
+        rec["attestation"] = derive_attestation(rec.get("mention_count"))
 
     # Attach name-variant aliases onto the canonical records the bios produced.
     alias_stats = _merge_aliases(staging_dir, canonical_map, promoted_cids, sources=sources)

@@ -92,6 +92,7 @@ from src.resolve._checkpoint import (
     save_checkpoint,
 )
 from src.resolve._run_record import write_canonical
+from src.resolve.attestation import derive_attestation
 from src.resolve.schemas import NARRATOR_MENTIONS_RESOLVED_SCHEMA, NARRATORS_CANONICAL_SCHEMA
 from src.resolve.sect_affiliation import derive_sect_affiliation, normalize_corpus, primary_corpus
 from src.utils.logging import get_logger
@@ -1170,6 +1171,10 @@ def _merge_cluster(members: list[dict[str, Any]]) -> dict[str, Any]:
     merged["source_corpora"] = sorted(set(corpora))
     merged["source_corpus"] = primary_corpus(corpora)
     merged["sect_affiliation"] = derive_sect_affiliation(corpora)
+    # Re-derive attestation from the SUMMED mention_count (da#370): folding a
+    # bio-only survivor (mention_count 0) into an attested one lifts the total above
+    # 0, so a carried-over "biographical_only" would go stale. See src.resolve.attestation.
+    merged["attestation"] = derive_attestation(mention_count)
     return merged
 
 

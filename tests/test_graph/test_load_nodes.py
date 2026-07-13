@@ -97,6 +97,40 @@ class TestLoadNarrators:
         assert row["source_corpora"] == []
         assert row["sect_affiliation"] == "unknown"
 
+    def test_narrator_carries_attestation(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """da#370: the attestation tag is SET on the Narrator node from the canonical row."""
+        write_narrators_canonical(
+            curated_dir,
+            [
+                {
+                    "canonical_id": "nar:bio-only",
+                    "name_en": "Bio Only",
+                    "mention_count": 0,
+                    "attestation": "biographical_only",
+                },
+            ],
+        )
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        query, batch = next((q, b) for q, b in mock_client.calls if "MERGE (n:Narrator" in q)
+        assert "n.attestation" in query
+        assert isinstance(batch, list)
+        assert batch[0]["attestation"] == "biographical_only"
+
+    def test_narrator_attestation_defaults_to_unknown_when_absent(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """A legacy canonical row without the attestation column loads as 'unknown'."""
+        write_narrators_canonical(
+            curated_dir,
+            [{"canonical_id": "nar:legacy-attest", "name_en": "Legacy"}],
+        )
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        _, batch = next((q, b) for q, b in mock_client.calls if "MERGE (n:Narrator" in q)
+        assert isinstance(batch, list)
+        assert batch[0]["attestation"] == "unknown"
+
     def test_invalid_canonical_id_skipped(
         self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
     ) -> None:

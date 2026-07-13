@@ -93,6 +93,13 @@ NARRATORS_CANONICAL_SCHEMA = pa.schema(
         # makes that guard *permit* a merge. One of {corroborated, uncorroborated, NULL}.
         pa.field("death_year_provenance", pa.string(), nullable=True),
         pa.field("mention_count", pa.int32(), nullable=True),
+        # Attestation tag (da#370): "biographical_only" when mention_count == 0 (a
+        # bio-promoted record with no isnad transmission), else "isnad_attested".
+        # Derived from mention_count at each canonical-table build site via
+        # src.resolve.attestation.derive_attestation. Nullable so a legacy canonical
+        # file written before this column loads without it (loader defaults to
+        # "unknown"); every current producer populates it.
+        pa.field("attestation", pa.string(), nullable=True),
         # Sect/corpus provenance on the canonical narrator (da#103, epic #81).
         # ``source_corpus`` is the scalar primary corpus (mirrors the Hadith /
         # Collection node property); ``source_corpora`` is the full multi-source

@@ -132,6 +132,7 @@ from src.parse.base import safe_str, write_parquet
 from src.parse.identity import make_canonical_id, make_discriminated_canonical_id
 from src.resolve._inputs import require_input
 from src.resolve._run_record import write_canonical
+from src.resolve.attestation import derive_attestation
 from src.resolve.generic_name import is_generic_name
 from src.resolve.mononym_split import _MAX_GAP, _MIN_GAP, is_registered_mononym
 from src.resolve.schemas import NARRATOR_MENTIONS_RESOLVED_SCHEMA, NARRATORS_CANONICAL_SCHEMA
@@ -620,6 +621,11 @@ def _peeled_record(primary_rec: dict[str, Any], band: PeeledBand, name_norm: str
     rec["birth_date_precision"] = DatePrecision.UNKNOWN.value
     rec["generation"] = _generation_for_year(band.midpoint_ah).value
     rec["mention_count"] = band.mention_count
+    # da#370: a peeled band carries real isnad mentions, so re-derive rather than
+    # inherit — the fixed column tuple above deliberately omits attestation, so
+    # without this the band would load as the loader's "unknown" default despite
+    # being isnad-attested. Derive from the FINAL mention_count (the shared helper).
+    rec["attestation"] = derive_attestation(band.mention_count)
     return rec
 
 
@@ -724,6 +730,10 @@ def split_generic_narrators(output_dir: Path, *, staging_dir: Path | None = None
         primary_rec = record_by_id[plan.primary_id]
         primary_count = _as_int(primary_rec.get("mention_count")) or 0
         primary_rec["mention_count"] = max(0, primary_count - plan.peeled_mention_count)
+        # da#370: peeling mutates mention_count AFTER the last derivation site
+        # (fuzzy_cluster), so re-derive the attestation on the reduced count — a
+        # primary peeled down to 0 mentions is now biographical_only, not stale.
+        primary_rec["attestation"] = derive_attestation(primary_rec["mention_count"])
         for band in plan.peeled:
             new_rows.append(_peeled_record(primary_rec, band, plan.name_ar_normalized))
             audit_rows.append(

@@ -78,6 +78,8 @@ def test_promotes_bios_to_canonical_with_nar_ids(tmp_path: Path) -> None:
     assert rec["external_id"] == "320"
     assert rec["source_ids"] == ["itqan:320"]
     assert rec["mention_count"] == 0
+    # da#370: a bio-promoted record (no isnad mention) is tagged biographical_only.
+    assert rec["attestation"] == "biographical_only"
 
 
 def test_bio_promote_tags_sect_and_corpus(tmp_path: Path) -> None:

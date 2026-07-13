@@ -34,6 +34,7 @@ from typing import Any
 import pyarrow.parquet as pq
 import yaml
 
+from src.models.enums import Attestation
 from src.parse.composition import (
     canonical_matn_identity,
     is_canonical_hadith,
@@ -226,6 +227,7 @@ SET n.name_ar           = row.name_ar,
     n.external_id       = row.external_id,
     n.source_ids        = row.source_ids,
     n.mention_count     = row.mention_count,
+    n.attestation       = row.attestation,
     n.source_corpus     = row.source_corpus,
     n.source_corpora    = row.source_corpora,
     n.sect_affiliation  = row.sect_affiliation
@@ -287,6 +289,11 @@ def _load_narrators(
                 # ``MATCH (n:Narrator) WHERE any(s IN n.source_ids WHERE s STARTS WITH 'itqan:')``.
                 "source_ids": _val(row, "source_ids", []),
                 "mention_count": _val(row, "mention_count"),
+                # Attestation tag (da#370). Defaults to "unknown" for a legacy
+                # canonical file written before this column existed, so the property
+                # is always present on the node (mirrors source_corpus/sect_affiliation).
+                # Every current producer populates it as isnad_attested/biographical_only.
+                "attestation": _val(row, "attestation", Attestation.UNKNOWN.value),
                 # Sect/corpus provenance (da#103). ``source_corpus`` defaults to ""
                 # so the property is always present even for legacy canonical files
                 # written before these columns existed; ``sect_affiliation`` defaults
