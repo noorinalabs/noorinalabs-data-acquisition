@@ -291,6 +291,40 @@ def test_stage_peels_matched_class_leaves_control_and_partial(tmp_path: Path) ->
     assert len(audit) == 1 and audit[0]["new_id"] == target and audit[0]["mention_count"] == 3
 
 
+def test_stage_gappy_chain_still_matches_signature(tmp_path: Path) -> None:
+    """da#439 shared-helper: a golden chain with dropped interior positions still peels.
+
+    Chain: Prophet(pos0) -> [null pos1] -> ʿAbd Allāh(pos2) -> [null pos3] -> Nāfiʿ(pos4).
+    Under the pre-da#439 exact-``position ± 1`` neighbour read, the candidate at pos2 saw
+    only the (dropped) positions 1 and 3, found neither the Prophet nor Nāfiʿ, and the Ibn
+    ʿUmar signature did NOT fire — silently under-peeling a confident identity. With the
+    shared consecutive-resolved adjacency helper the teacher/student bridge the gaps and
+    the signature matches (GREEN)."""
+    out = tmp_path / "curated"
+    bare = make_canonical_id(_ABDALLAH)
+    canonical = [
+        _canonical_row(bare, _ABDALLAH, 1),
+        _canonical_row(make_canonical_id(_PROPHET), _PROPHET, 5),
+        _canonical_row(make_canonical_id(_NAFI), _NAFI, 5),
+    ]
+    mentions = [
+        _mention_row("g-t", "h1", 0, make_canonical_id(_PROPHET)),
+        _mention_row("g-x1", "h1", 1, None),  # unresolved → dropped from chains
+        _mention_row("g-c", "h1", 2, bare),
+        _mention_row("g-x3", "h1", 3, None),  # unresolved → dropped
+        _mention_row("g-s", "h1", 4, make_canonical_id(_NAFI)),
+    ]
+    _write(out, canonical, mentions)
+
+    assert apply_contextual_disambiguation(out, seed_path=_seed(tmp_path)) is not None
+    m = {
+        r["mention_id"]: r
+        for r in pq.read_table(out / "narrator_mentions_resolved.parquet").to_pylist()
+    }
+    target = make_discriminated_canonical_id(_ABDALLAH, "ctx:ibn-umar")
+    assert m["g-c"]["canonical_narrator_id"] == target  # peeled across both gaps
+
+
 def test_stage_idempotent(tmp_path: Path) -> None:
     out = tmp_path / "curated"
     bare = make_canonical_id(_ABDALLAH)

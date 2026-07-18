@@ -51,10 +51,12 @@ Algorithm (per curated signature ``S`` on bare name ``N``)
 ----------------------------------------------------------
 1. Resolve ``N`` to its canonical id ``C = make_canonical_id(N)`` and gather every
    mention with ``canonical_narrator_id == C``.
-2. For each such mention, read its ±1 chain neighbours **within the same
-   ``(hadith_id, chain_index)`` chain** (:func:`src.resolve.narrator_split._build_chain_index`,
-   da#411 — never a cross-chain neighbour) and map them to their normalized names: the
-   set of teacher names (position −1) and student names (position +1).
+2. For each such mention, read its **consecutive-resolved** teacher/student neighbours
+   within the same ``(hadith_id, chain_index)`` chain — the SHARED adjacency helper
+   :func:`src.resolve.narrator_split.resolved_chain_neighbours` (da#439), identical to
+   the loader's ``TRANSMITTED_TO`` adjacency and the date-band splitter's, so a gappy
+   isnad cannot silently erase a discriminating pair (da#411 — never a cross-chain
+   neighbour) — and map them to their normalized names.
 3. A signature *matches* a mention iff every neighbour role it constrains is satisfied —
    its ``teacher_ar`` (if given) is among the mention's teacher names AND its
    ``student_ar`` (if given) among the student names. A mention matched by exactly one
@@ -100,7 +102,11 @@ import yaml
 from src.parse.identity import make_canonical_id, make_discriminated_canonical_id
 from src.resolve._run_record import write_canonical
 from src.resolve.attestation import derive_attestation
-from src.resolve.narrator_split import _build_chain_index, _remap_split_mentions
+from src.resolve.narrator_split import (
+    _build_chain_index,
+    _remap_split_mentions,
+    resolved_chain_neighbours,
+)
 from src.resolve.schemas import NARRATORS_CANONICAL_SCHEMA
 from src.utils.arabic import normalize_arabic
 from src.utils.logging import get_logger
@@ -280,26 +286,28 @@ def _neighbour_names_by_mention(
     chains: dict[tuple[str, int], list[tuple[int, str]]],
     name_by_id: dict[str, str],
 ) -> dict[str, tuple[frozenset[str], frozenset[str]]]:
-    """``mention_id -> (teacher_names, student_names)`` from ±1 in-chain neighbours.
+    """``mention_id -> (teacher_names, student_names)`` from the consecutive-resolved neighbours.
 
-    A neighbour is only ever the ±1 position **within the same ``(hadith_id, chain_index)``
-    chain** (da#411), mirroring the graph loaders' composite chain key. Names are the
-    normalized ``name_ar_normalized`` of the neighbour canonical ids.
+    Uses the **shared** isnad-adjacency helper
+    (:func:`src.resolve.narrator_split.resolved_chain_neighbours`, da#439) so this stage's
+    notion of teacher/student is byte-identical to the date-band splitter's and to the
+    loader's ``TRANSMITTED_TO`` adjacency — the immediately-preceding / -following
+    **resolved** mention in the position-sorted ``(hadith_id, chain_index)`` chain (a
+    dropped-position gap bridged as the loader bridges it; self-loop dropped, not bridged
+    past; never a cross-isnad neighbour, da#411). Reading exact ``position ± 1`` here (the
+    pre-da#439 form) would have silently erased a golden-chain teacher/student pair on any
+    gappy isnad — under-peeling a confident identity. Names are the neighbour ids'
+    ``name_ar_normalized``; each role is a singleton or empty set.
     """
     out: dict[str, tuple[frozenset[str], frozenset[str]]] = {}
     for hadith_id, chain_index, position, mention_id in mentions:
-        teachers: set[str] = set()
-        students: set[str] = set()
-        for npos, nid in chains.get((hadith_id, chain_index), ()):
-            if npos == position - 1:
-                name = name_by_id.get(nid)
-                if name:
-                    teachers.add(name)
-            elif npos == position + 1:
-                name = name_by_id.get(nid)
-                if name:
-                    students.add(name)
-        out[mention_id] = (frozenset(teachers), frozenset(students))
+        teacher_id, student_id = resolved_chain_neighbours(chains, hadith_id, chain_index, position)
+        teacher_name = name_by_id.get(teacher_id) if teacher_id else None
+        student_name = name_by_id.get(student_id) if student_id else None
+        out[mention_id] = (
+            frozenset({teacher_name} if teacher_name else ()),
+            frozenset({student_name} if student_name else ()),
+        )
     return out
 
 
