@@ -118,6 +118,12 @@ class UnifyGroup:
     member_ids: tuple[str, ...] = ()
     kunya_norm: str | None = None
     ism_norm: str | None = None
+    # isnad_neighbor_overlap evidence: the bare ism and its qualified form, and the
+    # required chain-neighbour overlap (|top-K(bare) ∩ top-K(qualified)| / K).
+    bare_norm: str | None = None
+    qualified_norm: str | None = None
+    min_overlap: float = 0.5
+    top_k: int = 50
 
 
 def load_unify_seed(path: Path = _SEED_PATH) -> tuple[UnifyGroup, ...]:
@@ -151,6 +157,13 @@ def load_unify_seed(path: Path = _SEED_PATH) -> tuple[UnifyGroup, ...]:
                 f"unify group {row.get('primary_label')!r} evidence bio_kunya_ism_bridge "
                 "requires kunya_norm and ism_norm"
             )
+        bare = row.get("bare_norm")
+        qualified = row.get("qualified_norm")
+        if evidence == "isnad_neighbor_overlap" and not (bare and qualified):
+            raise ValueError(
+                f"unify group {row.get('primary_label')!r} evidence isnad_neighbor_overlap "
+                "requires bare_norm and qualified_norm"
+            )
         groups.append(
             UnifyGroup(
                 primary_label=row.get("primary_label") or (members[0] if members else "?"),
@@ -161,6 +174,10 @@ def load_unify_seed(path: Path = _SEED_PATH) -> tuple[UnifyGroup, ...]:
                 member_ids=member_ids,
                 kunya_norm=normalize_arabic(kunya) if kunya else None,
                 ism_norm=normalize_arabic(ism) if ism else None,
+                bare_norm=normalize_arabic(bare) if bare else None,
+                qualified_norm=normalize_arabic(qualified) if qualified else None,
+                min_overlap=float(row.get("min_overlap", 0.5)),
+                top_k=int(row.get("top_k", 50)),
             )
         )
     return tuple(groups)
@@ -236,13 +253,69 @@ def _gender_conflict(members: list[dict[str, Any]]) -> bool:
     return False
 
 
-def _evidence_corroborated(group: UnifyGroup, members: list[dict[str, Any]]) -> bool:
+def _chain_neighbor_overlap(mentions_path: Path, id_a: str, id_b: str, *, top_k: int) -> float:
+    """Overlap coefficient of the two canonical ids' top-``top_k`` chain neighbours.
+
+    Builds each id's multiset of isnad chain neighbours and returns the overlap
+    coefficient ``|top(id_a) ∩ top(id_b)| / min(|top(id_a)|, |top(id_b)|)`` over each id's
+    top-``top_k`` neighbours. This is the da#347 instrument that SEPARATES the classes: a
+    bare ism that is genuinely the same person as its qualified form transmits from/to the
+    same teachers and students, so their neighbourhoods overlap heavily (Anas: 0.68); a
+    distinct namesake's does not. The overlap coefficient (denominator = the SMALLER
+    neighbour set) is used rather than ``/top_k`` so the measure is not diluted when one
+    node has fewer than ``top_k`` distinct neighbours — on the real Anas nodes both sets are
+    full at 50 so the two agree.
+
+    Adjacency is the SHARED :func:`~src.resolve.narrator_split.resolved_chain_neighbours`
+    definition (da#346/da#439) — the immediately-preceding/-following RESOLVED mention in
+    the position-sorted ``(hadith_id, chain_index)`` chain, gap-bridging and self-loop
+    dropping — NOT an exact position ±1 test. This is the loader's ``TRANSMITTED_TO``
+    topology, so the gate measures the same neighbourhood the graph actually builds and
+    cannot drift from it (and does not under-count on gappy isnads). Bounded memory:
+    :func:`~src.resolve.narrator_split._build_chain_index` restricts the resident chains to
+    only those touching one of the two ids. Returns 0.0 when the file is absent or either
+    id has no neighbours (fail closed).
+    """
+    from collections import Counter
+
+    from src.resolve.narrator_split import _build_chain_index, resolved_chain_neighbours
+
+    if not mentions_path.exists():
+        return 0.0
+    chains, candidate_mentions = _build_chain_index(mentions_path, {id_a, id_b})
+
+    def _neighbours(cid: str) -> Counter[str]:
+        counts: Counter[str] = Counter()
+        for hid, cidx, pos, _mid in candidate_mentions.get(cid, []):
+            teacher, student = resolved_chain_neighbours(chains, hid, cidx, pos)
+            for neighbour in (teacher, student):
+                if neighbour is not None and neighbour != cid:
+                    counts[neighbour] += 1
+        return counts
+
+    na, nb = _neighbours(id_a), _neighbours(id_b)
+    top_a = {n for n, _ in na.most_common(top_k)}
+    top_b = {n for n, _ in nb.most_common(top_k)}
+    if not top_a or not top_b:
+        return 0.0
+    return len(top_a & top_b) / min(len(top_a), len(top_b))
+
+
+def _evidence_corroborated(
+    group: UnifyGroup, members: list[dict[str, Any]], mentions_path: Path
+) -> bool:
     """Confirm the group's declared evidence is attested in the resolved members.
 
     ``bio_kunya_ism_bridge``: a resolved member's normalized name must contain BOTH the
     declared kunya and the declared ism — the in-corpus full-name node that spells out the
-    kunya↔ism identity, so the bridge is attested, not asserted. Unknown evidence kinds are
-    treated as NOT corroborated (fail closed).
+    kunya↔ism identity, so the bridge is attested, not asserted.
+
+    ``isnad_neighbor_overlap``: the bare-ism member and the qualified member must both be
+    present and share at least ``min_overlap`` of their top-``top_k`` chain neighbours —
+    the isnad-neighbourhood instrument that separates a genuine same-person split (Anas b.
+    Mālik) from a distinct namesake.
+
+    Unknown evidence kinds are treated as NOT corroborated (fail closed).
     """
     if group.evidence == "bio_kunya_ism_bridge":
         kunya, ism = group.kunya_norm, group.ism_norm
@@ -253,11 +326,40 @@ def _evidence_corroborated(group: UnifyGroup, members: list[dict[str, Any]]) -> 
             and ism in (m.get("name_ar_normalized") or "")
             for m in members
         )
+    if group.evidence == "isnad_neighbor_overlap":
+        bare_n, qual_n = group.bare_norm, group.qualified_norm
+        if not (bare_n and qual_n):
+            return False
+        bare = next(
+            (m for m in members if normalize_arabic(m.get("name_ar_normalized") or "") == bare_n),
+            None,
+        )
+        qual = next(
+            (m for m in members if normalize_arabic(m.get("name_ar_normalized") or "") == qual_n),
+            None,
+        )
+        if bare is None or qual is None:
+            return False
+        overlap = _chain_neighbor_overlap(
+            mentions_path, bare["canonical_id"], qual["canonical_id"], top_k=group.top_k
+        )
+        if overlap < group.min_overlap:
+            logger.info(
+                "narrator_unify_isnad_overlap",
+                group=group.primary_label,
+                overlap=round(overlap, 3),
+                min_overlap=group.min_overlap,
+                top_k=group.top_k,
+            )
+        return overlap >= group.min_overlap
     return False
 
 
 def _group_admissible(
-    group: UnifyGroup, members: list[dict[str, Any]], over_merged: frozenset[str]
+    group: UnifyGroup,
+    members: list[dict[str, Any]],
+    over_merged: frozenset[str],
+    mentions_path: Path,
 ) -> tuple[bool, str]:
     """Gate a resolved group. Returns (ok, reason) — reason is empty when admissible."""
     distinct = {m.get("canonical_id") for m in members}
@@ -286,7 +388,7 @@ def _group_admissible(
     if _gender_conflict(members):
         return False, "explicit gender conflict between members"
 
-    if not _evidence_corroborated(group, members):
+    if not _evidence_corroborated(group, members, mentions_path):
         return False, f"declared evidence {group.evidence!r} not corroborated in-corpus"
 
     return True, ""
@@ -340,6 +442,7 @@ def apply_narrator_unification(output_dir: Path, *, seed_path: Path = _SEED_PATH
     if not records:
         return None
 
+    mentions_path = output_dir / "narrator_mentions_resolved.parquet"
     over_merged = _over_merged_norms()
     by_id = {r["canonical_id"]: r for r in records if r.get("canonical_id")}
     by_norm: dict[str, list[dict[str, Any]]] = {}
@@ -353,7 +456,7 @@ def apply_narrator_unification(output_dir: Path, *, seed_path: Path = _SEED_PATH
 
     for group in groups:
         members = _resolve_members(group, by_norm, by_id)
-        ok, reason = _group_admissible(group, members, over_merged)
+        ok, reason = _group_admissible(group, members, over_merged, mentions_path)
         if not ok:
             logger.warning(
                 "narrator_unify_group_refused",

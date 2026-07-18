@@ -65,3 +65,36 @@ unify:
       - "ابو واءل شقيق بن سلمه الاسدي"     # bridging full name, mc 3
       - "شقيق بن سلمه بن واءل الاسدي"      # ism+nasab+nisba, mc 1
       - "شقيق ابو واءل بن سلمه الاسدي"     # bio-promoted rijāl node, mc 0, d.81
+
+  # da#347 — Anas b. Mālik, the Companion, split between his fully-qualified node
+  # `أنس بن مالك` (mc 17,820, d.91) and the bare ism `أنس` (mc 16,951, d.60 — the generic
+  # sahabi death-year default, not a real dating). They share ONE significant token, below
+  # fuzzy_cluster's _MIN_SHARED_TOKENS=2, so they never merge and his true centrality is
+  # roughly halved. Evidence is isnad-neighbourhood: the two nodes share 34/50 of their top
+  # chain neighbours (measured on bd133e6), both led by Anas's canonical students — Qatāda,
+  # Thābit al-Bunānī, Ḥumayd al-Ṭawīl, al-Zuhrī, Isḥāq b. Abī Ṭalḥa — so the bare node is
+  # overwhelmingly the same person. Bare `أنس` is NOT a curated over-merged generic (unlike
+  # `عبد الله`/`محمد`); the isnad-overlap gate is what separates it from a distinct namesake.
+  #
+  # NOT included here (deliberate, per da#347 secondary + da#443): `ابن عبس` is a
+  # dropped-alif OCR corruption of `ابن عباس`, NOT a diacritic fold — it must NOT be merged
+  # into Ibn ʿAbbās on a string subset; its low isnad overlap with the Ibn ʿAbbās hub would
+  # fail this gate anyway, and a real fix needs external evidence, not corpus-internal
+  # string surgery. `قتادة`/`قَتَادَةَ` already normalize to one node in #928 — no action.
+  - primary_label: "Anas b. Mālik, the Companion (bare ism ↔ qualified, d. ~91-93 AH)"
+    issue: "da#347"
+    evidence: isnad_neighbor_overlap
+    bare_norm: "انس"
+    qualified_norm: "انس بن مالك"
+    min_overlap: 0.5
+    top_k: 50
+    note: >-
+      Bare-ism↔qualified under-merge. `أنس` (bare, mc 16,951, d.60 generic default) and
+      `أنس بن مالك` (mc 17,820, d.91) are one Companion split across two nodes because they
+      share only one significant token (< _MIN_SHARED_TOKENS). Corroborated by isnad
+      neighbourhood: 34/50 shared top chain-neighbours on bd133e6, both dominated by Anas's
+      canonical students (Qatāda, Thābit al-Bunānī, Ḥumayd al-Ṭawīl, al-Zuhrī). Merge folds
+      the bare node into the qualified survivor, restoring his true centrality. da#347.
+    members:
+      - "انس"            # bare ism, mc 16,951
+      - "انس بن مالك"    # qualified ism+nasab, mc 17,820, d.91 (survivor)
