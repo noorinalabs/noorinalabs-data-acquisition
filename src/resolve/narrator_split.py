@@ -168,6 +168,7 @@ __all__ = [
     "PeeledBand",
     "SplitPlan",
     "plan_split",
+    "resolved_chain_neighbours",
     "split_generic_narrators",
 ]
 
@@ -568,6 +569,50 @@ def _build_chain_index(
     return chains, candidate_mentions
 
 
+def resolved_chain_neighbours(
+    chains: dict[tuple[str, int], list[tuple[int, str]]],
+    hadith_id: str,
+    chain_index: int,
+    position: int,
+) -> tuple[str | None, str | None]:
+    """The ``(teacher_id, student_id)`` of a mention's consecutive-resolved chain neighbours.
+
+    The **one** isnad-adjacency definition shared by every stage that reasons about a
+    mention's teacher/student — the date-band splitter (:func:`_collect_datable`), the
+    contextual disambiguator (``contextual_disambiguation``, da#346), and any future
+    isnad-neighbour gate — so they cannot drift the way the splitter and the loader did
+    (da#439). It IS the loader's ``TRANSMITTED_TO`` adjacency
+    (:func:`src.graph.load_edges._build_chain_pairs`):
+
+    * teacher = the **immediately-preceding resolved** mention (lower position),
+      student = the **immediately-following resolved** mention (higher position), in the
+      position-sorted ``(hadith_id, chain_index)`` chain (``chains`` is pre-sorted by
+      :func:`_build_chain_index`) — NOT an exact ``position ± 1`` test, so a gap opened by
+      a dropped unresolved position is bridged exactly as the loader bridges it (da#439);
+    * a neighbour resolving to the mention's OWN canonical id is a self-loop — no
+      ``TRANSMITTED_TO`` edge, so it is dropped and, as in the loader, NOT bridged past
+      to the next resolved mention (that role becomes ``None``);
+    * confined to the same ``(hadith_id, chain_index)`` chain — never a cross-isnad
+      neighbour of a multi-isnad hadith (da#411).
+
+    Returns ``(None, None)`` when the mention's slot is absent from ``chains`` (a pruned
+    chain — never fabricates an adjacency). Pure; no IO.
+    """
+    chain = chains.get((hadith_id, chain_index), ())
+    idx = next((i for i, (p, _c) in enumerate(chain) if p == position), None)
+    if idx is None:
+        return None, None
+    own_id = chain[idx][1]
+
+    def _neighbour(nidx: int) -> str | None:
+        if nidx < 0 or nidx >= len(chain):
+            return None
+        nid = chain[nidx][1]
+        return None if nid == own_id else nid  # self-loop → no edge, not bridged past
+
+    return _neighbour(idx - 1), _neighbour(idx + 1)
+
+
 def _collect_datable(
     mentions: list[tuple[str, int, int, str]],
     chains: dict[tuple[str, int], list[tuple[int, str]]],
@@ -597,27 +642,17 @@ def _collect_datable(
     """
     datable: list[DatableMention] = []
     for hadith_id, chain_index, position, mention_id in mentions:
-        chain = chains.get((hadith_id, chain_index), ())
-        # Locate this mention's slot in the position-sorted resolved chain
-        # (pre-sorted in _build_chain_index). Absent only if the chain was pruned —
-        # defensively skip rather than fabricate an adjacency.
-        idx = next((i for i, (p, _c) in enumerate(chain) if p == position), None)
-        if idx is None:
-            continue
-        own_id = chain[idx][1]
-        estimates: list[int] = []
-        anchors: list[str] = []
         # Teacher = the immediately-preceding resolved mention (lower position, dies
         # earlier → C dies later, sign +1); student = the immediately-following
-        # (higher position, dies later → C dies earlier, sign −1). Consecutive in the
-        # resolved list, so a position gap from a dropped unresolved mention is
-        # bridged exactly as the loader bridges it.
-        for nidx, sign in ((idx - 1, 1), (idx + 1, -1)):
-            if nidx < 0 or nidx >= len(chain):
+        # (higher position, dies later → C dies earlier, sign −1). The shared
+        # consecutive-resolved adjacency helper (da#439) bridges a dropped-position gap
+        # exactly as the loader does and drops self-loops without bridging past them.
+        teacher_id, student_id = resolved_chain_neighbours(chains, hadith_id, chain_index, position)
+        estimates: list[int] = []
+        anchors: list[str] = []
+        for nid, sign in ((teacher_id, 1), (student_id, -1)):
+            if nid is None:
                 continue
-            nid = chain[nidx][1]
-            if nid == own_id:
-                continue  # self-loop: no edge in the graph, no adjacency here
             year = attested_by_id.get(nid)
             if year is None:
                 continue
