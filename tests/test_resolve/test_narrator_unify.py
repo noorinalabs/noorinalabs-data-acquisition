@@ -233,6 +233,120 @@ class TestMustNotMerge:
         assert self._run(tmp_path, rows, [_KUNYA, _ISM]) is None
 
 
+# --- da#347: bare-ism ↔ qualified via isnad-neighbour overlap -------------------------
+
+_BARE_ANAS = "انس"
+_QUAL_ANAS = "انس بن مالك"
+
+
+def _write_chain_mentions(output_dir: Path, chains: list[list[str]]) -> None:
+    """Write resolved mentions as isnad sequences (one chain = one ordered id list)."""
+    rows: list[tuple[str, int, int, str]] = []  # (hadith_id, chain_index, position, cid)
+    for ci, chain in enumerate(chains):
+        for pos, cid in enumerate(chain):
+            rows.append((f"hdt:x:{ci}", 0, pos, cid))
+    n = len(rows)
+    tbl = pa.table(
+        {
+            "mention_id": [f"m{i}" for i in range(n)],
+            "hadith_id": [r[0] for r in rows],
+            "source_corpus": ["itqan"] * n,
+            "position_in_chain": [r[2] for r in rows],
+            "chain_index": [r[1] for r in rows],
+            "name_raw": [None] * n,
+            "name_normalized": [None] * n,
+            "canonical_narrator_id": [r[3] for r in rows],
+            "transmission_method": [None] * n,
+            "confidence": [None] * n,
+        },
+        schema=NARRATOR_MENTIONS_RESOLVED_SCHEMA,
+    )
+    pq.write_table(tbl, output_dir / "narrator_mentions_resolved.parquet")
+
+
+def _anas_rows() -> list[dict[str, Any]]:
+    return [
+        _canon("nar:bare_anas", _BARE_ANAS, mc=16951, death=60),  # bare ism, generic d.60
+        _canon("nar:qual_anas", _QUAL_ANAS, mc=17820, death=91, gender="male"),  # survivor
+    ]
+
+
+def _anas_seed(tmp_path: Path, *, min_overlap: float = 0.5, top_k: int = 50) -> Path:
+    lines = [
+        "unify:",
+        '  - primary_label: "Anas b. Mālik (test)"',
+        '    issue: "da#347"',
+        "    evidence: isnad_neighbor_overlap",
+        f'    bare_norm: "{_BARE_ANAS}"',
+        f'    qualified_norm: "{_QUAL_ANAS}"',
+        f"    min_overlap: {min_overlap}",
+        f"    top_k: {top_k}",
+        '    note: "synthetic isnad-overlap group"',
+        "    members:",
+        f'      - "{_BARE_ANAS}"',
+        f'      - "{_QUAL_ANAS}"',
+    ]
+    path = tmp_path / "anas_seed.yaml"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+class TestIsnadOverlapMerge:
+    def test_shared_neighbours_merge(self, tmp_path: Path) -> None:
+        # Both nodes transmit with the same six teachers/students (Anas's canonical
+        # students) -> overlap 1.0 >= 0.5 -> merge into the qualified survivor.
+        teachers = [f"nar:t{i}" for i in range(6)]
+        chains = [[t, "nar:bare_anas"] for t in teachers] + [[t, "nar:qual_anas"] for t in teachers]
+        _write_canonical(tmp_path, _anas_rows())
+        _write_chain_mentions(tmp_path, chains)
+        assert nu.apply_narrator_unification(tmp_path, seed_path=_anas_seed(tmp_path)) is not None
+        rows = pq.read_table(tmp_path / "narrators_canonical.parquet").to_pylist()
+        assert len(rows) == 1
+        survivor = rows[0]
+        assert survivor["mention_count"] == 16951 + 17820
+        # survivor is the QUALIFIED node (higher mention_count) and keeps its dating.
+        assert survivor["name_ar_normalized"] == _QUAL_ANAS
+        assert survivor["death_year_ah"] == 91
+        # every bare mention now points at the survivor; no absorbed bare id remains
+        # (teacher/neighbour nodes are untouched).
+        mids = set(
+            pq.read_table(tmp_path / "narrator_mentions_resolved.parquet")
+            .column("canonical_narrator_id")
+            .to_pylist()
+        )
+        assert "nar:bare_anas" not in mids
+        assert survivor["canonical_id"] in mids
+
+    def test_disjoint_neighbours_refuse_distinct_namesake(self, tmp_path: Path) -> None:
+        # A namesake: the bare node and the qualified node transmit with entirely
+        # different circles -> overlap 0.0 < 0.5 -> refused (the da#423 exclude direction).
+        chains = [[f"nar:a{i}", "nar:bare_anas"] for i in range(6)] + [
+            [f"nar:b{i}", "nar:qual_anas"] for i in range(6)
+        ]
+        _write_canonical(tmp_path, _anas_rows())
+        _write_chain_mentions(tmp_path, chains)
+        assert nu.apply_narrator_unification(tmp_path, seed_path=_anas_seed(tmp_path)) is None
+        assert len(pq.read_table(tmp_path / "narrators_canonical.parquet").to_pylist()) == 2
+
+    def test_no_mentions_file_fails_closed(self, tmp_path: Path) -> None:
+        # No mentions -> no neighbours -> overlap 0.0 -> refused (never merge without the
+        # instrument).
+        _write_canonical(tmp_path, _anas_rows())
+        assert nu.apply_narrator_unification(tmp_path, seed_path=_anas_seed(tmp_path)) is None
+
+    def test_overlap_below_threshold_refuses(self, tmp_path: Path) -> None:
+        # Partial overlap (2 of 6 shared) = 0.33 < 0.5 -> refused.
+        shared = [f"nar:s{i}" for i in range(2)]
+        bare_only = [f"nar:a{i}" for i in range(4)]
+        qual_only = [f"nar:q{i}" for i in range(4)]
+        chains = [[t, "nar:bare_anas"] for t in shared + bare_only] + [
+            [t, "nar:qual_anas"] for t in shared + qual_only
+        ]
+        _write_canonical(tmp_path, _anas_rows())
+        _write_chain_mentions(tmp_path, chains)
+        assert nu.apply_narrator_unification(tmp_path, seed_path=_anas_seed(tmp_path)) is None
+
+
 # --- Seed parsing --------------------------------------------------------------------
 
 
