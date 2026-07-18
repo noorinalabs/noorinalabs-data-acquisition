@@ -23,7 +23,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from src.models.enums import DatePrecision
+from src.models.enums import DatePrecision, NarratorGeneration
 from src.parse.identity import make_canonical_id, make_discriminated_canonical_id
 from src.resolve import MissingInputError
 from src.resolve.generic_name import is_generic_name
@@ -35,6 +35,7 @@ from src.resolve.narrator_split import (
     DatableMention,
     _band_midpoint,
     _cut_bands,
+    _generation_for_year,
     plan_split,
     split_generic_narrators,
 )
@@ -127,8 +128,11 @@ def test_removed_gate3_separation_is_dead_code() -> None:
     #     they do their adjacent midpoints are always > SPLIT_BAND_GAP apart (never <=50);
     #   * the only two outcomes are a single-band abstain (Gate 1) or a clean split —
     #     a separation-based abstain never occurs.
+    # Both bands are held inside the ṭabaqa window (120..400) so the da#452 Gate 0
+    # coherence prune never fires here — an out-of-window separation is Gate 0's domain,
+    # covered by test_gate0_out_of_window_band_abstains_no_phantom_twin, not this sweep.
     n = SPLIT_MIN_SUPPORT + 5
-    for sep in range(0, 301):
+    for sep in range(0, 281):
         datable = _dm(120, n, "early") + _dm(120 + sep, n, "late")
         qual = [b for b in _cut_bands(datable) if len(b) >= SPLIT_MIN_SUPPORT]
         plan = plan_split(_ABU_ABDALLAH, datable)
@@ -139,6 +143,39 @@ def test_removed_gate3_separation_is_dead_code() -> None:
             assert plan.is_split  # two well-supported separated bands always peel
         else:
             assert not plan.is_split  # collapsed to one band → Gate 1 abstain
+
+
+def test_gate0_out_of_window_band_abstains_no_phantom_twin() -> None:
+    # da#452 — instrument separation (out-of-window side): a big in-window band (d.150)
+    # plus a well-supported band whose midpoint is impossibly late (d.600, outside every
+    # ṭabaqa window → NarratorGeneration.UNKNOWN). WITHOUT Gate 0 this splits and mints a
+    # phantom twin dated 600 AH with gen=unknown (the da#452 defect). WITH Gate 0 the
+    # incoherent band is dropped, leaving one qualifying band → Gate 1 abstains → the node
+    # stays whole and NO phantom twin is minted (its mentions stay on the primary).
+    assert _generation_for_year(600) is NarratorGeneration.UNKNOWN  # the fixture is real
+    datable = _dm(150, 30, "early") + _dm(600, 15, "late")
+    plan = plan_split(_ABU_ABDALLAH, datable)
+    assert not plan.is_split
+    # And no peeled band could ever carry an UNKNOWN-generation midpoint.
+    assert all(
+        _generation_for_year(b.midpoint_ah) is not NarratorGeneration.UNKNOWN for b in plan.peeled
+    )
+
+
+def test_gate0_in_window_later_band_still_peels() -> None:
+    # da#452 — instrument separation (in-window side): the gate must NOT false-abstain a
+    # genuine late-but-plausible narrator. A big band (d.150) + an in-window LATER band
+    # (d.340 ∈ the 280–400 window) → still splits, peeling the d.340 band onto its own
+    # node with a REAL generation (never unknown). Pairs with the out-of-window test above
+    # to prove the gate separates the coherent from the incoherent late band.
+    assert _generation_for_year(340) is NarratorGeneration.LATER
+    datable = _dm(150, 30, "early") + _dm(340, 15, "late")
+    plan = plan_split(_ABU_ABDALLAH, datable)
+    assert plan.is_split
+    assert len(plan.peeled) == 1
+    band = plan.peeled[0]
+    assert band.midpoint_ah == 340
+    assert _generation_for_year(band.midpoint_ah) is NarratorGeneration.LATER
 
 
 def test_same_band_label_collision_tiebreak_by_anchor() -> None:
