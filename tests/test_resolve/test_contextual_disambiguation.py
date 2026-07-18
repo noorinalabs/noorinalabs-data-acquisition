@@ -324,6 +324,19 @@ def test_stage_gappy_chain_still_matches_signature(tmp_path: Path) -> None:
     target = make_discriminated_canonical_id(_ABDALLAH, "ctx:ibn-umar")
     assert m["g-c"]["canonical_narrator_id"] == target  # peeled across both gaps
 
+    # Oyunbileg's point: the old exact-±1 walk under-counted the NAMED blast-radius
+    # measurement, not just the peel. The gappy mention must now be counted as having a
+    # resolvable teacher AND student AND a signature match in contextual_coverage.parquet.
+    cov = {
+        r["primary_id"]: r for r in pq.read_table(out / "contextual_coverage.parquet").to_pylist()
+    }
+    bare_cov = cov[bare]
+    assert bare_cov["total_mentions"] == 1
+    assert bare_cov["with_any_neighbour"] == 1
+    assert bare_cov["with_teacher"] == 1
+    assert bare_cov["with_student"] == 1
+    assert bare_cov["signature_matched"] == 1
+
 
 def test_stage_idempotent(tmp_path: Path) -> None:
     out = tmp_path / "curated"
