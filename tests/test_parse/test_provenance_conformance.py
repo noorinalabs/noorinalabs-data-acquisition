@@ -69,6 +69,10 @@ _NON_PARSER_MODULES = frozenset(
         # da#247: narrator name-quality cleaning/validation used BY the NER stage —
         # a pure string filter, emits no schema/parquet of its own.
         "name_quality",
+        # da#366: two-convention isnad/matn splitter used BY the sanadset parser to
+        # recover a matn-embedded isnad — a pure text function, emits no
+        # schema/parquet of its own.
+        "isnad_matn_split",
     }
 )
 
