@@ -611,3 +611,103 @@ def test_multi_isnad_no_cross_chain_neighbour(tmp_path: Path) -> None:
     # …with no cross-chain leak in either direction (the load-bearing assertion).
     assert not (set(by_mention["m-c-0"].anchor_names) & chain1_anchors)
     assert not (set(by_mention["m-c-1"].anchor_names) & chain0_anchors)
+
+
+def test_gappy_chain_datable_across_dropped_position(tmp_path: Path) -> None:
+    """da#439: a position gap (from a dropped unresolved mention) must NOT hide a neighbour.
+
+    Chain positions 0..4, but positions 1 and 3 are **unresolved** (null
+    ``canonical_narrator_id``) and so are dropped from ``chains`` in
+    ``_build_chain_index``. The candidate sits at position 2; its only resolved
+    neighbours are the teacher at position 0 and the student at position 4 — each two
+    positions away.
+
+    The loader (``load_edges._build_chain_pairs``) pairs *consecutive resolved*
+    mentions, so it emits ``teacher -> candidate`` and ``candidate -> student`` across
+    those gaps. The old exact-``position ± 1`` window looked only at positions 1 and 3
+    (both dropped), found nothing, and left the candidate **undatable** — a systematic
+    under-count relative to the loaded graph (RED). Reading the immediate resolved
+    neighbours in the position-sorted chain recovers both adjacencies (GREEN).
+    """
+    from src.resolve.narrator_split import _build_chain_index, _collect_datable
+
+    cand = make_canonical_id(_ABU_ABDALLAH)
+    teacher = _anchor_row("nar:teacher", 100)  # pos 0 → dies earlier → sign +1
+    student = _anchor_row("nar:student", 180)  # pos 4 → dies later → sign −1
+    canonical = [_canonical_row(cand, _ABU_ABDALLAH, 1), teacher, student]
+    mentions = [
+        _mention_row("m-teacher", "h1", 0, "nar:teacher", chain_index=0),
+        _mention_row("m-gap1", "h1", 1, None, chain_index=0),  # unresolved → dropped
+        _mention_row("m-cand", "h1", 2, cand, chain_index=0),
+        _mention_row("m-gap3", "h1", 3, None, chain_index=0),  # unresolved → dropped
+        _mention_row("m-student", "h1", 4, "nar:student", chain_index=0),
+    ]
+    out = tmp_path / "curated"
+    _write(out, canonical, mentions)
+
+    attested_by_id = {r["canonical_id"]: r["death_year_ah"] for r in (teacher, student)}
+    name_by_id = {r["canonical_id"]: r["name_ar_normalized"] for r in canonical}
+
+    chains, candidate_mentions = _build_chain_index(
+        out / "narrator_mentions_resolved.parquet", {cand}
+    )
+    datable = _collect_datable(candidate_mentions[cand], chains, attested_by_id, name_by_id)
+
+    # The candidate is datable ACROSS the gaps — the exact-±1 window would have left
+    # `datable` empty (the divergence da#439 fixes).
+    assert len(datable) == 1
+    dm = datable[0]
+    assert set(dm.anchor_names) == {
+        name_by_id["nar:teacher"],
+        name_by_id["nar:student"],
+    }
+    # Estimate folds both neighbours with the loader-consistent sign convention:
+    # teacher (earlier position) + MID_GAP, student (later position) − MID_GAP.
+    assert dm.estimate == round(((100 + MID_GAP) + (180 - MID_GAP)) / 2)
+
+
+def test_split_adjacency_matches_loader_transmitted_to(tmp_path: Path) -> None:
+    """da#439: the split's neighbour set == the loader's TRANSMITTED_TO edges (same chain).
+
+    The reconciliation this issue asks for is *agreement* between two definitions of
+    "adjacent". This test runs BOTH on the same gappy fixture and asserts the candidate's
+    splitter neighbours are exactly the narrators the loader connects it to — the
+    cross-function invariant, not just a splitter-internal fixture.
+    """
+    from src.graph.load_edges import _build_chain_pairs
+    from src.resolve.narrator_split import _build_chain_index, _collect_datable
+
+    cand = make_canonical_id(_ABU_ABDALLAH)
+    teacher = _anchor_row("nar:teacher", 100)
+    student = _anchor_row("nar:student", 180)
+    canonical = [_canonical_row(cand, _ABU_ABDALLAH, 1), teacher, student]
+    # Same single (hadith_id, chain_index) chain with two interior gaps.
+    mention_rows = [
+        _mention_row("m-teacher", "hdt:bukhari:1", 0, "nar:teacher", chain_index=0),
+        _mention_row("m-gap1", "hdt:bukhari:1", 1, None, chain_index=0),
+        _mention_row("m-cand", "hdt:bukhari:1", 2, cand, chain_index=0),
+        _mention_row("m-gap3", "hdt:bukhari:1", 3, None, chain_index=0),
+        _mention_row("m-student", "hdt:bukhari:1", 4, "nar:student", chain_index=0),
+    ]
+    out = tmp_path / "curated"
+    _write(out, canonical, mention_rows)
+
+    # Loader side: TRANSMITTED_TO edges incident to the candidate → the other endpoints.
+    loader_pairs = _build_chain_pairs(mention_rows)
+    loader_neighbours = {p["to_id"] for p in loader_pairs if p["from_id"] == cand} | {
+        p["from_id"] for p in loader_pairs if p["to_id"] == cand
+    }
+    assert loader_neighbours == {"nar:teacher", "nar:student"}
+
+    # Splitter side: the anchors it derived for the candidate, mapped back to ids.
+    attested_by_id = {r["canonical_id"]: r["death_year_ah"] for r in (teacher, student)}
+    name_by_id = {r["canonical_id"]: r["name_ar_normalized"] for r in canonical}
+    id_by_name = {v: k for k, v in name_by_id.items()}
+    chains, candidate_mentions = _build_chain_index(
+        out / "narrator_mentions_resolved.parquet", {cand}
+    )
+    datable = _collect_datable(candidate_mentions[cand], chains, attested_by_id, name_by_id)
+    split_neighbours = {id_by_name[n] for d in datable for n in d.anchor_names}
+
+    # The two notions of adjacency AGREE (the da#439 invariant).
+    assert split_neighbours == loader_neighbours

@@ -31,15 +31,22 @@ not by the name shape.
 Algorithm (per eligible canonical id ``C``, name ``N``)
 -------------------------------------------------------
 1. Gather every mention with ``canonical_narrator_id == C``.
-2. **Isnad-adjacency evidence** — for each such mention, look at the chain neighbours
-   at ``position_in_chain`` ±1 in the same ``(hadith_id, chain_index)`` chain (da#411 —
-   the composite key the graph loaders use; NOT ``hadith_id`` alone, which would
-   fabricate cross-chain neighbours in a multi-isnad hadith) and map them to their
-   *attested* ``death_year_ah`` (precision ≠ ``tabaqa_estimate`` — an *estimated*
-   window is never used as evidence, which also keeps the pass cascade-free on
-   re-run). A teacher (neighbour at position−1) dies a transmission gap *earlier*;
-   a student (position+1) a gap *later* — so ``C``'s per-mention death estimate is
-   ``neighbour_death ± MID_GAP`` (``MID_GAP`` the midpoint of
+2. **Isnad-adjacency evidence** — for each such mention, look at its immediately
+   preceding / following **resolved** chain neighbours in the same
+   ``(hadith_id, chain_index)`` chain (da#411 — the composite key the graph loaders
+   use; NOT ``hadith_id`` alone, which would fabricate cross-chain neighbours in a
+   multi-isnad hadith) and map them to their *attested* ``death_year_ah``
+   (precision ≠ ``tabaqa_estimate`` — an *estimated* window is never used as
+   evidence, which also keeps the pass cascade-free on re-run). "Adjacent" is the
+   **consecutive-resolved** notion the loader pairs into ``TRANSMITTED_TO`` edges
+   (:func:`src.graph.load_edges._build_chain_pairs`, da#439), NOT an exact
+   ``position ± 1`` test: an intermediate position left unresolved (null
+   ``canonical_narrator_id``) opens a position gap that the loader bridges and that
+   an exact-±1 window would silently skip — erasing the adjacency of any narrator
+   seen only in gappy chains (the drop-gate erasure class, main#928 / da#423). A
+   teacher (the earlier-position neighbour) dies a transmission gap *earlier*; a
+   student (the later-position neighbour) a gap *later* — so ``C``'s per-mention
+   death estimate is ``neighbour_death ± MID_GAP`` (``MID_GAP`` the midpoint of
    :data:`~src.resolve.mononym_split._MIN_GAP`/``_MAX_GAP``), averaged over the
    mention's attested neighbours. A mention with no attested neighbour is *undatable*.
 3. **Cluster** the per-mention estimates 1-D, gap-based: sort and cut wherever a
@@ -548,6 +555,13 @@ def _build_chain_index(
             key = (hid, _coalesce_chain_index(cidx))
             if key in candidate_chain_keys:
                 chains.setdefault(key, []).append((int(pos), cid))
+    # Position-sort each chain once so :func:`_collect_datable` can read a mention's
+    # immediately-preceding / -following resolved neighbour by list index — the SAME
+    # position-sorted, consecutive-resolved adjacency the loader pairs into
+    # TRANSMITTED_TO edges (load_edges._build_chain_pairs, da#439). Tie-break on the
+    # canonical id so two resolved mentions sharing a position order deterministically.
+    for chain in chains.values():
+        chain.sort(key=lambda pc: (pc[0], pc[1]))
     return chains, candidate_mentions
 
 
@@ -559,21 +573,48 @@ def _collect_datable(
 ) -> list[DatableMention]:
     """Per-mention death estimates from attested chain neighbours (undatable dropped).
 
-    A neighbour is only ever the mention's ±1 position **within the same
-    ``(hadith_id, chain_index)`` chain** — never another isnad of the same hadith
-    (da#411) — mirroring the graph loaders' composite chain key.
+    A neighbour is the mention's immediately-preceding / -following **resolved**
+    mention in its position-sorted ``(hadith_id, chain_index)`` chain — never another
+    isnad of the same hadith (da#411). This is the **consecutive-resolved** adjacency
+    the graph loader pairs into ``TRANSMITTED_TO`` edges
+    (:func:`src.graph.load_edges._build_chain_pairs`), NOT an exact ``position ± 1``
+    test (da#439): when an intermediate position is unresolved (null
+    ``canonical_narrator_id``, dropped from ``chains`` in :func:`_build_chain_index`),
+    it opens a position gap. The loader still pairs across that gap (consecutive in the
+    resolved list), so an exact-±1 window here would diverge from the loaded graph —
+    systematically erasing the teacher/student adjacency of any narrator that appears
+    only in gappy chains (the drop-gate erasure class, main#928 / da#423). Reading the
+    immediate sorted-list neighbours instead keeps the split's evidence and the loaded
+    topology in agreement.
+
+    The loader's self-loop drop is mirrored too: a neighbour that resolves to the
+    mention's own canonical id forms no ``TRANSMITTED_TO`` edge (``from_id == to_id``),
+    so it contributes no adjacency here — and, as in the loader, is NOT bridged past to
+    the next resolved mention.
     """
     datable: list[DatableMention] = []
     for hadith_id, chain_index, position, mention_id in mentions:
+        chain = chains.get((hadith_id, chain_index), ())
+        # Locate this mention's slot in the position-sorted resolved chain
+        # (pre-sorted in _build_chain_index). Absent only if the chain was pruned —
+        # defensively skip rather than fabricate an adjacency.
+        idx = next((i for i, (p, _c) in enumerate(chain) if p == position), None)
+        if idx is None:
+            continue
+        own_id = chain[idx][1]
         estimates: list[int] = []
         anchors: list[str] = []
-        for npos, nid in chains.get((hadith_id, chain_index), ()):
-            if npos == position - 1:
-                sign = 1  # neighbour is the teacher (dies earlier) → C dies later
-            elif npos == position + 1:
-                sign = -1  # neighbour is the student (dies later) → C dies earlier
-            else:
+        # Teacher = the immediately-preceding resolved mention (lower position, dies
+        # earlier → C dies later, sign +1); student = the immediately-following
+        # (higher position, dies later → C dies earlier, sign −1). Consecutive in the
+        # resolved list, so a position gap from a dropped unresolved mention is
+        # bridged exactly as the loader bridges it.
+        for nidx, sign in ((idx - 1, 1), (idx + 1, -1)):
+            if nidx < 0 or nidx >= len(chain):
                 continue
+            nid = chain[nidx][1]
+            if nid == own_id:
+                continue  # self-loop: no edge in the graph, no adjacency here
             year = attested_by_id.get(nid)
             if year is None:
                 continue
