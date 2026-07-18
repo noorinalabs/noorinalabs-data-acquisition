@@ -6,7 +6,8 @@ the recall-first ``is_generic_name`` screen admits genuinely-single people
 evidence — ≥2 well-separated, well-supported bands — never on the screen alone. A
 single-band name abstains and its node is left whole. Coverage:
 
-* pure ``plan_split`` band logic (abstain vs peel, every gate);
+* pure ``plan_split`` band logic (abstain vs peel, both live gates — Gate 1 single-band
+  and Gate 2 too-many-bands; the old Gate 3 separation guard was dead code, removed da#444);
 * the ``سفيان الثوري`` case Ivana flagged — screens IN, death-band gate ABSTAINS;
 * end-to-end stage over parquet fixtures — peel-not-partition, undatable remainder
   stays, registered-mononym deferral, remap correctness, idempotence, and a
@@ -28,9 +29,12 @@ from src.resolve import MissingInputError
 from src.resolve.generic_name import is_generic_name
 from src.resolve.narrator_split import (
     MID_GAP,
+    SPLIT_BAND_GAP,
     SPLIT_MAX_CLUSTERS,
     SPLIT_MIN_SUPPORT,
     DatableMention,
+    _band_midpoint,
+    _cut_bands,
     plan_split,
     split_generic_narrators,
 )
@@ -111,6 +115,30 @@ def test_within_band_gap_estimates_stay_one_band() -> None:
     # ordinary within-person estimate scatter must not fragment a node.
     datable = _dm(200, 15) + _dm(240, 15, "b2")
     assert not plan_split(_ABU_ABDALLAH, datable).is_split
+
+
+def test_removed_gate3_separation_is_dead_code() -> None:
+    # da#444: the old Gate 3 (`SPLIT_MIN_SEPARATION = 50`, "adjacent qualifying midpoints
+    # too close ⇒ abstain") was structurally unreachable and is removed. `_cut_bands`
+    # starts a new band only on a consecutive gap > SPLIT_BAND_GAP (80 AH), so ANY two
+    # bands it emits are already > 80 AH apart — well beyond any <=50 contemporaries
+    # threshold. Sweep two well-supported bands across every separation 0..300 and assert:
+    #   * two bands ever form only when the requested separation > SPLIT_BAND_GAP, and when
+    #     they do their adjacent midpoints are always > SPLIT_BAND_GAP apart (never <=50);
+    #   * the only two outcomes are a single-band abstain (Gate 1) or a clean split —
+    #     a separation-based abstain never occurs.
+    n = SPLIT_MIN_SUPPORT + 5
+    for sep in range(0, 301):
+        datable = _dm(120, n, "early") + _dm(120 + sep, n, "late")
+        qual = [b for b in _cut_bands(datable) if len(b) >= SPLIT_MIN_SUPPORT]
+        plan = plan_split(_ABU_ABDALLAH, datable)
+        if len(qual) >= 2:
+            mids = sorted(_band_midpoint(b) for b in qual)
+            adj = min(b - a for a, b in zip(mids, mids[1:], strict=False))
+            assert adj > SPLIT_BAND_GAP  # never in the removed gate's <=50 range
+            assert plan.is_split  # two well-supported separated bands always peel
+        else:
+            assert not plan.is_split  # collapsed to one band → Gate 1 abstain
 
 
 def test_same_band_label_collision_tiebreak_by_anchor() -> None:

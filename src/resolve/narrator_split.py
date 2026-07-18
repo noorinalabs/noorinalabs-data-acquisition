@@ -47,8 +47,15 @@ Algorithm (per eligible canonical id ``C``, name ``N``)
 4. **ABSTAIN — leave ``C`` as ONE node — UNLESS ALL hold** (the over-split guard):
    * ≥2 clusters each with ≥ :data:`SPLIT_MIN_SUPPORT` mentions (*qualifying*);
    * ≤ :data:`SPLIT_MAX_CLUSTERS` qualifying clusters (more ⇒ the name is a generic
-     bucket we cannot cleanly resolve → abstain, logged for audit);
-   * adjacent qualifying-cluster midpoints separated by > :data:`SPLIT_MIN_SEPARATION`.
+     bucket we cannot cleanly resolve → abstain, logged for audit).
+
+   A separate "adjacent bands too close ⇒ abstain" separation guard is **not** needed:
+   :func:`_cut_bands` only ever starts a new band on a consecutive gap exceeding
+   :data:`SPLIT_BAND_GAP` (80 AH), so any two distinct bands — and therefore any two
+   qualifying bands — are already > 80 AH apart by construction, well beyond any
+   contemporaries-scatter threshold. (A ``SPLIT_MIN_SEPARATION = 50`` gate once sat here;
+   because ``SPLIT_BAND_GAP > 50`` it was structurally unreachable and was removed as
+   dead code — da#444.)
 5. **Peel-not-partition** — undatable mentions, and any mention in a below-support
    band, STAY on the primary node. Only confidently-dated distinct clusters peel off.
 6. **Id assignment** (deterministic — a pure function of the input, reproducible
@@ -147,7 +154,6 @@ logger = get_logger(__name__)
 __all__ = [
     "SPLIT_BAND_GAP",
     "SPLIT_MIN_SUPPORT",
-    "SPLIT_MIN_SEPARATION",
     "SPLIT_MAX_CLUSTERS",
     "MID_GAP",
     "NARRATOR_SPLITS_SCHEMA",
@@ -176,10 +182,6 @@ SPLIT_BAND_GAP = 80
 # Below it, a band is left on the primary (peel-not-partition) — a handful of
 # adjacency estimates is not enough to mint a distinct historical person.
 SPLIT_MIN_SUPPORT = 10
-
-# Two qualifying bands whose midpoints are closer than this are treated as one
-# referent's scatter, not two people — abstain. Secondary to SPLIT_BAND_GAP.
-SPLIT_MIN_SEPARATION = 50
 
 # More than this many *qualifying* bands means the name is a generic bucket we cannot
 # cleanly resolve into a few people — abstain and log for audit rather than shatter it.
@@ -341,11 +343,12 @@ def plan_split(name_ar_normalized: str, datable: list[DatableMention]) -> SplitP
             max_clusters=SPLIT_MAX_CLUSTERS,
         )
         return abstain
-    # Gate 3: adjacent qualifying midpoints must be well separated.
+    # Gate 1 (single band) + Gate 2 (too many) are the complete guard set. A third
+    # "adjacent midpoints too close ⇒ abstain" separation guard was removed as dead code
+    # (da#444): _cut_bands starts a new band only on a gap > SPLIT_BAND_GAP (80 AH), so
+    # any two qualifying bands are already > 80 AH apart — the removed SPLIT_MIN_SEPARATION
+    # (50) check could never fire.
     qsorted = sorted(qualifying, key=_band_midpoint)
-    mids = [_band_midpoint(b) for b in qsorted]
-    if any(b - a <= SPLIT_MIN_SEPARATION for a, b in zip(mids, mids[1:], strict=False)):
-        return abstain
 
     # The largest qualifying band (ties → lower midpoint) keeps the primary id; the
     # undatable/below-support remainder is already off the peel list by construction.
