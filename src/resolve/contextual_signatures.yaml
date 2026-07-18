@@ -1,0 +1,40 @@
+# Curated isnad-neighbour signature seed for contextual disambiguation (da#346).
+#
+# Each entry peels the mentions of an over-merged BARE name (`name_ar`) whose ±1 isnad
+# neighbours match a HAND-VERIFIED, uniquely-identifying transmitter/transmittee pair onto
+# a distinct discriminated canonical node. This is the corpus-internal lever the date-axis
+# `narrator_split` cannot use: a bare mention has no attested death-band to cut, but its
+# isnad POSITION (who it narrates from / to) can still identify the referent.
+#
+# This is NOT a threshold and NOT an inference — there is no corpus-internal statistic that
+# separates the referents of a bare name (the #337 §0 negative result; a statistical
+# auto-split re-commits the da#423 silent-zero error). It is a curated list under a
+# bidirectional acceptance fixture (tests/test_resolve/test_contextual_disambiguation.py):
+# every signature MUST fire on the genuine multi-referent mentions it names AND MUST NOT
+# fire on a genuine single narrator whose neighbours do not match it. A mention matched by
+# NO signature — or by MORE THAN ONE — is never peeled; it stays on the bare primary, which
+# `over_merged_flag` keeps flagged, and its true identity is left to the external-rijāl work
+# (da#443). The seed may be empty: then this stage is a pure no-op and the node stays flagged.
+#
+# Matching: `teacher_ar` is the neighbour at position-1 (the mention narrates FROM it),
+# `student_ar` the neighbour at position+1 (narrates TO it). At least one is required; a
+# mention matches iff EVERY specified role is present among its in-chain ±1 neighbours. The
+# more roles a signature constrains, the higher its confidence. Names are matched after
+# `normalize_arabic`. The target id = make_discriminated_canonical_id(name_ar, discriminator).
+#
+# Grow-later (owner, seed-now): only textbook, unambiguous, hand-verifiable pairs are seeded
+# here; the high-recall queue + rijāl confirmation grows the list under da#443.
+
+signatures:
+  - name_ar: "عبد الله"
+    teacher_ar: "رسول الله"
+    student_ar: "نافع"
+    name_en: "Abd Allah ibn Umar"
+    discriminator: "ctx:ibn-umar"
+    note: >-
+      Bare ʿAbd Allāh who narrates FROM the Prophet and TO his mawlā Nāfiʿ is ʿAbd Allāh
+      ibn ʿUmar b. al-Khaṭṭāb (d.73 AH). The Nāfiʿ ⟵ Ibn ʿUmar ⟵ the Prophet chain is one
+      of the most attested and textbook isnads in the corpus (the "golden chain" when
+      continued Mālik ⟵ Nāfiʿ), so this teacher+student pair is uniquely identifying and
+      hand-verified. Corpus-internal contextual peel (da#346); identity from isnad position,
+      no death year asserted. Residual bare ʿAbd Allāh stays over_merged-flagged.

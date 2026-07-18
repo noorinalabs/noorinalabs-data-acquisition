@@ -170,6 +170,7 @@ RESOLVE_STEP_ORDER = (
     "bio_promote",
     "cluster",
     "narrator_split",
+    "contextual_disambiguation",
     "reconcile",
     "tabaqa_dates",
     "over_merged_flag",
@@ -466,6 +467,7 @@ def run_all(
 
     from src.resolve import (
         bio_promote,
+        contextual_disambiguation,
         date_reconcile,
         dedup,
         disambiguate,
@@ -657,6 +659,47 @@ def run_all(
     else:
         outcomes["narrator_split"] = StageSkipped("narrator_split", "precomputed")
         logger.info("resolve_step_skipped_precomputed", step="narrator_split")
+
+    # Step 3.57: Contextual (isnad-neighbour) disambiguation (da#346). The date-axis
+    # narrator_split abstains on a BARE name (no attested death-band to cut), but the
+    # isnad POSITION still identifies a referent: a bare ʿAbd Allāh narrating ⟵Prophet
+    # ⟶Nāfiʿ is Ibn ʿUmar. For each curated, hand-verified neighbour-pair signature,
+    # peel the matching mentions onto a distinct discriminated node; leave every unknown
+    # or ambiguous mention on the bare primary (which over_merged_flag keeps flagged) and
+    # to da#443's external-rijāl split. Runs AFTER narrator_split (operates on the settled
+    # canonical set) and BEFORE reconcile/tabaqa_dates/over_merged_flag so the peeled ids
+    # + remapped mentions flow through the date stages and the residual flag counts the
+    # reduced primary. Empty seed ⇒ pure no-op. Idempotent (peeled ids no longer carry the
+    # bare name; the residual still matches no signature). Emits contextual_splits.parquet
+    # (audit) + contextual_coverage.parquet (the da#346 blast-radius report).
+    if _do("contextual_disambiguation"):
+        try:
+            logger.info("resolve_step", step="contextual_disambiguation", status="running")
+            ctx_path = contextual_disambiguation.apply_contextual_disambiguation(
+                output_dir, staging_dir=staging_dir
+            )
+            ctx_files = [ctx_path] if ctx_path is not None else []
+            outcomes["contextual_disambiguation"] = StageRan("contextual_disambiguation", ctx_files)
+            logger.info(
+                "resolve_step",
+                step="contextual_disambiguation",
+                status="complete",
+                files=len(ctx_files),
+            )
+        except Exception as exc:  # noqa: BLE001
+            outcomes["contextual_disambiguation"] = StageErrored(
+                "contextual_disambiguation", type(exc).__name__, traceback.format_exc()
+            )
+            logger.error(
+                "resolve_step_failed",
+                step="contextual_disambiguation",
+                traceback=traceback.format_exc(),
+            )
+    else:
+        outcomes["contextual_disambiguation"] = StageSkipped(
+            "contextual_disambiguation", "precomputed"
+        )
+        logger.info("resolve_step_skipped_precomputed", step="contextual_disambiguation")
 
     # Step 3.6: Multi-source date reconciliation (da#165). After bio_promote and
     # cluster have built the final canonical set, fold each narrator's per-source
