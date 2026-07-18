@@ -146,6 +146,57 @@ class TestSanadsetParser:
         # Row 1 has 2 narrators, row 2 has 3, row 3 (No SANAD) has 0 => 5 total
         assert table.num_rows == 5
 
+    def test_matn_embedded_isnad_recovered(self, tmp_path: Path) -> None:
+        """da#366: a "No SANAD" row whose matn carries an isnad is recovered.
+
+        Row 1 (embedded isnad) → ``isnad_raw_ar`` recovered, matn reduced to the
+        residual body, 3 mentions. Row 2 (pure matn) stays chainless — the
+        splitter fails closed, exactly as the NER fallback must never do.
+        """
+        raw_dir = tmp_path / "raw" / "sanadset"
+        raw_dir.mkdir(parents=True)
+        staging_dir = tmp_path / "staging"
+
+        header = "Hadith,Book,Num_hadith,grade"
+        embedded = (
+            "<SANAD>No SANAD</SANAD><MATN>حدثنا مالك عن نافع عن ابن عمر أن "
+            "رسول الله صلى الله عليه وسلم نهى عن بيع الغرر</MATN>"
+        )
+        pure_matn = "<SANAD>No SANAD</SANAD><MATN>بعض المتن بلا إسناد</MATN>"
+        lines = [
+            header,
+            f'"{embedded}",{_BOOK_BUKHARI},1,Sahih',
+            f'"{pure_matn}",{_BOOK_BUKHARI},2,Hasan',
+        ]
+        (raw_dir / "hadiths.csv").write_text("\n".join(lines), encoding="utf-8")
+
+        with patch("src.parse.sanadset.get_settings") as mock_settings:
+            mock_settings.return_value.data_raw_dir = tmp_path / "raw"
+            mock_settings.return_value.data_staging_dir = staging_dir
+            parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
+
+        hadiths = pq.read_table(staging_dir / "hadiths_sanadset.parquet").to_pylist()
+        by_num = {h["hadith_number"]: h for h in hadiths}
+
+        recovered = by_num[1]
+        assert recovered["isnad_raw_ar"] == "حدثنا مالك عن نافع عن ابن عمر"
+        # The isnad text is moved out of matn_ar into isnad_raw_ar; the residual
+        # matn remains, and full_text_ar is preserved verbatim.
+        assert recovered["matn_ar"].startswith("أن رسول الله")
+        assert "حدثنا مالك" not in (recovered["matn_ar"] or "")
+        assert "حدثنا مالك" in recovered["full_text_ar"]
+
+        # The pure-matn "No SANAD" row is not "recovered" into a fake chain.
+        assert by_num[2]["isnad_raw_ar"] is None
+
+        mentions = pq.read_table(staging_dir / "narrator_mentions_sanadset.parquet").to_pylist()
+        hid = recovered["source_id"]
+        recovered_mentions = [m for m in mentions if m["source_hadith_id"] == hid]
+        assert [m["position_in_chain"] for m in recovered_mentions] == [0, 1, 2]
+        assert all(m["chain_index"] == 0 for m in recovered_mentions)
+        # No recovered narrator carries matn (the Prophet-formula token ``رسول``).
+        assert all("رسول" not in (m["name_ar"] or "") for m in recovered_mentions)
+
     def test_position_in_chain_sequential(self, tmp_path: Path) -> None:
         raw_dir = tmp_path / "raw" / "sanadset"
         raw_dir.mkdir(parents=True)

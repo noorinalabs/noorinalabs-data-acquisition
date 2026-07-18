@@ -71,6 +71,7 @@ from src.parse.base import (
 )
 from src.parse.collection_metadata import apply_collection_metadata
 from src.parse.identity import ID_DELIMITER
+from src.parse.isnad_matn_split import SplitResult, split_isnad_matn
 from src.parse.narrator_extraction import (
     IsnadSegmentationError,
     extract_narrator_mentions,
@@ -444,6 +445,46 @@ def _mentions_from_names(
     return mentions
 
 
+def _mentions_from_recovered_isnad(
+    split: SplitResult,
+    source_hadith_id: str,
+) -> list[dict[str, str | int | None]]:
+    """Build narrator mentions from a matn-embedded isnad recovery (da#366).
+
+    ``split.spans`` were segmented from the isolated isnad head by the shared
+    fail-loud :func:`extract_narrator_mentions` (raw text, no ``<NAR>`` tags).
+    Pollution is filtered by the SAME :func:`_is_narrator_like` gate the other
+    two paths apply (relational pronouns, honorifics, bare particles), so
+    recovered mentions carry the same quality bar. ``position_in_chain`` is
+    numbered over the *accepted* mentions so it stays gap-free; the span's
+    normalized name and transmission method follow the ``lk`` raw-Arabic-isnad
+    convention (``src/parse/lk_corpus.py``).
+    """
+    mentions: list[dict[str, str | int | None]] = []
+    position = 0
+    for span in split.spans:
+        if not _is_narrator_like(span.name):
+            continue
+        mention_id = generate_source_id(_SOURCE_CORPUS, "mention", source_hadith_id, str(position))
+        mentions.append(
+            {
+                "mention_id": mention_id,
+                "source_hadith_id": source_hadith_id,
+                "source_corpus": _SOURCE_CORPUS,
+                "position_in_chain": position,
+                # One sanad per hadith row → chain 0 (da#282); matches the other
+                # two mention paths.
+                "chain_index": 0,
+                "name_ar": span.name,
+                "name_en": None,
+                "name_ar_normalized": normalize_arabic(span.name),
+                "transmission_method": span.transmission_method,
+            }
+        )
+        position += 1
+    return mentions
+
+
 def _book_key(name_ar: str) -> str:
     """Stable, content-derived collection key for a Sanadset book *name* (da#353).
 
@@ -618,11 +659,21 @@ def _collection_row(
 def _process_chunk(
     rows: list[dict[str, object]],
     collection_name: str,
-) -> tuple[list[dict[str, object]], list[dict[str, str | int | None]], int, int, int, int]:
+) -> tuple[
+    list[dict[str, object]],
+    list[dict[str, str | int | None]],
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+]:
     """Process a chunk of rows.
 
     Returns ``(hadiths, mentions, malformed_count, raw_nar_count,
-    recovered_sanad_count, column_mention_count)``. ``raw_nar_count`` is the number
+    recovered_sanad_count, column_mention_count, recovered_embedded_count,
+    embedded_mention_count)``. ``raw_nar_count`` is the number
     of raw ``<NAR>`` tags seen before B3 re-segmentation / filtering; comparing it
     to the *tag-derived* mention count quantifies how much coarse-tag pollution the
     B3 filter removed (da#221). ``recovered_sanad_count`` is the number of rows
@@ -630,6 +681,10 @@ def _process_chunk(
     ``<SANAD>`` markup was empty/orphaned (da#368); ``column_mention_count`` is the
     mentions those rows contributed (kept separate so the B3 firehose metric, which
     is about ``<NAR>`` tags only, is not skewed by the tag-free column path).
+    ``recovered_embedded_count`` is the number of "No SANAD" rows whose isnad was
+    recovered from the matn text by the da#366 two-convention splitter, and
+    ``embedded_mention_count`` the mentions they contributed — also tag-free, so
+    likewise excluded from the firehose metric.
 
     Source columns are resolved case-insensitively (da#353): the production
     Sanadset header is ``Hadith,Book,Num_hadith,Matn,Sanad,Sanad_Length``, and the
@@ -648,6 +703,8 @@ def _process_chunk(
     raw_nar_count = 0
     recovered_sanad_count = 0
     column_mention_count = 0
+    recovered_embedded_count = 0
+    embedded_mention_count = 0
     if not rows:
         return (
             hadiths,
@@ -656,6 +713,8 @@ def _process_chunk(
             raw_nar_count,
             recovered_sanad_count,
             column_mention_count,
+            recovered_embedded_count,
+            embedded_mention_count,
         )
 
     # Resolve the source columns ONCE per chunk (all rows share one header).
@@ -758,6 +817,7 @@ def _process_chunk(
         # usable ``Sanad`` value (the 159,558 "No SANAD" rows, #366) stays null.
         isnad_raw_ar: str | None = None
         column_names: list[str] | None = None
+        split_result: SplitResult | None = None
         if sanad_text and sanad_text.lower() != "no sanad":
             isnad_raw_ar = sanad_text
         else:
@@ -777,6 +837,20 @@ def _process_chunk(
                         "sanad_recovered_from_column_orphaned_markup",
                         source_id=source_id,
                     )
+            elif matn_text:
+                # No usable tag and no usable ``Sanad`` column — a "No SANAD" row
+                # (#366). ~122,000 of these carry an isnad embedded in the matn.
+                # Recover it with the two-convention splitter, which fails closed
+                # rather than mine the whole body (the da#369 NER fallback that
+                # mints matn sentences as narrators is deliberately NOT used). On
+                # recovery, ``isnad_raw_ar`` becomes the isolated head and
+                # ``matn_text`` the residual body, so the isnad text is not left
+                # duplicated in ``matn_ar``.
+                split_result = split_isnad_matn(matn_text)
+                if split_result is not None:
+                    isnad_raw_ar = split_result.isnad_ar
+                    matn_text = split_result.matn_ar or None
+                    recovered_embedded_count += 1
 
         hadiths.append(
             {
@@ -803,12 +877,17 @@ def _process_chunk(
         )
 
         # Extract narrator mentions. A column-recovered chain (da#368) is already
-        # segmented, so build mentions directly from the names; otherwise parse the
-        # ``<NAR>`` tags out of the tag-derived isnad.
+        # segmented, so build mentions directly from the names; a matn-embedded
+        # recovery (da#366) is raw text already segmented by the splitter; a
+        # tag-derived isnad still carries ``<NAR>`` tags to parse.
         if column_names is not None:
             row_mentions = _mentions_from_names(column_names, source_id)
             mentions.extend(row_mentions)
             column_mention_count += len(row_mentions)
+        elif split_result is not None:
+            row_mentions = _mentions_from_recovered_isnad(split_result, source_id)
+            mentions.extend(row_mentions)
+            embedded_mention_count += len(row_mentions)
         elif isnad_raw_ar:
             raw_nar_count += len(_NAR_RE.findall(isnad_raw_ar))
             try:
@@ -825,6 +904,8 @@ def _process_chunk(
         raw_nar_count,
         recovered_sanad_count,
         column_mention_count,
+        recovered_embedded_count,
+        embedded_mention_count,
     )
 
 
@@ -986,6 +1067,8 @@ def parse_sanadset(
     total_raw_nar = 0
     total_recovered_sanad = 0
     total_column_mentions = 0
+    total_recovered_embedded = 0
+    total_embedded_mentions = 0
     total_rows = 0
 
     for csv_file in csv_files:
@@ -1003,11 +1086,18 @@ def parse_sanadset(
 
         for chunk_start in range(0, len(rows), _CHUNK_SIZE):
             chunk = rows[chunk_start : chunk_start + _CHUNK_SIZE]
-            hadiths, mentions, malformed, raw_nar, recovered_sanad, column_mentions = (
-                _process_chunk(
-                    chunk,
-                    collection_name,
-                )
+            (
+                hadiths,
+                mentions,
+                malformed,
+                raw_nar,
+                recovered_sanad,
+                column_mentions,
+                recovered_embedded,
+                embedded_mentions,
+            ) = _process_chunk(
+                chunk,
+                collection_name,
             )
             all_hadiths.extend(hadiths)
             all_mentions.extend(mentions)
@@ -1015,6 +1105,8 @@ def parse_sanadset(
             total_raw_nar += raw_nar
             total_recovered_sanad += recovered_sanad
             total_column_mentions += column_mentions
+            total_recovered_embedded += recovered_embedded
+            total_embedded_mentions += embedded_mentions
 
             logger.info(
                 "chunk_processed",
@@ -1030,9 +1122,10 @@ def parse_sanadset(
     avg_narrators = len(all_mentions) / valid_sanad_count if valid_sanad_count > 0 else 0
     # B3 (da#221) observability: how much coarse-tag pollution the re-segmentation
     # filter removed. total_raw_nar counts raw <NAR> tags; the *tag-derived* mention
-    # count is the clean post-filter total. Column-recovered mentions (da#368) carry
-    # no <NAR> tags, so they are excluded here or the firehose drop would read low.
-    tag_mentions = len(all_mentions) - total_column_mentions
+    # count is the clean post-filter total. Column-recovered (da#368) and
+    # matn-embedded-recovered (da#366) mentions carry no <NAR> tags, so both are
+    # excluded here or the firehose drop would read low.
+    tag_mentions = len(all_mentions) - total_column_mentions - total_embedded_mentions
     filtered_nar = total_raw_nar - tag_mentions
     filtered_nar_pct = (filtered_nar / total_raw_nar * 100) if total_raw_nar else 0
 
@@ -1052,6 +1145,12 @@ def parse_sanadset(
         # contributed. Expected ~6,143 recovered on the full corpus.
         recovered_sanad_from_column=total_recovered_sanad,
         column_mentions=total_column_mentions,
+        # da#366: "No SANAD" rows whose isnad was recovered from the matn text by
+        # the two-convention splitter, and the mentions they contributed. Expected
+        # ~122,000 recovered on the full corpus (a lower bound — the splitter fails
+        # closed on ambiguous boundaries rather than pollute the narrator index).
+        recovered_isnad_from_matn=total_recovered_embedded,
+        embedded_mentions=total_embedded_mentions,
     )
 
     # Write hadith Parquet
