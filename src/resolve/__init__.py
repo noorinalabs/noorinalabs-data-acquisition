@@ -173,6 +173,7 @@ RESOLVE_STEP_ORDER = (
     "contextual_disambiguation",
     "reconcile",
     "tabaqa_dates",
+    "narrator_unify",
     "over_merged_flag",
     "muhaddithat_links",
     "dedup",
@@ -474,6 +475,7 @@ def run_all(
         fuzzy_cluster,
         muhaddithat_links,
         narrator_split,
+        narrator_unify,
         ner,
         over_merged_flag,
         parallels,
@@ -759,6 +761,39 @@ def run_all(
     else:
         outcomes["tabaqa_dates"] = StageSkipped("tabaqa_dates", "precomputed")
         logger.info("resolve_step_skipped_precomputed", step="tabaqa_dates")
+
+    # Step 3.66: Curated under-merge unification (da#431 / da#347) — the merge mirror of
+    # narrator_split. Where fuzzy_cluster's precision guard structurally cannot bridge two
+    # references to ONE person that share too few significant tokens (kunya↔ism, bare
+    # ism↔qualified), this stage merges a hand-verified, corroboration-gated curated set
+    # (narrator_unify.yaml) onto one survivor and remaps the absorbed mentions — reusing
+    # fuzzy_cluster's own _merge_cluster/_remap. Runs after tabaqa_dates so the survivor
+    # inherits final dates + mention_count, and BEFORE over_merged_flag so that stage stays
+    # the last writer of narrators_canonical.parquet. Every group is behind the da#423
+    # bidirectional acceptance fixture; a refused group is logged, never merged. A no-op
+    # (None) when the seed matches < 2 distinct nodes per group (already unified).
+    if _do("narrator_unify"):
+        try:
+            logger.info("resolve_step", step="narrator_unify", status="running")
+            unified = narrator_unify.apply_narrator_unification(output_dir)
+            unify_files = [unified] if unified is not None else []
+            outcomes["narrator_unify"] = StageRan("narrator_unify", unify_files)
+            logger.info(
+                "resolve_step",
+                step="narrator_unify",
+                status="complete",
+                files=len(unify_files),
+            )
+        except Exception as exc:  # noqa: BLE001
+            outcomes["narrator_unify"] = StageErrored(
+                "narrator_unify", type(exc).__name__, traceback.format_exc()
+            )
+            logger.error(
+                "resolve_step_failed", step="narrator_unify", traceback=traceback.format_exc()
+            )
+    else:
+        outcomes["narrator_unify"] = StageSkipped("narrator_unify", "precomputed")
+        logger.info("resolve_step_skipped_precomputed", step="narrator_unify")
 
     # Step 3.67: Over-merged bare-generic flag (da#445 / #337 flag-now). The LAST writer
     # of narrators_canonical.parquet: after every date stage has finalized the canonical
