@@ -170,8 +170,10 @@ RESOLVE_STEP_ORDER = (
     "bio_promote",
     "cluster",
     "narrator_split",
+    "contextual_disambiguation",
     "reconcile",
     "tabaqa_dates",
+    "narrator_unify",
     "over_merged_flag",
     "muhaddithat_links",
     "dedup",
@@ -466,12 +468,14 @@ def run_all(
 
     from src.resolve import (
         bio_promote,
+        contextual_disambiguation,
         date_reconcile,
         dedup,
         disambiguate,
         fuzzy_cluster,
         muhaddithat_links,
         narrator_split,
+        narrator_unify,
         ner,
         over_merged_flag,
         parallels,
@@ -658,6 +662,47 @@ def run_all(
         outcomes["narrator_split"] = StageSkipped("narrator_split", "precomputed")
         logger.info("resolve_step_skipped_precomputed", step="narrator_split")
 
+    # Step 3.57: Contextual (isnad-neighbour) disambiguation (da#346). The date-axis
+    # narrator_split abstains on a BARE name (no attested death-band to cut), but the
+    # isnad POSITION still identifies a referent: a bare ʿAbd Allāh narrating ⟵Prophet
+    # ⟶Nāfiʿ is Ibn ʿUmar. For each curated, hand-verified neighbour-pair signature,
+    # peel the matching mentions onto a distinct discriminated node; leave every unknown
+    # or ambiguous mention on the bare primary (which over_merged_flag keeps flagged) and
+    # to da#443's external-rijāl split. Runs AFTER narrator_split (operates on the settled
+    # canonical set) and BEFORE reconcile/tabaqa_dates/over_merged_flag so the peeled ids
+    # + remapped mentions flow through the date stages and the residual flag counts the
+    # reduced primary. Empty seed ⇒ pure no-op. Idempotent (peeled ids no longer carry the
+    # bare name; the residual still matches no signature). Emits contextual_splits.parquet
+    # (audit) + contextual_coverage.parquet (the da#346 blast-radius report).
+    if _do("contextual_disambiguation"):
+        try:
+            logger.info("resolve_step", step="contextual_disambiguation", status="running")
+            ctx_path = contextual_disambiguation.apply_contextual_disambiguation(
+                output_dir, staging_dir=staging_dir
+            )
+            ctx_files = [ctx_path] if ctx_path is not None else []
+            outcomes["contextual_disambiguation"] = StageRan("contextual_disambiguation", ctx_files)
+            logger.info(
+                "resolve_step",
+                step="contextual_disambiguation",
+                status="complete",
+                files=len(ctx_files),
+            )
+        except Exception as exc:  # noqa: BLE001
+            outcomes["contextual_disambiguation"] = StageErrored(
+                "contextual_disambiguation", type(exc).__name__, traceback.format_exc()
+            )
+            logger.error(
+                "resolve_step_failed",
+                step="contextual_disambiguation",
+                traceback=traceback.format_exc(),
+            )
+    else:
+        outcomes["contextual_disambiguation"] = StageSkipped(
+            "contextual_disambiguation", "precomputed"
+        )
+        logger.info("resolve_step_skipped_precomputed", step="contextual_disambiguation")
+
     # Step 3.6: Multi-source date reconciliation (da#165). After bio_promote and
     # cluster have built the final canonical set, fold each narrator's per-source
     # parsed life-dates (da#164) into one canonical birth/death envelope + a
@@ -716,6 +761,39 @@ def run_all(
     else:
         outcomes["tabaqa_dates"] = StageSkipped("tabaqa_dates", "precomputed")
         logger.info("resolve_step_skipped_precomputed", step="tabaqa_dates")
+
+    # Step 3.66: Curated under-merge unification (da#431 / da#347) — the merge mirror of
+    # narrator_split. Where fuzzy_cluster's precision guard structurally cannot bridge two
+    # references to ONE person that share too few significant tokens (kunya↔ism, bare
+    # ism↔qualified), this stage merges a hand-verified, corroboration-gated curated set
+    # (narrator_unify.yaml) onto one survivor and remaps the absorbed mentions — reusing
+    # fuzzy_cluster's own _merge_cluster/_remap. Runs after tabaqa_dates so the survivor
+    # inherits final dates + mention_count, and BEFORE over_merged_flag so that stage stays
+    # the last writer of narrators_canonical.parquet. Every group is behind the da#423
+    # bidirectional acceptance fixture; a refused group is logged, never merged. A no-op
+    # (None) when the seed matches < 2 distinct nodes per group (already unified).
+    if _do("narrator_unify"):
+        try:
+            logger.info("resolve_step", step="narrator_unify", status="running")
+            unified = narrator_unify.apply_narrator_unification(output_dir)
+            unify_files = [unified] if unified is not None else []
+            outcomes["narrator_unify"] = StageRan("narrator_unify", unify_files)
+            logger.info(
+                "resolve_step",
+                step="narrator_unify",
+                status="complete",
+                files=len(unify_files),
+            )
+        except Exception as exc:  # noqa: BLE001
+            outcomes["narrator_unify"] = StageErrored(
+                "narrator_unify", type(exc).__name__, traceback.format_exc()
+            )
+            logger.error(
+                "resolve_step_failed", step="narrator_unify", traceback=traceback.format_exc()
+            )
+    else:
+        outcomes["narrator_unify"] = StageSkipped("narrator_unify", "precomputed")
+        logger.info("resolve_step_skipped_precomputed", step="narrator_unify")
 
     # Step 3.67: Over-merged bare-generic flag (da#445 / #337 flag-now). The LAST writer
     # of narrators_canonical.parquet: after every date stage has finalized the canonical

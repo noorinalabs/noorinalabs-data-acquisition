@@ -6,7 +6,8 @@ the recall-first ``is_generic_name`` screen admits genuinely-single people
 evidence — ≥2 well-separated, well-supported bands — never on the screen alone. A
 single-band name abstains and its node is left whole. Coverage:
 
-* pure ``plan_split`` band logic (abstain vs peel, every gate);
+* pure ``plan_split`` band logic (abstain vs peel, both live gates — Gate 1 single-band
+  and Gate 2 too-many-bands; the old Gate 3 separation guard was dead code, removed da#444);
 * the ``سفيان الثوري`` case Ivana flagged — screens IN, death-band gate ABSTAINS;
 * end-to-end stage over parquet fixtures — peel-not-partition, undatable remainder
   stays, registered-mononym deferral, remap correctness, idempotence, and a
@@ -22,15 +23,19 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from src.models.enums import DatePrecision
+from src.models.enums import DatePrecision, NarratorGeneration
 from src.parse.identity import make_canonical_id, make_discriminated_canonical_id
 from src.resolve import MissingInputError
 from src.resolve.generic_name import is_generic_name
 from src.resolve.narrator_split import (
     MID_GAP,
+    SPLIT_BAND_GAP,
     SPLIT_MAX_CLUSTERS,
     SPLIT_MIN_SUPPORT,
     DatableMention,
+    _band_midpoint,
+    _cut_bands,
+    _generation_for_year,
     plan_split,
     split_generic_narrators,
 )
@@ -111,6 +116,66 @@ def test_within_band_gap_estimates_stay_one_band() -> None:
     # ordinary within-person estimate scatter must not fragment a node.
     datable = _dm(200, 15) + _dm(240, 15, "b2")
     assert not plan_split(_ABU_ABDALLAH, datable).is_split
+
+
+def test_removed_gate3_separation_is_dead_code() -> None:
+    # da#444: the old Gate 3 (`SPLIT_MIN_SEPARATION = 50`, "adjacent qualifying midpoints
+    # too close ⇒ abstain") was structurally unreachable and is removed. `_cut_bands`
+    # starts a new band only on a consecutive gap > SPLIT_BAND_GAP (80 AH), so ANY two
+    # bands it emits are already > 80 AH apart — well beyond any <=50 contemporaries
+    # threshold. Sweep two well-supported bands across every separation 0..300 and assert:
+    #   * two bands ever form only when the requested separation > SPLIT_BAND_GAP, and when
+    #     they do their adjacent midpoints are always > SPLIT_BAND_GAP apart (never <=50);
+    #   * the only two outcomes are a single-band abstain (Gate 1) or a clean split —
+    #     a separation-based abstain never occurs.
+    # Both bands are held inside the ṭabaqa window (120..400) so the da#452 Gate 0
+    # coherence prune never fires here — an out-of-window separation is Gate 0's domain,
+    # covered by test_gate0_out_of_window_band_abstains_no_phantom_twin, not this sweep.
+    n = SPLIT_MIN_SUPPORT + 5
+    for sep in range(0, 281):
+        datable = _dm(120, n, "early") + _dm(120 + sep, n, "late")
+        qual = [b for b in _cut_bands(datable) if len(b) >= SPLIT_MIN_SUPPORT]
+        plan = plan_split(_ABU_ABDALLAH, datable)
+        if len(qual) >= 2:
+            mids = sorted(_band_midpoint(b) for b in qual)
+            adj = min(b - a for a, b in zip(mids, mids[1:], strict=False))
+            assert adj > SPLIT_BAND_GAP  # never in the removed gate's <=50 range
+            assert plan.is_split  # two well-supported separated bands always peel
+        else:
+            assert not plan.is_split  # collapsed to one band → Gate 1 abstain
+
+
+def test_gate0_out_of_window_band_abstains_no_phantom_twin() -> None:
+    # da#452 — instrument separation (out-of-window side): a big in-window band (d.150)
+    # plus a well-supported band whose midpoint is impossibly late (d.600, outside every
+    # ṭabaqa window → NarratorGeneration.UNKNOWN). WITHOUT Gate 0 this splits and mints a
+    # phantom twin dated 600 AH with gen=unknown (the da#452 defect). WITH Gate 0 the
+    # incoherent band is dropped, leaving one qualifying band → Gate 1 abstains → the node
+    # stays whole and NO phantom twin is minted (its mentions stay on the primary).
+    assert _generation_for_year(600) is NarratorGeneration.UNKNOWN  # the fixture is real
+    datable = _dm(150, 30, "early") + _dm(600, 15, "late")
+    plan = plan_split(_ABU_ABDALLAH, datable)
+    assert not plan.is_split
+    # And no peeled band could ever carry an UNKNOWN-generation midpoint.
+    assert all(
+        _generation_for_year(b.midpoint_ah) is not NarratorGeneration.UNKNOWN for b in plan.peeled
+    )
+
+
+def test_gate0_in_window_later_band_still_peels() -> None:
+    # da#452 — instrument separation (in-window side): the gate must NOT false-abstain a
+    # genuine late-but-plausible narrator. A big band (d.150) + an in-window LATER band
+    # (d.340 ∈ the 280–400 window) → still splits, peeling the d.340 band onto its own
+    # node with a REAL generation (never unknown). Pairs with the out-of-window test above
+    # to prove the gate separates the coherent from the incoherent late band.
+    assert _generation_for_year(340) is NarratorGeneration.LATER
+    datable = _dm(150, 30, "early") + _dm(340, 15, "late")
+    plan = plan_split(_ABU_ABDALLAH, datable)
+    assert plan.is_split
+    assert len(plan.peeled) == 1
+    band = plan.peeled[0]
+    assert band.midpoint_ah == 340
+    assert _generation_for_year(band.midpoint_ah) is NarratorGeneration.LATER
 
 
 def test_same_band_label_collision_tiebreak_by_anchor() -> None:
@@ -611,3 +676,103 @@ def test_multi_isnad_no_cross_chain_neighbour(tmp_path: Path) -> None:
     # …with no cross-chain leak in either direction (the load-bearing assertion).
     assert not (set(by_mention["m-c-0"].anchor_names) & chain1_anchors)
     assert not (set(by_mention["m-c-1"].anchor_names) & chain0_anchors)
+
+
+def test_gappy_chain_datable_across_dropped_position(tmp_path: Path) -> None:
+    """da#439: a position gap (from a dropped unresolved mention) must NOT hide a neighbour.
+
+    Chain positions 0..4, but positions 1 and 3 are **unresolved** (null
+    ``canonical_narrator_id``) and so are dropped from ``chains`` in
+    ``_build_chain_index``. The candidate sits at position 2; its only resolved
+    neighbours are the teacher at position 0 and the student at position 4 — each two
+    positions away.
+
+    The loader (``load_edges._build_chain_pairs``) pairs *consecutive resolved*
+    mentions, so it emits ``teacher -> candidate`` and ``candidate -> student`` across
+    those gaps. The old exact-``position ± 1`` window looked only at positions 1 and 3
+    (both dropped), found nothing, and left the candidate **undatable** — a systematic
+    under-count relative to the loaded graph (RED). Reading the immediate resolved
+    neighbours in the position-sorted chain recovers both adjacencies (GREEN).
+    """
+    from src.resolve.narrator_split import _build_chain_index, _collect_datable
+
+    cand = make_canonical_id(_ABU_ABDALLAH)
+    teacher = _anchor_row("nar:teacher", 100)  # pos 0 → dies earlier → sign +1
+    student = _anchor_row("nar:student", 180)  # pos 4 → dies later → sign −1
+    canonical = [_canonical_row(cand, _ABU_ABDALLAH, 1), teacher, student]
+    mentions = [
+        _mention_row("m-teacher", "h1", 0, "nar:teacher", chain_index=0),
+        _mention_row("m-gap1", "h1", 1, None, chain_index=0),  # unresolved → dropped
+        _mention_row("m-cand", "h1", 2, cand, chain_index=0),
+        _mention_row("m-gap3", "h1", 3, None, chain_index=0),  # unresolved → dropped
+        _mention_row("m-student", "h1", 4, "nar:student", chain_index=0),
+    ]
+    out = tmp_path / "curated"
+    _write(out, canonical, mentions)
+
+    attested_by_id = {r["canonical_id"]: r["death_year_ah"] for r in (teacher, student)}
+    name_by_id = {r["canonical_id"]: r["name_ar_normalized"] for r in canonical}
+
+    chains, candidate_mentions = _build_chain_index(
+        out / "narrator_mentions_resolved.parquet", {cand}
+    )
+    datable = _collect_datable(candidate_mentions[cand], chains, attested_by_id, name_by_id)
+
+    # The candidate is datable ACROSS the gaps — the exact-±1 window would have left
+    # `datable` empty (the divergence da#439 fixes).
+    assert len(datable) == 1
+    dm = datable[0]
+    assert set(dm.anchor_names) == {
+        name_by_id["nar:teacher"],
+        name_by_id["nar:student"],
+    }
+    # Estimate folds both neighbours with the loader-consistent sign convention:
+    # teacher (earlier position) + MID_GAP, student (later position) − MID_GAP.
+    assert dm.estimate == round(((100 + MID_GAP) + (180 - MID_GAP)) / 2)
+
+
+def test_split_adjacency_matches_loader_transmitted_to(tmp_path: Path) -> None:
+    """da#439: the split's neighbour set == the loader's TRANSMITTED_TO edges (same chain).
+
+    The reconciliation this issue asks for is *agreement* between two definitions of
+    "adjacent". This test runs BOTH on the same gappy fixture and asserts the candidate's
+    splitter neighbours are exactly the narrators the loader connects it to — the
+    cross-function invariant, not just a splitter-internal fixture.
+    """
+    from src.graph.load_edges import _build_chain_pairs
+    from src.resolve.narrator_split import _build_chain_index, _collect_datable
+
+    cand = make_canonical_id(_ABU_ABDALLAH)
+    teacher = _anchor_row("nar:teacher", 100)
+    student = _anchor_row("nar:student", 180)
+    canonical = [_canonical_row(cand, _ABU_ABDALLAH, 1), teacher, student]
+    # Same single (hadith_id, chain_index) chain with two interior gaps.
+    mention_rows = [
+        _mention_row("m-teacher", "hdt:bukhari:1", 0, "nar:teacher", chain_index=0),
+        _mention_row("m-gap1", "hdt:bukhari:1", 1, None, chain_index=0),
+        _mention_row("m-cand", "hdt:bukhari:1", 2, cand, chain_index=0),
+        _mention_row("m-gap3", "hdt:bukhari:1", 3, None, chain_index=0),
+        _mention_row("m-student", "hdt:bukhari:1", 4, "nar:student", chain_index=0),
+    ]
+    out = tmp_path / "curated"
+    _write(out, canonical, mention_rows)
+
+    # Loader side: TRANSMITTED_TO edges incident to the candidate → the other endpoints.
+    loader_pairs = _build_chain_pairs(mention_rows)
+    loader_neighbours = {p["to_id"] for p in loader_pairs if p["from_id"] == cand} | {
+        p["from_id"] for p in loader_pairs if p["to_id"] == cand
+    }
+    assert loader_neighbours == {"nar:teacher", "nar:student"}
+
+    # Splitter side: the anchors it derived for the candidate, mapped back to ids.
+    attested_by_id = {r["canonical_id"]: r["death_year_ah"] for r in (teacher, student)}
+    name_by_id = {r["canonical_id"]: r["name_ar_normalized"] for r in canonical}
+    id_by_name = {v: k for k, v in name_by_id.items()}
+    chains, candidate_mentions = _build_chain_index(
+        out / "narrator_mentions_resolved.parquet", {cand}
+    )
+    datable = _collect_datable(candidate_mentions[cand], chains, attested_by_id, name_by_id)
+    split_neighbours = {id_by_name[n] for d in datable for n in d.anchor_names}
+
+    # The two notions of adjacency AGREE (the da#439 invariant).
+    assert split_neighbours == loader_neighbours

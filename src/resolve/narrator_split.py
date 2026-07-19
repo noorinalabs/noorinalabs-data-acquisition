@@ -31,15 +31,22 @@ not by the name shape.
 Algorithm (per eligible canonical id ``C``, name ``N``)
 -------------------------------------------------------
 1. Gather every mention with ``canonical_narrator_id == C``.
-2. **Isnad-adjacency evidence** — for each such mention, look at the chain neighbours
-   at ``position_in_chain`` ±1 in the same ``(hadith_id, chain_index)`` chain (da#411 —
-   the composite key the graph loaders use; NOT ``hadith_id`` alone, which would
-   fabricate cross-chain neighbours in a multi-isnad hadith) and map them to their
-   *attested* ``death_year_ah`` (precision ≠ ``tabaqa_estimate`` — an *estimated*
-   window is never used as evidence, which also keeps the pass cascade-free on
-   re-run). A teacher (neighbour at position−1) dies a transmission gap *earlier*;
-   a student (position+1) a gap *later* — so ``C``'s per-mention death estimate is
-   ``neighbour_death ± MID_GAP`` (``MID_GAP`` the midpoint of
+2. **Isnad-adjacency evidence** — for each such mention, look at its immediately
+   preceding / following **resolved** chain neighbours in the same
+   ``(hadith_id, chain_index)`` chain (da#411 — the composite key the graph loaders
+   use; NOT ``hadith_id`` alone, which would fabricate cross-chain neighbours in a
+   multi-isnad hadith) and map them to their *attested* ``death_year_ah``
+   (precision ≠ ``tabaqa_estimate`` — an *estimated* window is never used as
+   evidence, which also keeps the pass cascade-free on re-run). "Adjacent" is the
+   **consecutive-resolved** notion the loader pairs into ``TRANSMITTED_TO`` edges
+   (:func:`src.graph.load_edges._build_chain_pairs`, da#439), NOT an exact
+   ``position ± 1`` test: an intermediate position left unresolved (null
+   ``canonical_narrator_id``) opens a position gap that the loader bridges and that
+   an exact-±1 window would silently skip — erasing the adjacency of any narrator
+   seen only in gappy chains (the drop-gate erasure class, main#928 / da#423). A
+   teacher (the earlier-position neighbour) dies a transmission gap *earlier*; a
+   student (the later-position neighbour) a gap *later* — so ``C``'s per-mention
+   death estimate is ``neighbour_death ± MID_GAP`` (``MID_GAP`` the midpoint of
    :data:`~src.resolve.mononym_split._MIN_GAP`/``_MAX_GAP``), averaged over the
    mention's attested neighbours. A mention with no attested neighbour is *undatable*.
 3. **Cluster** the per-mention estimates 1-D, gap-based: sort and cut wherever a
@@ -47,8 +54,15 @@ Algorithm (per eligible canonical id ``C``, name ``N``)
 4. **ABSTAIN — leave ``C`` as ONE node — UNLESS ALL hold** (the over-split guard):
    * ≥2 clusters each with ≥ :data:`SPLIT_MIN_SUPPORT` mentions (*qualifying*);
    * ≤ :data:`SPLIT_MAX_CLUSTERS` qualifying clusters (more ⇒ the name is a generic
-     bucket we cannot cleanly resolve → abstain, logged for audit);
-   * adjacent qualifying-cluster midpoints separated by > :data:`SPLIT_MIN_SEPARATION`.
+     bucket we cannot cleanly resolve → abstain, logged for audit).
+
+   A separate "adjacent bands too close ⇒ abstain" separation guard is **not** needed:
+   :func:`_cut_bands` only ever starts a new band on a consecutive gap exceeding
+   :data:`SPLIT_BAND_GAP` (80 AH), so any two distinct bands — and therefore any two
+   qualifying bands — are already > 80 AH apart by construction, well beyond any
+   contemporaries-scatter threshold. (A ``SPLIT_MIN_SEPARATION = 50`` gate once sat here;
+   because ``SPLIT_BAND_GAP > 50`` it was structurally unreachable and was removed as
+   dead code — da#444.)
 5. **Peel-not-partition** — undatable mentions, and any mention in a below-support
    band, STAY on the primary node. Only confidently-dated distinct clusters peel off.
 6. **Id assignment** (deterministic — a pure function of the input, reproducible
@@ -147,7 +161,6 @@ logger = get_logger(__name__)
 __all__ = [
     "SPLIT_BAND_GAP",
     "SPLIT_MIN_SUPPORT",
-    "SPLIT_MIN_SEPARATION",
     "SPLIT_MAX_CLUSTERS",
     "MID_GAP",
     "NARRATOR_SPLITS_SCHEMA",
@@ -155,6 +168,7 @@ __all__ = [
     "PeeledBand",
     "SplitPlan",
     "plan_split",
+    "resolved_chain_neighbours",
     "split_generic_narrators",
 ]
 
@@ -176,10 +190,6 @@ SPLIT_BAND_GAP = 80
 # Below it, a band is left on the primary (peel-not-partition) — a handful of
 # adjacency estimates is not enough to mint a distinct historical person.
 SPLIT_MIN_SUPPORT = 10
-
-# Two qualifying bands whose midpoints are closer than this are treated as one
-# referent's scatter, not two people — abstain. Secondary to SPLIT_BAND_GAP.
-SPLIT_MIN_SEPARATION = 50
 
 # More than this many *qualifying* bands means the name is a generic bucket we cannot
 # cleanly resolve into a few people — abstain and log for audit rather than shatter it.
@@ -313,6 +323,21 @@ def _band_label(midpoint: int) -> str:
     return f"d:{(midpoint // 25) * 25}"
 
 
+def _band_is_date_coherent(band: list[DatableMention]) -> bool:
+    """True when the band's midpoint falls inside a known ṭabaqa generation window.
+
+    A midpoint outside every :data:`~src.resolve.tabaqa_dates._GENERATION_DEATH_WINDOW_AH`
+    window maps to :attr:`~src.models.enums.NarratorGeneration.UNKNOWN` — an impossibly
+    LATE (> ~400 AH) or impossibly EARLY (< 11 AH) death that no rijāl authority would
+    accept for a hadith-isnad narrator (da#452). Peeling such a band would mint a phantom
+    twin carrying ``gen=unknown`` + that impossible death year (the 546–693 AH twins Ivana
+    found) while still holding real mentions. Tied to :func:`_generation_for_year`, the
+    SAME function :func:`_peeled_record` uses to stamp a peeled node's generation, so the
+    coherence check and the stamp can never disagree.
+    """
+    return _generation_for_year(_band_midpoint(band)) is not NarratorGeneration.UNKNOWN
+
+
 def plan_split(name_ar_normalized: str, datable: list[DatableMention]) -> SplitPlan:
     """Decide whether/how to split candidate ``name_ar_normalized``; pure + deterministic.
 
@@ -328,11 +353,12 @@ def plan_split(name_ar_normalized: str, datable: list[DatableMention]) -> SplitP
     bands = _cut_bands(datable)
     qualifying = [b for b in bands if len(b) >= SPLIT_MIN_SUPPORT]
 
-    # Gate 1: need ≥2 well-supported bands. A single-band name (a genuinely single
-    # person like Sufyān al-Thawrī / al-Zuhrī) abstains here — the load-bearing guard.
-    if len(qualifying) < 2:
-        return abstain
-    # Gate 2: too many well-supported bands ⇒ generic bucket, not a few people.
+    # Gate 2: too many well-supported bands ⇒ generic bucket, not a few people. Evaluated
+    # on the RAW qualifying count (before the da#452 coherence prune below): a name that
+    # throws off more than SPLIT_MAX_CLUSTERS distinct date bands is an unresolvable
+    # bucket regardless of whether some of those bands are date-incoherent — and running
+    # it first keeps it reachable (a coherent-only count can never exceed the ~5 bands
+    # that fit the ṭabaqa window >SPLIT_BAND_GAP apart, which would make this dead code).
     if len(qualifying) > SPLIT_MAX_CLUSTERS:
         logger.info(
             "narrator_split_abstain_noise",
@@ -341,11 +367,38 @@ def plan_split(name_ar_normalized: str, datable: list[DatableMention]) -> SplitP
             max_clusters=SPLIT_MAX_CLUSTERS,
         )
         return abstain
-    # Gate 3: adjacent qualifying midpoints must be well separated.
-    qsorted = sorted(qualifying, key=_band_midpoint)
-    mids = [_band_midpoint(b) for b in qsorted]
-    if any(b - a <= SPLIT_MIN_SEPARATION for a, b in zip(mids, mids[1:], strict=False)):
+
+    # Gate 0 (da#452 — date coherence): drop any qualifying band whose midpoint maps to
+    # NarratorGeneration.UNKNOWN (outside every ṭabaqa window — impossibly late >400 AH or
+    # early <11 AH). Peeling such a band mints a phantom twin with gen=unknown + an
+    # impossible death year that still holds real mentions, corrupting the betweenness
+    # leaderboard (the 546–693 AH twins, da#452). A dropped band is NOT peeled and NOT
+    # retained; its mentions stay on the primary (peel-not-partition), exactly like a
+    # below-support band. An in-window late narrator (the LATER 280–400 band) is coherent
+    # and still peels — the instrument must separate the two (the mandatory da#452 fixture).
+    coherent = [b for b in qualifying if _band_is_date_coherent(b)]
+    if len(coherent) != len(qualifying):
+        logger.info(
+            "narrator_split_drop_incoherent_band",
+            name=name_ar_normalized,
+            dropped_bands=len(qualifying) - len(coherent),
+            dropped_midpoints=[
+                _band_midpoint(b) for b in qualifying if not _band_is_date_coherent(b)
+            ],
+        )
+    qualifying = coherent
+
+    # Gate 1: need ≥2 well-supported, date-coherent bands. A single-band name (a genuinely
+    # single person like Sufyān al-Thawrī / al-Zuhrī), or a name left with one coherent
+    # band after Gate 0, abstains here — the load-bearing guard.
+    if len(qualifying) < 2:
         return abstain
+    # Gate 1 (single band) + Gate 2 (too many) are the complete guard set. A third
+    # "adjacent midpoints too close ⇒ abstain" separation guard was removed as dead code
+    # (da#444): _cut_bands starts a new band only on a gap > SPLIT_BAND_GAP (80 AH), so
+    # any two qualifying bands are already > 80 AH apart — the removed SPLIT_MIN_SEPARATION
+    # (50) check could never fire.
+    qsorted = sorted(qualifying, key=_band_midpoint)
 
     # The largest qualifying band (ties → lower midpoint) keeps the primary id; the
     # undatable/below-support remainder is already off the peel list by construction.
@@ -548,7 +601,58 @@ def _build_chain_index(
             key = (hid, _coalesce_chain_index(cidx))
             if key in candidate_chain_keys:
                 chains.setdefault(key, []).append((int(pos), cid))
+    # Position-sort each chain once so :func:`_collect_datable` can read a mention's
+    # immediately-preceding / -following resolved neighbour by list index — the SAME
+    # position-sorted, consecutive-resolved adjacency the loader pairs into
+    # TRANSMITTED_TO edges (load_edges._build_chain_pairs, da#439). Tie-break on the
+    # canonical id so two resolved mentions sharing a position order deterministically.
+    for chain in chains.values():
+        chain.sort(key=lambda pc: (pc[0], pc[1]))
     return chains, candidate_mentions
+
+
+def resolved_chain_neighbours(
+    chains: dict[tuple[str, int], list[tuple[int, str]]],
+    hadith_id: str,
+    chain_index: int,
+    position: int,
+) -> tuple[str | None, str | None]:
+    """The ``(teacher_id, student_id)`` of a mention's consecutive-resolved chain neighbours.
+
+    The **one** isnad-adjacency definition shared by every stage that reasons about a
+    mention's teacher/student — the date-band splitter (:func:`_collect_datable`), the
+    contextual disambiguator (``contextual_disambiguation``, da#346), and any future
+    isnad-neighbour gate — so they cannot drift the way the splitter and the loader did
+    (da#439). It IS the loader's ``TRANSMITTED_TO`` adjacency
+    (:func:`src.graph.load_edges._build_chain_pairs`):
+
+    * teacher = the **immediately-preceding resolved** mention (lower position),
+      student = the **immediately-following resolved** mention (higher position), in the
+      position-sorted ``(hadith_id, chain_index)`` chain (``chains`` is pre-sorted by
+      :func:`_build_chain_index`) — NOT an exact ``position ± 1`` test, so a gap opened by
+      a dropped unresolved position is bridged exactly as the loader bridges it (da#439);
+    * a neighbour resolving to the mention's OWN canonical id is a self-loop — no
+      ``TRANSMITTED_TO`` edge, so it is dropped and, as in the loader, NOT bridged past
+      to the next resolved mention (that role becomes ``None``);
+    * confined to the same ``(hadith_id, chain_index)`` chain — never a cross-isnad
+      neighbour of a multi-isnad hadith (da#411).
+
+    Returns ``(None, None)`` when the mention's slot is absent from ``chains`` (a pruned
+    chain — never fabricates an adjacency). Pure; no IO.
+    """
+    chain = chains.get((hadith_id, chain_index), ())
+    idx = next((i for i, (p, _c) in enumerate(chain) if p == position), None)
+    if idx is None:
+        return None, None
+    own_id = chain[idx][1]
+
+    def _neighbour(nidx: int) -> str | None:
+        if nidx < 0 or nidx >= len(chain):
+            return None
+        nid = chain[nidx][1]
+        return None if nid == own_id else nid  # self-loop → no edge, not bridged past
+
+    return _neighbour(idx - 1), _neighbour(idx + 1)
 
 
 def _collect_datable(
@@ -559,20 +663,37 @@ def _collect_datable(
 ) -> list[DatableMention]:
     """Per-mention death estimates from attested chain neighbours (undatable dropped).
 
-    A neighbour is only ever the mention's ±1 position **within the same
-    ``(hadith_id, chain_index)`` chain** — never another isnad of the same hadith
-    (da#411) — mirroring the graph loaders' composite chain key.
+    A neighbour is the mention's immediately-preceding / -following **resolved**
+    mention in its position-sorted ``(hadith_id, chain_index)`` chain — never another
+    isnad of the same hadith (da#411). This is the **consecutive-resolved** adjacency
+    the graph loader pairs into ``TRANSMITTED_TO`` edges
+    (:func:`src.graph.load_edges._build_chain_pairs`), NOT an exact ``position ± 1``
+    test (da#439): when an intermediate position is unresolved (null
+    ``canonical_narrator_id``, dropped from ``chains`` in :func:`_build_chain_index`),
+    it opens a position gap. The loader still pairs across that gap (consecutive in the
+    resolved list), so an exact-±1 window here would diverge from the loaded graph —
+    systematically erasing the teacher/student adjacency of any narrator that appears
+    only in gappy chains (the drop-gate erasure class, main#928 / da#423). Reading the
+    immediate sorted-list neighbours instead keeps the split's evidence and the loaded
+    topology in agreement.
+
+    The loader's self-loop drop is mirrored too: a neighbour that resolves to the
+    mention's own canonical id forms no ``TRANSMITTED_TO`` edge (``from_id == to_id``),
+    so it contributes no adjacency here — and, as in the loader, is NOT bridged past to
+    the next resolved mention.
     """
     datable: list[DatableMention] = []
     for hadith_id, chain_index, position, mention_id in mentions:
+        # Teacher = the immediately-preceding resolved mention (lower position, dies
+        # earlier → C dies later, sign +1); student = the immediately-following
+        # (higher position, dies later → C dies earlier, sign −1). The shared
+        # consecutive-resolved adjacency helper (da#439) bridges a dropped-position gap
+        # exactly as the loader does and drops self-loops without bridging past them.
+        teacher_id, student_id = resolved_chain_neighbours(chains, hadith_id, chain_index, position)
         estimates: list[int] = []
         anchors: list[str] = []
-        for npos, nid in chains.get((hadith_id, chain_index), ()):
-            if npos == position - 1:
-                sign = 1  # neighbour is the teacher (dies earlier) → C dies later
-            elif npos == position + 1:
-                sign = -1  # neighbour is the student (dies later) → C dies earlier
-            else:
+        for nid, sign in ((teacher_id, 1), (student_id, -1)):
+            if nid is None:
                 continue
             year = attested_by_id.get(nid)
             if year is None:
