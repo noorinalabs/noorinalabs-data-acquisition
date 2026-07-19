@@ -323,6 +323,21 @@ def _band_label(midpoint: int) -> str:
     return f"d:{(midpoint // 25) * 25}"
 
 
+def _band_is_date_coherent(band: list[DatableMention]) -> bool:
+    """True when the band's midpoint falls inside a known ṭabaqa generation window.
+
+    A midpoint outside every :data:`~src.resolve.tabaqa_dates._GENERATION_DEATH_WINDOW_AH`
+    window maps to :attr:`~src.models.enums.NarratorGeneration.UNKNOWN` — an impossibly
+    LATE (> ~400 AH) or impossibly EARLY (< 11 AH) death that no rijāl authority would
+    accept for a hadith-isnad narrator (da#452). Peeling such a band would mint a phantom
+    twin carrying ``gen=unknown`` + that impossible death year (the 546–693 AH twins Ivana
+    found) while still holding real mentions. Tied to :func:`_generation_for_year`, the
+    SAME function :func:`_peeled_record` uses to stamp a peeled node's generation, so the
+    coherence check and the stamp can never disagree.
+    """
+    return _generation_for_year(_band_midpoint(band)) is not NarratorGeneration.UNKNOWN
+
+
 def plan_split(name_ar_normalized: str, datable: list[DatableMention]) -> SplitPlan:
     """Decide whether/how to split candidate ``name_ar_normalized``; pure + deterministic.
 
@@ -338,11 +353,12 @@ def plan_split(name_ar_normalized: str, datable: list[DatableMention]) -> SplitP
     bands = _cut_bands(datable)
     qualifying = [b for b in bands if len(b) >= SPLIT_MIN_SUPPORT]
 
-    # Gate 1: need ≥2 well-supported bands. A single-band name (a genuinely single
-    # person like Sufyān al-Thawrī / al-Zuhrī) abstains here — the load-bearing guard.
-    if len(qualifying) < 2:
-        return abstain
-    # Gate 2: too many well-supported bands ⇒ generic bucket, not a few people.
+    # Gate 2: too many well-supported bands ⇒ generic bucket, not a few people. Evaluated
+    # on the RAW qualifying count (before the da#452 coherence prune below): a name that
+    # throws off more than SPLIT_MAX_CLUSTERS distinct date bands is an unresolvable
+    # bucket regardless of whether some of those bands are date-incoherent — and running
+    # it first keeps it reachable (a coherent-only count can never exceed the ~5 bands
+    # that fit the ṭabaqa window >SPLIT_BAND_GAP apart, which would make this dead code).
     if len(qualifying) > SPLIT_MAX_CLUSTERS:
         logger.info(
             "narrator_split_abstain_noise",
@@ -350,6 +366,32 @@ def plan_split(name_ar_normalized: str, datable: list[DatableMention]) -> SplitP
             qualifying_bands=len(qualifying),
             max_clusters=SPLIT_MAX_CLUSTERS,
         )
+        return abstain
+
+    # Gate 0 (da#452 — date coherence): drop any qualifying band whose midpoint maps to
+    # NarratorGeneration.UNKNOWN (outside every ṭabaqa window — impossibly late >400 AH or
+    # early <11 AH). Peeling such a band mints a phantom twin with gen=unknown + an
+    # impossible death year that still holds real mentions, corrupting the betweenness
+    # leaderboard (the 546–693 AH twins, da#452). A dropped band is NOT peeled and NOT
+    # retained; its mentions stay on the primary (peel-not-partition), exactly like a
+    # below-support band. An in-window late narrator (the LATER 280–400 band) is coherent
+    # and still peels — the instrument must separate the two (the mandatory da#452 fixture).
+    coherent = [b for b in qualifying if _band_is_date_coherent(b)]
+    if len(coherent) != len(qualifying):
+        logger.info(
+            "narrator_split_drop_incoherent_band",
+            name=name_ar_normalized,
+            dropped_bands=len(qualifying) - len(coherent),
+            dropped_midpoints=[
+                _band_midpoint(b) for b in qualifying if not _band_is_date_coherent(b)
+            ],
+        )
+    qualifying = coherent
+
+    # Gate 1: need ≥2 well-supported, date-coherent bands. A single-band name (a genuinely
+    # single person like Sufyān al-Thawrī / al-Zuhrī), or a name left with one coherent
+    # band after Gate 0, abstains here — the load-bearing guard.
+    if len(qualifying) < 2:
         return abstain
     # Gate 1 (single band) + Gate 2 (too many) are the complete guard set. A third
     # "adjacent midpoints too close ⇒ abstain" separation guard was removed as dead code
