@@ -1154,3 +1154,46 @@ class TestBuildLoadedHadithIds:
         ids = _hadith_ids_written(mock_client)
         assert "hdt:lk:bukhari:1" in ids
         assert "hdt:sanadset:1:dup" not in ids
+
+
+class TestMalformedIdDiagnostic:
+    """da#373 follow-up / da#355 — a quarantined double-prefixed staging row must
+    record WHY (the ``doubled leading corpus`` marker), not a bare ``malformed`` tag.
+
+    Unit-tier guard for the same contract the live
+    ``tests/integration/test_source_id_collision.py`` asserts against a real Neo4j.
+    The shared keep-decision (``_hadith_load_outcome``) swallows the
+    ``DoubledCorpusPrefixError``, so ``_load_hadiths`` must re-mint and record its
+    message verbatim in the non-strict (production ``_cmd_load``) path — a bare
+    generic string would silently degrade da#355's "stop guessing, start recording"
+    diagnostic, which is exactly the axis #373 is repairing.
+    """
+
+    def test_double_prefixed_row_records_marker_and_quarantines(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        write_hadiths(
+            staging_dir,
+            [
+                {
+                    "source_id": "sunnah:sunnah:bukhari:1:1:1",
+                    "collection_name": "bukhari",
+                    "source_corpus": "sunnah",
+                },
+                {
+                    "source_id": "lk:bukhari:1:1",
+                    "collection_name": "bukhari",
+                    "source_corpus": "lk",
+                },
+            ],
+            suffix="streaming",
+        )
+        results = load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        hadith_result = next(r for r in results if r.node_type == "Hadith")
+        assert hadith_result.skipped >= 1
+        assert hadith_result.malformed_ids >= 1
+        assert any("doubled leading corpus" in e for e in hadith_result.validation_errors), (
+            hadith_result.validation_errors
+        )
+        # Only the well-formed row loads; the doubled id never becomes a node.
+        assert _hadith_ids_written(mock_client) == {"hdt:lk:bukhari:1:1"}

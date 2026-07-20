@@ -486,14 +486,19 @@ def _load_hadiths(
                 continue
             if reason == _DROP_MALFORMED:
                 # Quarantine, never abort (da#355) — but strict still makes a
-                # malformed id fatal. Re-mint under strict so the original
-                # DoubledCorpusPrefixError (with its message) propagates unchanged;
-                # otherwise record it, count it, keep going.
-                if strict:
-                    hadith_node_id(row["source_id"])  # re-raises DoubledCorpusPrefixError
-                all_errors.append(
-                    f"{fp.name} row {i}: malformed source_id={row.get('source_id')!r}"
-                )
+                # malformed id fatal. Re-mint so the original DoubledCorpusPrefixError
+                # propagates unchanged under strict, and is recorded VERBATIM under
+                # non-strict (the production ``_cmd_load`` path): the quarantine must
+                # still say WHY — its message carries the ``doubled leading corpus``
+                # marker — or da#355's "stop guessing, start recording" contract
+                # silently degrades to a bare "malformed" tag (the exact diagnostic
+                # loss #373 is about).
+                try:
+                    hadith_node_id(row["source_id"])
+                except DoubledCorpusPrefixError as exc:
+                    if strict:
+                        raise
+                    all_errors.append(f"{fp.name} row {i}: {exc}")
                 total_skipped += 1
                 total_malformed += 1
                 continue
