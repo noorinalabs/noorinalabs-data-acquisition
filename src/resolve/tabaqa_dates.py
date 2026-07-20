@@ -65,10 +65,15 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 __all__ = [
+    "DEATH_PLAUSIBILITY_MARGIN_AH",
+    "NARRATOR_DEATH_MAX_AH",
+    "NARRATOR_DEATH_MIN_AH",
     "TabaqaEstimate",
     "apply_tabaqa_fallback",
+    "clamp_death_ah",
     "estimate_death_window",
     "generation_from_value",
+    "is_plausible_narrator_death_ah",
 ]
 
 # Generation (ṭabaqa) → approximate Hijri (AH) death-year window.
@@ -99,6 +104,75 @@ _GENERATION_DEATH_WINDOW_AH: dict[NarratorGeneration, tuple[int, int]] = {
     NarratorGeneration.ATBA_TABA_TABIIN: (220, 300),
     NarratorGeneration.LATER: (280, 400),
 }
+
+# Plausibility envelope for a hadith-isnad narrator's *attested* death year (AH),
+# da#446. This is NOT ``src.parse.narrator_dates``' ``[MIN_PLAUSIBLE_AH,
+# MAX_PLAUSIBLE_AH]`` = ``[1, 1500]`` band — THAT is a "is this token even a year"
+# noise filter that drops page refs / hadith numbers leaking into a free-text date
+# field. THIS bounds what death year is historically *possible* for a narrator
+# standing in an isnad. The universal −44 / 805 AH date-axis pollution (da#446) is
+# late collectors/commentators (d. ~700–780 AH) welded onto early isnad nodes: their
+# attested death is a genuine number well inside ``[1, 1500]``, so the noise filter
+# passes it, and it then poisons the neighbour-death evidence that
+# :mod:`~src.resolve.narrator_split` turns into a per-mention death estimate — an
+# 8th-century-AH "narrator death" makes the ±MID_GAP axis emit nonsense.
+#
+# Floor = the Prophet's death (11 AH), the earliest an isnad-bearing narrator could
+# die — a hard historical bound with NO downward margin. Ceiling = the last (LATER)
+# ṭabaqa window's high (400 AH) plus a margin, because a genuinely long-lived
+# post-canonical transmitter can sit a little past the rounded window edge. Both are
+# DERIVED from :data:`_GENERATION_DEATH_WINDOW_AH` so the envelope and the ṭabaqa
+# periodization can never drift apart.
+DEATH_PLAUSIBILITY_MARGIN_AH = 50
+NARRATOR_DEATH_MIN_AH = min(lo for lo, _hi in _GENERATION_DEATH_WINDOW_AH.values())
+NARRATOR_DEATH_MAX_AH = (
+    max(hi for _lo, hi in _GENERATION_DEATH_WINDOW_AH.values()) + DEATH_PLAUSIBILITY_MARGIN_AH
+)
+
+
+def is_plausible_narrator_death_ah(
+    year: int, generation: NarratorGeneration = NarratorGeneration.UNKNOWN
+) -> bool:
+    """Is ``year`` (AH) a historically-possible death year for an isnad narrator? (da#446)
+
+    Two tiers:
+
+    * **Absolute envelope.** Every isnad-bearing narrator died within
+      ``[NARRATOR_DEATH_MIN_AH, NARRATOR_DEATH_MAX_AH]`` (the union of the ṭabaqa
+      generation windows — Prophet's-death floor to LATER-window ceiling + margin).
+      A death outside it — the d. 700–780 AH late-collector pollution, or a stray
+      sub-11 value — is implausible regardless of any label.
+    * **Generation-aware tightening.** When a *known* ``generation`` is given, the
+      year must ALSO fall inside that generation's window ± the margin: a row
+      labelled ``sahabi`` carrying an attested death of 300 AH is impossible for a
+      Companion even though 300 sits inside the loose absolute envelope. An
+      ``UNKNOWN`` / unmapped generation applies the absolute envelope only — the
+      common case for the bio-only late entries that dominate the pollution.
+
+    Pure; no IO. The scrub decision (drop / flag) belongs to the caller.
+    """
+    if not (NARRATOR_DEATH_MIN_AH <= year <= NARRATOR_DEATH_MAX_AH):
+        return False
+    window = _GENERATION_DEATH_WINDOW_AH.get(generation)
+    if window is not None:
+        lo, hi = window
+        if not (lo - DEATH_PLAUSIBILITY_MARGIN_AH <= year <= hi + DEATH_PLAUSIBILITY_MARGIN_AH):
+            return False
+    return True
+
+
+def clamp_death_ah(year: int) -> int:
+    """Clamp an AH death-year *estimate* to the absolute plausibility envelope (da#446).
+
+    Applied to the isnad-adjacency ``neighbour_death ± MID_GAP`` estimate so the date
+    axis can never emit a value below the Prophet's death or past the last ṭabaqa
+    window (the −44 / 805 AH the issue reports). Even after the neighbour-death pool
+    is plausibility-scrubbed, the ±MID_GAP arithmetic underflows/overflows at the
+    boundary — a student of a Companion who died 11 AH estimates 11 − 47 = −36, which
+    is not a real death year but an artifact of the transmission-gap shift — so it is
+    clamped to ``NARRATOR_DEATH_MIN_AH`` / ``NARRATOR_DEATH_MAX_AH``.
+    """
+    return max(NARRATOR_DEATH_MIN_AH, min(NARRATOR_DEATH_MAX_AH, year))
 
 
 @dataclass(frozen=True)
