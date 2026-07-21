@@ -767,7 +767,10 @@ def test_entry_number_prefix_is_not_a_truncation(tmp_path: Path) -> None:
     """
     normalized = normalize_arabic(_ITQAN_25339_ENTRY_NUMBER)
     cleaned = clean_narrator_name(normalized)
-    assert cleaned == _ITQAN_25339_NAME, f"fixture no longer strips the entry number: {cleaned!r}"
+    # normalized comparison: da#427 folds alif-maqsura ى→ي (موسى→موسي)
+    assert cleaned == normalize_arabic(_ITQAN_25339_NAME), (
+        f"fixture no longer strips the entry number: {cleaned!r}"
+    )
     assert not cleaner_removed_content(normalized, cleaned)
 
     staging = tmp_path / "staging"
@@ -1455,7 +1458,8 @@ def test_gloss_tail_class_a_is_recognised(raw: str, expected_cleaned: str, why: 
     """da#397 class A: a complete nasab that lost only a teacher-key isnad tail."""
     normalized = normalize_arabic(raw)
     cleaned = clean_narrator_name(normalized)
-    assert cleaned == expected_cleaned, (
+    # normalized comparison: da#427 folds alif-maqsura ى→ي (e.g. عيسى→عيسي)
+    assert cleaned == normalize_arabic(expected_cleaned), (
         f"fixture no longer truncates as expected ({why}): {cleaned!r}"
     )
     assert cleaner_removed_content(normalized, cleaned), why
@@ -1469,7 +1473,8 @@ def test_name_cut_class_b_is_not_a_gloss_tail(raw: str, expected_cleaned: str, w
     """da#397 class B: a name-cut / disputed-identity / non-nasab residue is NOT recoverable."""
     normalized = normalize_arabic(raw)
     cleaned = clean_narrator_name(normalized)
-    assert cleaned == expected_cleaned, (
+    # normalized comparison: da#427 folds alif-maqsura ى→ي (e.g. عيسى→عيسي)
+    assert cleaned == normalize_arabic(expected_cleaned), (
         f"fixture no longer truncates as expected ({why}): {cleaned!r}"
     )
     assert cleaner_removed_content(normalized, cleaned), why

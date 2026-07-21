@@ -281,15 +281,6 @@ def _is_isnad_residue_token(token: str) -> bool:
 # Honorific / eulogy phrases (normalized) that name no narrator. Stripped from
 # anywhere in the span (they appear appended to real names too).
 _HONORIFIC_PHRASES: tuple[str, ...] = (
-    "صلى الله عليه واله وسلم",
-    "صلى الله عليه وسلم",
-    # Shia taṣliya without the trailing وسلم (da#271): the dominant benediction in
-    # thaqalayn/lk — the bare "صلى الله عليه واله" (and its spaced "و اله" variant)
-    # was NOT covered by the two forms above, so "رسول الله صلى الله عليه واله" (a
-    # mc-365 false narrator) survived. Listed AFTER the longer وسلم-suffixed form so
-    # that one is stripped first where present.
-    "صلى الله عليه واله",
-    "صلى الله عليه و اله",
     "عليه السلام",
     "عليهم السلام",
     "عليها السلام",
@@ -301,39 +292,26 @@ _HONORIFIC_PHRASES: tuple[str, ...] = (
     # عنهما"). It was absent, so the strip matched only the "رضي الله عنه" PREFIX
     # and left a dangling "ما"/"ا" fragment — harmless while name_ar_normalized was
     # the only cleaner output, but da#301 surfaces the cleaner on the DISPLAY name,
-    # where "عبد الله بن عمر ا" would become a Narrator label. Listed here (both ي
-    # and ى spellings); the LONGEST-FIRST strip loop removes it before the shorter
-    # عنه/عنها/عنهم forms, so the whole dual benediction goes cleanly.
+    # where "عبد الله بن عمر ا" would become a Narrator label. The LONGEST-FIRST
+    # strip loop removes it before the shorter عنه/عنها/عنهم forms.
     "رضي الله عنهما",
-    # alif-maqsura spelling (da#308): normalize_arabic does NOT fold ى→ي, so the
-    # very common "رضى الله عنه" survives normalization distinct from the ي form
-    # above and left an un-scrubbed benediction tail (e.g. "ابي هريره رضى الله عنه
-    # ان" — mc-1215). Listed so the residue is stripped and the real leading name
-    # ("ابي هريره") is recovered rather than kept honorific-polluted or dropped.
-    "رضى الله عنه",
-    "رضى الله عنها",
-    "رضى الله عنهم",
-    "رضى الله عنهما",  # da#471 dual form, alif-maqsura spelling (see ي form above)
     # bare / truncated benediction fragments (da#311) — the source often stores a
-    # benediction cut off before its pronoun tail ("… رضي الله", "… صلى الله عليه"
+    # benediction cut off before its pronoun tail ("… رضي الله", "… صلي الله عليه"
     # with no عنه/وسلم). Stripped LONGEST-FIRST (see the strip loop) so the full
-    # "رضي الله عنه" / "صلى الله عليه وسلم" forms above are removed first where
-    # present; the bare forms then catch the truncated residue. Neither "رضي الله"
-    # ("God is pleased") nor "صلى الله عليه" is ever part of a real narrator name.
-    "صلى الله عليه",
+    # "رضي الله عنه" / "صلي الله عليه وسلم" forms are removed first where present;
+    # the bare forms then catch the truncated residue. Neither "رضي الله" ("God is
+    # pleased") nor "صلي الله عليه" is ever part of a real narrator name.
     "رضي الله",
-    "رضى الله",
     "رحمه الله",
     "عز وجل",
-    "تبارك وتعالى",
-    # Urdu-folded taṣliya (da#299): normalize_arabic now folds the Urdu yeh ی
-    # (U+06CC) to the Arabic yeh ي, so a benediction typed in Urdu script —
-    # "صلی اللہ علیہ وسلم" — normalizes to "صلي الله عليه وسلم" (regular yeh),
-    # NOT the alif-maqsura "صلى …" spelling the Arabic-sourced forms above carry.
-    # Same asymmetry the da#308 رضى/رضي pair already handles: list the yeh spelling
-    # so an Urdu-script name folds to the SAME benediction-stripped canonical form
-    # as its Arabic twin. Longest-first (the strip loop) so the وسلم/واله forms win
-    # before the bare "صلي الله عليه".
+    "تبارك وتعالي",
+    # taṣliya, yeh-spelled (da#299 + da#427). normalize_arabic folds BOTH the Urdu
+    # yeh ی (U+06CC, da#299 — an Urdu-script "صلی اللہ علیہ وسلم") AND the Arabic
+    # alif-maqsura ى (U+0649, da#427 — a "صلى الله عليه وسلم") onto the regular yeh
+    # ي (U+064A). So the yeh spelling below is now the SOLE canonical benediction
+    # form — every source's taṣliya normalizes to it, and the alif-maqsura "صلى …"
+    # literals this list used to carry are redundant post-fold and were removed.
+    # Longest-first (the strip loop) so the وسلم/واله forms win before the bare form.
     "صلي الله عليه واله وسلم",
     "صلي الله عليه وسلم",
     "صلي الله عليه واله",
@@ -482,7 +460,7 @@ _APPOSITION_CONNECTORS = frozenset(
         "ام",  # mother of
         "اخت",  # sister of
         "اهل",  # family/people of
-        "مولى",  # client/freedman of
+        "مولي",  # client/freedman of (مولى, alif-maqsura folded ى→ي — da#427)
         "مولاه",  # his client
         "خادم",  # servant of
         "خادمه",  # her/his servant
@@ -675,7 +653,7 @@ _ISNAD_BOUNDARY = frozenset(
         "لما",
         "فلما",
         "ثم",
-        "حتى",
+        "حتي",  # (حتى, alif-maqsura folded ى→ي — da#427)
         "والله",
         # editorial identification glosses ("he is …", "it is said …")
         "هو",
@@ -737,7 +715,7 @@ _MATN_DENSITY = frozenset(
         "لما",
         "فلما",
         "ثم",
-        "حتى",
+        "حتي",  # (حتى, alif-maqsura folded ى→ي — da#427)
         "والله",
         "هو",
         "وهو",
@@ -800,15 +778,18 @@ _MATN_OPENERS = frozenset(
         "قلنا",  # "we said"
         "كنا",  # "we were"
         "كنت",  # "I was"
-        "نهى",  # "he forbade"
+        "نهي",  # "he forbade" (نهى, alif-maqsura folded ى→ي — da#427)
         "امر",  # "he ordered"
-        "صلى",  # "he prayed" (verb; the taṣliya benediction is stripped in step 2)
+        "صلي",  # "he prayed" (صلى, folded — da#427; the taṣliya benediction, also
+        # yeh-folded, is stripped in step 2). NB post-fold this token is homographic
+        # with the yeh-final name صلي/Siliy — but no _MATN_OPENERS token is a nasab
+        # opener, so a leading matn verb never fires on a real kunya (see set docstring).
         "صلت",  # "she prayed"
         "رايت",  # "I saw"
         "بينما",  # "while"
         "بينا",  # "while"
         "نعم",  # "yes" (matn answer particle, minted as a lone junk narrator)
-        "بلى",  # "yes indeed"
+        "بلي",  # "yes indeed" (بلى, alif-maqsura folded ى→ي — da#427)
         # Shia dialogue-hadith openers (da#311) — the dominant matn shape in
         # thaqalayn/fawaz ("I asked Abu al-Hasan (as): ...", "Abu Abd Allah (as)
         # was asked: ..."), tuned on Sunni/Tirmidhī patterns only until now.
@@ -817,12 +798,13 @@ _MATN_OPENERS = frozenset(
         "سالت",  # سألت "I asked" (1st person; bare سال 3rd-person is already an
         # _ISNAD_BOUNDARY token — this is the distinct 1st-person conjugation)
         "سءل",  # سُئل "was asked" (passive)
-        "روى",  # "he narrated" (3rd person; a lone leading opener, distinct
-        # from the truncation-boundary سمعت/حدثنا/حدثني/اخبرنا/اخبرني/حدث/حدثت
-        # forms above, which recover a preceding real name instead)
-        "روي",  # "was narrated" (passive, ya-final — normalize_arabic does NOT
-        # fold ى→ي so this is a DISTINCT token from روى above; da#311 round-4b, a
-        # lone leading روي slips truncation and mints a 541-mention junk narrator)
+        "روي",  # "he narrated" / "was narrated" — 3rd-person روى and passive روي,
+        # now ONE token (da#427 folds ى→ي, so the maqsura روى and the yeh روي that
+        # were listed separately here — da#311 kept them distinct precisely because
+        # normalize_arabic did NOT then fold ى→ي — converge). A lone leading opener,
+        # distinct from the truncation-boundary سمعت/حدثنا/اخبرنا/حدث forms above
+        # (which recover a preceding real name); da#311 round-4b: a lone leading روي
+        # slips truncation and minted a 541-mention junk narrator.
         "كتبت",  # "I wrote (to)" — maktub/correspondence matn opener ("كتبت الى
         # ابي الحسن اساله …"); the 3rd-person كتب is an _ISNAD_BOUNDARY token.
         "يا",  # vocative "O …" ("يا رسول الله", "يا محمد", "يا معاذ …") — a
@@ -852,22 +834,29 @@ _MATN_OPENERS = frozenset(
 #
 # PRECISION: none is ever a component of a real name, and every rule that consults
 # this set runs AFTER the nasab-connector precision guard (so any genuine lineage /
-# kunya is already spared). Crucially ``على`` (preposition "on", alif-maqsura final)
-# is a DISTINCT token from ``علي`` (the name ʿAlī, ya final) because
-# ``normalize_arabic`` does NOT fold ى→ي — so no ʿAlī is ever mistaken for the
-# preposition. ``من`` is deliberately EXCLUDED (it is the partitive the mubham
-# guards 5/5b key on, and folding it in here would be redundant/entangling).
+# kunya is already spared). ``من`` is deliberately EXCLUDED (it is the partitive the
+# mubham guards 5/5b key on, and folding it in here would be redundant/entangling).
+#
+# ``على`` ("on / upon") is deliberately NOT a member (da#427). normalize_arabic now
+# folds alif-maqsura ى→ي, so the preposition ``على`` and the name ``علي`` (ʿAlī) BOTH
+# normalize to ``علي`` and are no longer distinguishable (the comment here used to
+# note the opposite, relying on ى≠ي). Adding ``علي`` would drop a bare ``علي``
+# narrator via rule 2c (all-particle) — deleting one of the most-attested
+# transmitters — so ``على`` is removed from the set instead, at the cost of no longer
+# detecting the ``على`` preposition as a matn particle. That is a recall loss in the
+# SAFE direction (leaves residue in; never deletes a name), and the alternative
+# deletes ʿAlī. The set-level invariant test pins that no name (``علي`` included)
+# folds onto a member of this or any other droppable set.
 _MATN_PARTICLES = frozenset(
     {
-        # prepositions
-        "على",  # "on / upon" (alif-maqsura — NOT the name علي)
+        # prepositions ("على" excluded — see header: folds onto the name علي)
         "في",  # "in"
-        "الى",  # "to / towards"
+        "الي",  # "to / towards" (الى, alif-maqsura folded — da#427)
         "عند",  # "at / with"
         "بعد",  # "after"
         "قبل",  # "before"
         "مع",  # "with"
-        "لدى",  # "at / with"
+        "لدي",  # "at / with" (لدى, folded — da#427)
         "بين",  # "between"
         "نحو",  # "towards / about"
         # personal / attached pronouns
@@ -915,7 +904,7 @@ _MATN_PARTICLES = frozenset(
         "انما",  # "only / but"
         "كي",  # "so that"
         "كيف",  # "how"
-        "متى",  # "when"
+        "متي",  # "when" (متى, alif-maqsura folded ى→ي — da#427)
         "اين",  # "where"
         "لذلك",  # "therefore"
         "لذا",  # "hence"
