@@ -487,6 +487,84 @@ def test_bio_only_display_name_ar_strips_benediction(tmp_path: Path) -> None:
     assert rec["name_ar_normalized"] == normalize_arabic("ابو هريره")
 
 
+def test_bio_only_display_never_empty_when_name_ar_is_honorific_only(tmp_path: Path) -> None:
+    """da#471 gap 1: honorific-only name_ar + a distinct real name_ar_normalized.
+
+    clean_narrator_name_display(name_ar) is None (all-eulogy), and the graph loader
+    stores name_ar VERBATIM (None -> "") — it does NOT coalesce the stored display
+    to name_ar_normalized. Without the guard the bio-only node would get an EMPTY
+    label (worse than the pre-da#301 raw eulogy). The display must fall back to the
+    real (cleaned) name so the label is never empty when a real name exists.
+    """
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+
+    real_name = "انس بن مالك"
+    _write_bios(
+        staging,
+        "kaggle",
+        [
+            {
+                "bio_id": "kaggle:100",
+                "source": "kaggle_narrators",
+                # name_ar is PURE honorific (cleans to None), but the normalized
+                # field carries a real name — the divergence the guard must survive.
+                "name_ar": "رضي الله عنه",
+                "name_ar_normalized": normalize_arabic(real_name),
+            }
+        ],
+    )
+
+    rows = pq.read_table(promote_bios_to_canonical(staging, out_dir)).to_pylist()
+    rec = next(
+        r for r in rows if r["canonical_id"] == make_canonical_id(normalize_arabic(real_name))
+    )
+
+    # Never empty / None — falls back to the cleaned real name, consistent with id.
+    assert rec["name_ar"]
+    assert rec["name_ar"] == normalize_arabic(real_name)
+    assert rec["name_ar_normalized"] == normalize_arabic(real_name)
+
+
+def test_bio_only_display_dual_benediction_not_garbled(tmp_path: Path) -> None:
+    """da#471 gap 2: the dual-pronoun benediction "رضي الله عنهما" no longer leaves
+    a dangling fragment in the DISPLAY name (previously "عبد الله بن عمر ا").
+
+    Root-fixed by adding the dual form to the honorific set; the display stays
+    benediction-free and normalizes back to the canonical name (no stray token).
+    """
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+
+    raw = "عَبْدُ اللَّهِ بْنُ عُمَر رضي الله عنهما"
+    _write_bios(
+        staging,
+        "kaggle",
+        [
+            {
+                "bio_id": "kaggle:101",
+                "source": "kaggle_narrators",
+                "name_ar": raw,
+                "name_ar_normalized": normalize_arabic(raw),
+            }
+        ],
+    )
+
+    rows = pq.read_table(promote_bios_to_canonical(staging, out_dir)).to_pylist()
+    clean_norm = normalize_arabic("عبد الله بن عمر")
+    rec = next(r for r in rows if r["canonical_id"] == make_canonical_id(clean_norm))
+
+    # Benediction gone AND no dangling stray token — the display normalizes exactly
+    # to the canonical name (a "… ا" residue would fail this).
+    assert "رضي الله" not in rec["name_ar"]
+    assert normalize_arabic(rec["name_ar"]) == clean_norm
+    assert rec["name_ar_normalized"] == clean_norm
+
+
 # Verbatim `full_name` values from the acquired Itqan buckets — NOT synthetic. A
 # fabricated prose row would not exercise the truncation, and the guard could not go
 # red (feedback_fixture_makes_guard_assertion_inert). Provenance:

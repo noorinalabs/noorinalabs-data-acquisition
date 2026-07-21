@@ -360,10 +360,25 @@ def promote_bios_to_canonical(
                 # overwrites its name_ar), but a BIO-ONLY narrator surfaces the
                 # benediction in its label (the loader keys node.name on name_ar
                 # first). clean_narrator_name_display strips it while preserving the
-                # voweled surface; None (name_ar empty or all-eulogy) falls back to
-                # the cleaned normalized form via the loader's name_ar_normalized
-                # coalesce. Identity/matching are unchanged — cid + norm are as before.
+                # voweled surface. Identity/matching are unchanged — cid + norm are
+                # as before; only the display label changes.
+                #
+                # da#471 (review of da#301): the display MUST be consistent with the
+                # identity AND never empty/garbled. The graph loader stores name_ar
+                # VERBATIM (``SET n.name_ar = row.name_ar``; a None becomes ""), and
+                # does NOT coalesce the stored display to name_ar_normalized (that
+                # coalesce is only in the search-name derivation) — so a None display
+                # would surface as an EMPTY node label, worse than the raw eulogy.
+                # Two ways the display can go wrong here: (a) name_ar is honorific-only
+                # and cleans to None while name_ar_normalized is a real name (the
+                # fields diverged upstream); (b) clean_narrator_name_display's
+                # alignment fallback emits a denatured/garbled surface. Guard BOTH:
+                # keep the voweled display only when it normalizes back to the
+                # canonical `norm`; otherwise fall back to `norm` (clean, never empty
+                # when a real name exists, always consistent with the id).
                 display_name_ar = clean_narrator_name_display(name_ar) if name_ar else None
+                if not display_name_ar or normalize_arabic(display_name_ar) != norm:
+                    display_name_ar = norm
                 canonical_map[cid] = {
                     "canonical_id": cid,
                     "name_ar": display_name_ar,

@@ -270,6 +270,15 @@ _HONORIFIC_PHRASES: tuple[str, ...] = (
     "رضي الله عنه",
     "رضي الله عنها",
     "رضي الله عنهم",
+    # DUAL pronoun form (da#471): "رضي الله عنهما" ("… with both of them"), the
+    # standard benediction after a PAIR of Companions ("عبد الله بن عمر رضي الله
+    # عنهما"). It was absent, so the strip matched only the "رضي الله عنه" PREFIX
+    # and left a dangling "ما"/"ا" fragment — harmless while name_ar_normalized was
+    # the only cleaner output, but da#301 surfaces the cleaner on the DISPLAY name,
+    # where "عبد الله بن عمر ا" would become a Narrator label. Listed here (both ي
+    # and ى spellings); the LONGEST-FIRST strip loop removes it before the shorter
+    # عنه/عنها/عنهم forms, so the whole dual benediction goes cleanly.
+    "رضي الله عنهما",
     # alif-maqsura spelling (da#308): normalize_arabic does NOT fold ى→ي, so the
     # very common "رضى الله عنه" survives normalization distinct from the ي form
     # above and left an un-scrubbed benediction tail (e.g. "ابي هريره رضى الله عنه
@@ -278,6 +287,7 @@ _HONORIFIC_PHRASES: tuple[str, ...] = (
     "رضى الله عنه",
     "رضى الله عنها",
     "رضى الله عنهم",
+    "رضى الله عنهما",  # da#471 dual form, alif-maqsura spelling (see ي form above)
     # bare / truncated benediction fragments (da#311) — the source often stores a
     # benediction cut off before its pronoun tail ("… رضي الله", "… صلى الله عليه"
     # with no عنه/وسلم). Stripped LONGEST-FIRST (see the strip loop) so the full
