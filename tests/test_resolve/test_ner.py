@@ -10,6 +10,7 @@ import pytest
 
 from src.parse.narrator_extraction import IsnadSegmentationError, extract_narrator_mentions
 from src.parse.schemas import NARRATOR_MENTION_SCHEMA
+from src.resolve import ner
 from src.resolve.ner import (
     UnroutedCorpusError,
     _CleanRate,
@@ -134,6 +135,93 @@ class TestLoadPhase1Mentions:
         rows = _load_phase1_mentions(tmp_path, "lk", "narrator_mentions_lk.parquet")
         assert rows[0]["name_raw"] == "Malik"
         assert rows[0]["name_normalized"] == "Malik"
+
+
+# ---------------------------------------------------------------------------
+# da#298 — cross-script Latin-fallback policy in _load_phase1_mentions.
+# The lk English-isnad path mints Latin-keyed nodes (empty name_ar + Latin
+# name_en) that fork from their Arabic identity. `_LATIN_FALLBACK_POLICY`
+# defaults to "keep" (no data loss, status quo); "drop" sheds them.
+# ---------------------------------------------------------------------------
+class TestLatinFallbackPolicy:
+    ALI_AR = "علي"  # علي
+
+    def _mixed_lk_file(self, path: Path) -> None:
+        """One Arabic mention (chain 0) + one Latin-only mention (chain 1), like lk."""
+        mentions = [
+            {
+                "mention_id": "ar-1",
+                "source_hadith_id": "h-1",
+                "source_corpus": "lk",
+                "position_in_chain": 0,
+                "chain_index": 0,
+                "name_ar": self.ALI_AR,
+                "name_en": None,
+                "name_ar_normalized": self.ALI_AR,
+                "transmission_method": None,
+            },
+            {
+                "mention_id": "en-1",
+                "source_hadith_id": "h-1",
+                "source_corpus": "lk",
+                "position_in_chain": 0,
+                "chain_index": 1,
+                "name_ar": None,
+                "name_en": "Mughirah ibn Shu'bah",
+                "name_ar_normalized": None,
+                "transmission_method": None,
+            },
+        ]
+        _write_narrator_mentions_parquet(path, mentions)
+
+    def test_default_policy_keeps_latin_fallback(self, tmp_path: Path) -> None:
+        """Default "keep" is status quo: both the Arabic and the Latin node load."""
+        assert ner._LATIN_FALLBACK_POLICY == "keep", "the shipped default must be non-lossy"
+        self._mixed_lk_file(tmp_path / "narrator_mentions_lk.parquet")
+        rows = _load_phase1_mentions(tmp_path, "lk", "narrator_mentions_lk.parquet")
+        assert len(rows) == 2
+        assert {r["name_normalized"] for r in rows} == {self.ALI_AR, "Mughirah ibn Shu'bah"}
+
+    def test_drop_policy_sheds_latin_fallback_keeps_arabic(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Under "drop": the Latin-only mention is skipped, the Arabic one survives.
+
+        Mutation check: without the da#298 gate both rows load (len == 2) — this
+        asserts the Latin row is gone and only the Arabic node remains.
+        """
+        monkeypatch.setattr(ner, "_LATIN_FALLBACK_POLICY", "drop")
+        self._mixed_lk_file(tmp_path / "narrator_mentions_lk.parquet")
+        rows = _load_phase1_mentions(tmp_path, "lk", "narrator_mentions_lk.parquet")
+        assert len(rows) == 1
+        assert rows[0]["name_normalized"] == self.ALI_AR
+
+    def test_drop_policy_never_drops_a_row_with_arabic(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A mention carrying name_ar is never dropped, even if name_en is also set.
+
+        Guards against over-dropping: the gate keys on *empty name_ar + non-Arabic
+        fallback*, not merely on the presence of a Latin name_en.
+        """
+        monkeypatch.setattr(ner, "_LATIN_FALLBACK_POLICY", "drop")
+        mentions = [
+            {
+                "mention_id": "ar-2",
+                "source_hadith_id": "h-2",
+                "source_corpus": "lk",
+                "position_in_chain": 0,
+                "chain_index": 0,
+                "name_ar": self.ALI_AR,
+                "name_en": "Ali",  # bilingual row — Arabic present, must stay
+                "name_ar_normalized": self.ALI_AR,
+                "transmission_method": None,
+            },
+        ]
+        _write_narrator_mentions_parquet(tmp_path / "narrator_mentions_lk.parquet", mentions)
+        rows = _load_phase1_mentions(tmp_path, "lk", "narrator_mentions_lk.parquet")
+        assert len(rows) == 1
+        assert rows[0]["name_normalized"] == self.ALI_AR
 
 
 # ---------------------------------------------------------------------------

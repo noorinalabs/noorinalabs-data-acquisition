@@ -74,6 +74,36 @@ _PHASE1_MENTION_SOURCES: dict[str, str] = {
     "lk": "narrator_mentions_lk.parquet",
 }
 
+# Cross-script Latin-fallback policy for Phase-1 mentions (da#298).
+#
+# A Phase-1 mention with an empty ``name_ar`` but a populated Latin ``name_en``
+# falls back to the Latin name (``name_ar or name_en``); ``normalize_arabic``
+# leaves it Latin, so ``make_canonical_id`` mints a Latin-keyed canonical node
+# that never merges with the same narrator from the Arabic corpora (cross-script
+# under-merge — the class fixed for fawaz in da#286 by extracting Arabic instead).
+#
+# The dominant population is lk: its parser (``lk_corpus.run``) extracts mentions
+# from BOTH the Arabic isnad (Arabic names, chain 0) AND the parallel English-
+# translation isnad (Latin names, chain 1) of the same hadith. The 41,998 Latin
+# mentions (18.3% of lk) are therefore romanized DUPLICATES of narrators already
+# captured in Arabic on the parallel chain — investigation (da#298): 100% of the
+# 33,469 hadiths with an English-isnad mention also carry an Arabic-isnad mention,
+# yet the two chains have DIFFERENT lengths in 99.5% of hadiths (English is
+# systematically shorter, da#282), so a per-mention Arabic name CANNOT be recovered
+# by positional alignment and there is no structured Arabic name column upstream.
+# Recovering Arabic would require cross-lingual NER alignment / transliteration —
+# the lossy path the fawaz note above rejects.
+#
+# Policy values:
+#   "keep" (default) — current behaviour: keep the Latin fallback mention. NO data
+#     loss; the forked Latin nodes persist. This is the status quo — flipping the
+#     default to drop sheds ~42k lk edges and is OWNER-VISIBLE, so it stays a
+#     curated decision (da#298 surfaced to the owner), not a unilateral change.
+#   "drop" — skip Latin-only cross-script fallbacks (a mention with empty name_ar
+#     whose fallback name carries no Arabic script). Trades ~42k mostly-duplicative
+#     Latin edges for the removal of the forked Latin canonical nodes.
+_LATIN_FALLBACK_POLICY: str = "keep"
+
 # Sources with Arabic isnads needing rule-based extraction.
 #
 # fawaz (da#271): extracted from its Arabic full text, NOT its English translation.
@@ -240,6 +270,7 @@ def _load_phase1_mentions(
     table = pq.read_table(path)
     rows: list[dict[str, str | int | None]] = []
     dropped = 0
+    dropped_latin = 0  # cross-script Latin fallbacks skipped under the da#298 policy
 
     # Chain identity (da#282): sanadset/lk emit ``chain_index`` on their mention
     # rows; carry it through so the loader groups per-chain, not per-hadith. Read
@@ -266,6 +297,14 @@ def _load_phase1_mentions(
         name_normalized = cleaned
         name_raw = strip_markup(name_raw) or name_raw
 
+        # Cross-script Latin-fallback policy (da#298). A mention with no Arabic name
+        # whose cleaned fallback carries no Arabic script is a Latin-keyed node that
+        # forks from its Arabic identity. Under "drop" it is skipped; the default
+        # "keep" preserves current behaviour (no data loss). See _LATIN_FALLBACK_POLICY.
+        if _LATIN_FALLBACK_POLICY == "drop" and not name_ar and not is_arabic(name_normalized):
+            dropped_latin += 1
+            continue
+
         chain_index = table.column("chain_index")[i].as_py() if has_chain_index else 0
         rows.append(
             {
@@ -282,14 +321,25 @@ def _load_phase1_mentions(
             }
         )
 
-    logger.info("phase1_mentions_loaded", corpus=corpus, mentions=len(rows), dropped=dropped)
+    logger.info(
+        "phase1_mentions_loaded",
+        corpus=corpus,
+        mentions=len(rows),
+        dropped=dropped,
+        dropped_latin_fallback=dropped_latin,
+        latin_fallback_policy=_LATIN_FALLBACK_POLICY,
+    )
     # da#300: record the per-source clean-rate (cleaner-kept vs cleaner-dropped).
     # Only when at least one candidate span was actually considered — a source that
     # reached the cleaner with nothing to clean has no clean-rate to report, and a
     # 0/0 entry would both read as a misleading 0% and break the "no candidate spans
     # anywhere => no output" contract (test_hadith_with_no_isnad).
-    if clean_stats is not None and (len(rows) + dropped) > 0:
-        clean_stats[corpus] = _CleanRate(kept=len(rows), dropped=dropped)
+    #
+    # da#298: a Latin-fallback drop is a cleaner-KEPT span the policy removes AFTER
+    # the cleaner, so it counts toward `kept` here — the clean-rate stays a pure
+    # cleaner metric (cleaner-kept vs cleaner-dropped), unaffected by the drop policy.
+    if clean_stats is not None and (len(rows) + dropped + dropped_latin) > 0:
+        clean_stats[corpus] = _CleanRate(kept=len(rows) + dropped_latin, dropped=dropped)
     return rows
 
 
