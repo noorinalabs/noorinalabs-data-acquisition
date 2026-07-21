@@ -12,6 +12,7 @@ from src.parse.narrator_extraction import IsnadSegmentationError, extract_narrat
 from src.parse.schemas import NARRATOR_MENTION_SCHEMA
 from src.resolve.ner import (
     UnroutedCorpusError,
+    _CleanRate,
     _extract_from_hadiths,
     _load_phase1_mentions,
     run,
@@ -394,6 +395,115 @@ class TestOutputSchema:
 
         paths = run(staging, output)
         assert paths == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: per-source NER clean-rate metric (da#300)
+# ---------------------------------------------------------------------------
+class TestCleanRateDataclass:
+    """da#300 — the _CleanRate accumulator: kept / dropped / considered / rate."""
+
+    def test_rate_and_considered(self) -> None:
+        cr = _CleanRate(kept=84, dropped=16)
+        assert cr.considered == 100
+        assert cr.clean_rate == pytest.approx(0.84)
+
+    def test_all_kept_is_one(self) -> None:
+        assert _CleanRate(kept=5, dropped=0).clean_rate == pytest.approx(1.0)
+
+    def test_all_dropped_is_zero(self) -> None:
+        assert _CleanRate(kept=0, dropped=5).clean_rate == pytest.approx(0.0)
+
+    def test_nothing_considered_is_zero_not_division_error(self) -> None:
+        cr = _CleanRate()
+        assert cr.considered == 0
+        assert cr.clean_rate == 0.0
+
+
+class TestCleanRateMetric:
+    """da#300 — the per-source clean-rate is recorded and persisted, never gated."""
+
+    # An isnad that segments into one real name (kept) + one Prophet reference the
+    # cleaner drops (dropped) → clean_rate 0.5 for that source.
+    _MIXED_ISNAD = "حدثنا محمد بن يعقوب عن النبي صلى الله عليه وسلم"
+
+    def _thaqalayn_hadith(self, source_id: str, isnad: str) -> dict:
+        return {
+            "source_id": source_id,
+            "source_corpus": "thaqalayn",
+            "collection_name": "al-kafi",
+            "isnad_raw_ar": isnad,
+            "isnad_raw_en": None,
+            "full_text_ar": None,
+            "full_text_en": None,
+            "matn_ar": "text",
+            "matn_en": None,
+            "grade": None,
+            "sect": "shia",
+            "book_number": 1,
+            "chapter_number": 1,
+            "hadith_number": 1,
+            "chapter_name_ar": None,
+            "chapter_name_en": None,
+        }
+
+    def test_extractor_records_kept_and_dropped(self, tmp_path: Path) -> None:
+        write_hadiths(
+            tmp_path / "hadiths_thaqalayn.parquet",
+            [self._thaqalayn_hadith("th-cr", self._MIXED_ISNAD)],
+        )
+        clean_stats: dict[str, _CleanRate] = {}
+        rows = _extract_from_hadiths(tmp_path, "thaqalayn", "ar", clean_stats=clean_stats)
+
+        assert len(rows) == 1  # only محمد بن يعقوب survived
+        cr = clean_stats["thaqalayn"]
+        assert (cr.kept, cr.dropped, cr.considered) == (1, 1, 2)
+        assert cr.clean_rate == pytest.approx(0.5)
+
+    def test_all_null_isnad_source_not_recorded(self, tmp_path: Path) -> None:
+        """A source that considered zero spans (all null isnad) has no clean-rate —
+        it must NOT create a misleading 0/0 entry (guards the no-output contract)."""
+        write_hadiths(
+            tmp_path / "hadiths_thaqalayn.parquet",
+            [self._thaqalayn_hadith("th-null", None)],
+        )
+        clean_stats: dict[str, _CleanRate] = {}
+        rows = _extract_from_hadiths(tmp_path, "thaqalayn", "ar", clean_stats=clean_stats)
+        assert rows == []
+        assert clean_stats == {}
+
+    def test_omitting_clean_stats_leaves_behaviour_unchanged(self, tmp_path: Path) -> None:
+        """The accumulator is opt-in — the legacy call signature still works."""
+        write_hadiths(
+            tmp_path / "hadiths_thaqalayn.parquet",
+            [self._thaqalayn_hadith("th-cr2", self._MIXED_ISNAD)],
+        )
+        rows = _extract_from_hadiths(tmp_path, "thaqalayn", "ar")
+        assert len(rows) == 1
+
+    def test_run_writes_clean_rate_csv(self, tmp_path: Path) -> None:
+        import csv
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        output = tmp_path / "output"
+        output.mkdir()
+        write_hadiths(
+            staging / "hadiths_thaqalayn.parquet",
+            [self._thaqalayn_hadith("th-cr3", self._MIXED_ISNAD)],
+        )
+
+        paths = run(staging, output)
+
+        csv_path = output / "ner_clean_rate.csv"
+        assert csv_path.exists()
+        assert csv_path in paths
+        with open(csv_path, encoding="utf-8") as f:
+            by_source = {row["source_corpus"]: row for row in csv.DictReader(f)}
+        assert by_source["thaqalayn"]["kept"] == "1"
+        assert by_source["thaqalayn"]["dropped"] == "1"
+        assert by_source["thaqalayn"]["considered"] == "2"
+        assert float(by_source["thaqalayn"]["clean_rate"]) == pytest.approx(0.5)
 
 
 # ---------------------------------------------------------------------------

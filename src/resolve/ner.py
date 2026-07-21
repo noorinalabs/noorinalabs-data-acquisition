@@ -14,6 +14,7 @@ from __future__ import annotations
 import csv
 import random
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 import pyarrow as pa
@@ -31,6 +32,41 @@ from src.utils.logging import get_logger
 logger = get_logger(__name__)
 
 __all__ = ["EXIT_UNROUTED_CORPUS", "UnroutedCorpusError", "run"]
+
+
+@dataclass
+class _CleanRate:
+    """Per-source name-quality clean-rate — cleaner-kept vs cleaner-dropped (da#300).
+
+    Tracks ONLY the :func:`clean_narrator_name` backstop outcome: of the candidate
+    name spans that actually *reached* the cleaner, how many survived (``kept``) vs
+    were dropped as non-name pollution (``dropped``). Extraction-stage skips (a null
+    isnad column, an unsegmentable chain) are deliberately NOT counted — they never
+    reach the cleaner, so folding them in would conflate a routing/segmentation gap
+    with the matn-boundary leak this rate exists to make observable run-over-run
+    (da#258 residual on the fawaz Arabic path, da#300). This is a **metric only** —
+    NOT a gate: da#300 explicitly defers a per-source clean-rate threshold to
+    conditional future work. Mutable by design: an accumulator the extractors fill.
+    """
+
+    kept: int = 0
+    dropped: int = 0
+
+    @property
+    def considered(self) -> int:
+        """Candidate spans that reached the cleaner (``kept + dropped``)."""
+        return self.kept + self.dropped
+
+    @property
+    def clean_rate(self) -> float:
+        """Fraction of considered spans the cleaner KEPT, in ``[0.0, 1.0]``.
+
+        ``0.0`` when nothing was considered — a source that produced no candidate
+        spans has no clean-rate to report, and 0/0 is reported as 0.0 (never a
+        ``ZeroDivisionError``).
+        """
+        return self.kept / self.considered if self.considered else 0.0
+
 
 # Sources that already have Phase 1 narrator_mentions Parquet files.
 _PHASE1_MENTION_SOURCES: dict[str, str] = {
@@ -171,6 +207,7 @@ def _load_phase1_mentions(
     filename: str,
     *,
     required: bool = False,
+    clean_stats: dict[str, _CleanRate] | None = None,
 ) -> list[dict[str, str | int | None]]:
     """Load pre-extracted Phase 1 narrator mentions and map to resolved schema.
 
@@ -246,6 +283,13 @@ def _load_phase1_mentions(
         )
 
     logger.info("phase1_mentions_loaded", corpus=corpus, mentions=len(rows), dropped=dropped)
+    # da#300: record the per-source clean-rate (cleaner-kept vs cleaner-dropped).
+    # Only when at least one candidate span was actually considered — a source that
+    # reached the cleaner with nothing to clean has no clean-rate to report, and a
+    # 0/0 entry would both read as a misleading 0% and break the "no candidate spans
+    # anywhere => no output" contract (test_hadith_with_no_isnad).
+    if clean_stats is not None and (len(rows) + dropped) > 0:
+        clean_stats[corpus] = _CleanRate(kept=len(rows), dropped=dropped)
     return rows
 
 
@@ -255,6 +299,7 @@ def _extract_from_hadiths(
     language: str,
     *,
     required: bool = False,
+    clean_stats: dict[str, _CleanRate] | None = None,
 ) -> list[dict[str, str | int | None]]:
     """Extract narrator mentions from hadith Parquet files for a given corpus.
 
@@ -372,6 +417,14 @@ def _extract_from_hadiths(
         mentions_extracted=len(rows),
         mentions_per_hadith=round(len(rows) / max(total_hadiths, 1), 2),
     )
+    # da#300: record the per-source clean-rate. `considered` is the spans that
+    # reached the cleaner (kept + dropped_names) — the null-isnad and unsegmentable
+    # skips above never reach it and are excluded on purpose (they are a routing /
+    # segmentation signal, not the matn-boundary leak this rate tracks). Recorded
+    # only when a span was actually considered, so an all-null-isnad corpus (0
+    # considered) does not emit a misleading 0/0 row (test_hadith_with_no_isnad).
+    if clean_stats is not None and (len(rows) + dropped_names) > 0:
+        clean_stats[corpus] = _CleanRate(kept=len(rows), dropped=dropped_names)
     return rows
 
 
@@ -398,6 +451,27 @@ def _write_name_audit_csv(
 
     logger.info("name_audit_written", path=str(audit_path), rows=len(sample))
     return audit_path
+
+
+def _write_clean_rate_csv(clean_stats: dict[str, _CleanRate], output_dir: Path) -> Path:
+    """Persist the per-source name-quality clean-rate table (da#300).
+
+    One row per source: ``kept`` / ``dropped`` / ``considered`` / ``clean_rate``
+    (fraction of candidate spans the cleaner kept). Written every run so a source's
+    rate is observable **run-over-run** (the ask in da#300) — e.g. fawaz's da#258
+    matn-boundary-leak residual on the Arabic path. This is a metric artifact only;
+    it drives no gate (a per-source threshold is deferred to conditional future work).
+    """
+    path = output_dir / "ner_clean_rate.csv"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["source_corpus", "kept", "dropped", "considered", "clean_rate"])
+        for src in sorted(clean_stats):
+            cr = clean_stats[src]
+            writer.writerow([src, cr.kept, cr.dropped, cr.considered, round(cr.clean_rate, 4)])
+    logger.info("ner_clean_rate_written", path=str(path), sources=len(clean_stats))
+    return path
 
 
 def run(staging_dir: Path, output_dir: Path) -> list[Path]:
@@ -429,6 +503,9 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
         raise UnroutedCorpusError(unrouted, _ROUTED_CORPORA)
 
     all_rows: list[dict[str, str | int | None]] = []
+    # da#300: per-source name-quality clean-rate accumulator. Each extractor records
+    # its (kept, dropped) into this so Step 6 can emit + persist the rate per source.
+    clean_stats: dict[str, _CleanRate] = {}
 
     # da#361: a configured source is *required* only when it is actually staged.
     # ``run`` loops over every configured source, but resolving a partial staging
@@ -439,17 +516,23 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
 
     # Step 1: Load Phase 1 pre-extracted mentions (sanadset, lk).
     for corpus, filename in _PHASE1_MENTION_SOURCES.items():
-        rows = _load_phase1_mentions(staging_dir, corpus, filename, required=corpus in staged)
+        rows = _load_phase1_mentions(
+            staging_dir, corpus, filename, required=corpus in staged, clean_stats=clean_stats
+        )
         all_rows.extend(rows)
 
     # Step 2: Extract from Arabic-text sources.
     for corpus in sorted(_ARABIC_SOURCES):
-        rows = _extract_from_hadiths(staging_dir, corpus, language="ar", required=corpus in staged)
+        rows = _extract_from_hadiths(
+            staging_dir, corpus, language="ar", required=corpus in staged, clean_stats=clean_stats
+        )
         all_rows.extend(rows)
 
     # Step 3: Extract from English-only sources.
     for corpus in sorted(_ENGLISH_SOURCES):
-        rows = _extract_from_hadiths(staging_dir, corpus, language="en", required=corpus in staged)
+        rows = _extract_from_hadiths(
+            staging_dir, corpus, language="en", required=corpus in staged, clean_stats=clean_stats
+        )
         all_rows.extend(rows)
 
     # Step 4: Log deferred sources -- isnad-in-matn corpora explicitly held until
@@ -475,6 +558,20 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
     for src, count in sorted(source_counts.items()):
         logger.info("ner_source_summary", source_corpus=src, total_mentions=count)
     logger.info("ner_total_mentions", total=len(all_rows))
+
+    # da#300: per-source name-quality clean-rate (cleaner-kept vs cleaner-dropped).
+    # Emitted per source so fawaz's da#258 matn-boundary-leak residual is observable
+    # run-over-run. Metric only — no gate (a per-source threshold is deferred).
+    for src in sorted(clean_stats):
+        cr = clean_stats[src]
+        logger.info(
+            "ner_clean_rate",
+            source_corpus=src,
+            kept=cr.kept,
+            dropped=cr.dropped,
+            considered=cr.considered,
+            clean_rate=round(cr.clean_rate, 4),
+        )
 
     # Step 7: Build output table.
     output_paths: list[Path] = []
@@ -509,6 +606,13 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
     if all_rows:
         audit_path = _write_name_audit_csv(all_rows, output_dir)
         output_paths.append(audit_path)
+
+    # Step 9: Per-source clean-rate CSV (da#300). Written whenever any source was
+    # actually processed (staged + reached the cleaner), independent of all_rows —
+    # a source that dropped every candidate span (kept=0, dropped>0) still has a
+    # clean-rate worth persisting.
+    if clean_stats:
+        output_paths.append(_write_clean_rate_csv(clean_stats, output_dir))
 
     logger.info("ner_run_complete", output_files=[str(p) for p in output_paths])
     return output_paths
