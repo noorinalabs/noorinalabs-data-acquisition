@@ -74,6 +74,46 @@ _PHASE1_MENTION_SOURCES: dict[str, str] = {
     "lk": "narrator_mentions_lk.parquet",
 }
 
+# Cross-script Latin-fallback policy for Phase-1 mentions (da#298).
+#
+# A Phase-1 mention with an empty ``name_ar`` but a populated Latin ``name_en``
+# falls back to the Latin name (``name_ar or name_en``); ``normalize_arabic``
+# leaves it Latin, so ``make_canonical_id`` mints a Latin-keyed canonical node
+# that never merges with the same narrator from the Arabic corpora (cross-script
+# under-merge — the class fixed for fawaz in da#286 by extracting Arabic instead).
+#
+# The dominant population is lk: its parser (``lk_corpus.run``) extracts mentions
+# from BOTH the Arabic isnad (Arabic names, chain 0) AND the parallel English-
+# translation isnad (Latin names, chain 1) of the same hadith. The 41,998 Latin
+# mentions (18.3% of lk) are therefore romanized DUPLICATES of narrators already
+# captured in Arabic on the parallel chain — investigation (da#298): 100% of the
+# 33,469 hadiths with an English-isnad mention also carry an Arabic-isnad mention,
+# yet the two chains have DIFFERENT lengths in 99.5% of hadiths (English is
+# systematically shorter, da#282), so a per-mention Arabic name CANNOT be recovered
+# by positional alignment and there is no structured Arabic name column upstream.
+# Recovering Arabic would require cross-lingual NER alignment / transliteration —
+# the lossy path the fawaz note above rejects.
+#
+# Policy values:
+#   "drop" (default — OWNER-DECIDED da#298) — skip Latin-only cross-script fallbacks
+#     (a mention with empty name_ar whose fallback name carries no Arabic script).
+#     Trades ~42k mostly-duplicative Latin edges for the removal of the forked Latin
+#     canonical nodes. Every dropped mention is written to `lk_latin_dropped_mentions.csv`
+#     (see `_write_latin_dropped_csv`) so the removal is inspectable/reversible.
+#   "keep" — the pre-da#298 behaviour: keep the Latin fallback mention, NO data loss,
+#     the forked Latin nodes persist. A "keep" run drops nothing and writes no audit
+#     CSV. Retained as the escape hatch / for equivalence testing.
+_LATIN_FALLBACK_POLICY: str = "drop"
+
+# Corpora the drop policy applies to (da#298). Scoped to lk ON PURPOSE: the da#298
+# investigation established that lk's Latin-only mentions are romanized DUPLICATES of
+# its parallel Arabic isnad (so dropping them loses little), but that duplication
+# property was NOT investigated for the other Phase-1 source (sanadset) — a Latin-only
+# mention there could be the sole record of a narrator, where a drop would be pure
+# loss. Widening this set is a per-corpus decision that needs its own investigation +
+# owner sign-off; the audit CSV is likewise lk-named.
+_LATIN_FALLBACK_CORPORA: frozenset[str] = frozenset({"lk"})
+
 # Sources with Arabic isnads needing rule-based extraction.
 #
 # fawaz (da#271): extracted from its Arabic full text, NOT its English translation.
@@ -208,6 +248,7 @@ def _load_phase1_mentions(
     *,
     required: bool = False,
     clean_stats: dict[str, _CleanRate] | None = None,
+    latin_dropped: list[dict[str, str | None]] | None = None,
 ) -> list[dict[str, str | int | None]]:
     """Load pre-extracted Phase 1 narrator mentions and map to resolved schema.
 
@@ -240,6 +281,7 @@ def _load_phase1_mentions(
     table = pq.read_table(path)
     rows: list[dict[str, str | int | None]] = []
     dropped = 0
+    dropped_latin = 0  # cross-script Latin fallbacks skipped under the da#298 policy
 
     # Chain identity (da#282): sanadset/lk emit ``chain_index`` on their mention
     # rows; carry it through so the loader groups per-chain, not per-hadith. Read
@@ -266,6 +308,31 @@ def _load_phase1_mentions(
         name_normalized = cleaned
         name_raw = strip_markup(name_raw) or name_raw
 
+        # Cross-script Latin-fallback policy (da#298, owner-decided DROP). A mention
+        # with no Arabic name whose cleaned fallback carries no Arabic script is a
+        # Latin-keyed node that forks from its Arabic identity. Under "drop" (default)
+        # it is skipped and recorded in the audit accumulator so the removal is
+        # inspectable/reversible; "keep" preserves the pre-da#298 behaviour (no data
+        # loss). Scoped to _LATIN_FALLBACK_CORPORA (lk) — other sources' Latin-only
+        # mentions are left untouched pending their own investigation. See
+        # _LATIN_FALLBACK_POLICY.
+        if (
+            _LATIN_FALLBACK_POLICY == "drop"
+            and corpus in _LATIN_FALLBACK_CORPORA
+            and not name_ar
+            and not is_arabic(name_normalized)
+        ):
+            dropped_latin += 1
+            if latin_dropped is not None:
+                latin_dropped.append(
+                    {
+                        "mention_id": safe_str(table.column("mention_id")[i].as_py()),
+                        "name_en": name_en,
+                        "source_hadith_id": safe_str(table.column("source_hadith_id")[i].as_py()),
+                    }
+                )
+            continue
+
         chain_index = table.column("chain_index")[i].as_py() if has_chain_index else 0
         rows.append(
             {
@@ -282,14 +349,25 @@ def _load_phase1_mentions(
             }
         )
 
-    logger.info("phase1_mentions_loaded", corpus=corpus, mentions=len(rows), dropped=dropped)
+    logger.info(
+        "phase1_mentions_loaded",
+        corpus=corpus,
+        mentions=len(rows),
+        dropped=dropped,
+        dropped_latin_fallback=dropped_latin,
+        latin_fallback_policy=_LATIN_FALLBACK_POLICY,
+    )
     # da#300: record the per-source clean-rate (cleaner-kept vs cleaner-dropped).
     # Only when at least one candidate span was actually considered — a source that
     # reached the cleaner with nothing to clean has no clean-rate to report, and a
     # 0/0 entry would both read as a misleading 0% and break the "no candidate spans
     # anywhere => no output" contract (test_hadith_with_no_isnad).
-    if clean_stats is not None and (len(rows) + dropped) > 0:
-        clean_stats[corpus] = _CleanRate(kept=len(rows), dropped=dropped)
+    #
+    # da#298: a Latin-fallback drop is a cleaner-KEPT span the policy removes AFTER
+    # the cleaner, so it counts toward `kept` here — the clean-rate stays a pure
+    # cleaner metric (cleaner-kept vs cleaner-dropped), unaffected by the drop policy.
+    if clean_stats is not None and (len(rows) + dropped + dropped_latin) > 0:
+        clean_stats[corpus] = _CleanRate(kept=len(rows) + dropped_latin, dropped=dropped)
     return rows
 
 
@@ -474,6 +552,28 @@ def _write_clean_rate_csv(clean_stats: dict[str, _CleanRate], output_dir: Path) 
     return path
 
 
+def _write_latin_dropped_csv(latin_dropped: list[dict[str, str | None]], output_dir: Path) -> Path:
+    """Persist the audit of Latin-only Phase-1 mentions dropped by the policy (da#298).
+
+    One row per dropped mention: ``mention_id`` (the SOURCE parquet id, e.g.
+    ``lk:bukhari:1:0:en:3`` — stable and locatable, not the run-minted uuid),
+    ``name_en`` (the Latin name that was shed), and ``source_hadith_id`` (the parent
+    hadith). Written only when the drop policy actually shed at least one mention, so
+    a ``keep`` run — which drops nothing — writes no file. The removal is
+    owner-visible, so this artifact makes it inspectable and reversible before it is
+    committed to the graph.
+    """
+    path = output_dir / "lk_latin_dropped_mentions.csv"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["mention_id", "name_en", "source_hadith_id"])
+        for row in latin_dropped:
+            writer.writerow([row["mention_id"], row["name_en"], row["source_hadith_id"]])
+    logger.info("lk_latin_dropped_written", path=str(path), mentions=len(latin_dropped))
+    return path
+
+
 def run(staging_dir: Path, output_dir: Path) -> list[Path]:
     """Extract narrator mentions from parsed isnad chains.
 
@@ -506,6 +606,9 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
     # da#300: per-source name-quality clean-rate accumulator. Each extractor records
     # its (kept, dropped) into this so Step 6 can emit + persist the rate per source.
     clean_stats: dict[str, _CleanRate] = {}
+    # da#298: audit of Latin-only Phase-1 mentions the drop policy sheds. Filled only
+    # under _LATIN_FALLBACK_POLICY == "drop"; a "keep" run leaves it empty (no CSV).
+    latin_dropped: list[dict[str, str | None]] = []
 
     # da#361: a configured source is *required* only when it is actually staged.
     # ``run`` loops over every configured source, but resolving a partial staging
@@ -517,7 +620,12 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
     # Step 1: Load Phase 1 pre-extracted mentions (sanadset, lk).
     for corpus, filename in _PHASE1_MENTION_SOURCES.items():
         rows = _load_phase1_mentions(
-            staging_dir, corpus, filename, required=corpus in staged, clean_stats=clean_stats
+            staging_dir,
+            corpus,
+            filename,
+            required=corpus in staged,
+            clean_stats=clean_stats,
+            latin_dropped=latin_dropped,
         )
         all_rows.extend(rows)
 
@@ -613,6 +721,12 @@ def run(staging_dir: Path, output_dir: Path) -> list[Path]:
     # clean-rate worth persisting.
     if clean_stats:
         output_paths.append(_write_clean_rate_csv(clean_stats, output_dir))
+
+    # Step 10: Latin-dropped audit CSV (da#298). Written only when the drop policy
+    # actually shed a Latin-only mention — a "keep" run leaves `latin_dropped` empty
+    # and writes nothing. Makes the ~42k owner-visible removals inspectable/reversible.
+    if latin_dropped:
+        output_paths.append(_write_latin_dropped_csv(latin_dropped, output_dir))
 
     logger.info("ner_run_complete", output_files=[str(p) for p in output_paths])
     return output_paths
