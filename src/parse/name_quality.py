@@ -141,6 +141,31 @@ Sunni/Tirmidhī matn shapes and missed the dominant Shia dialogue-hadith form
     leaving it title-polluted (it was never dropped, since ``الشيخ`` with the
     definite article never matched the bare ``شيخ`` in :data:`_MUBHAM_LEADERS`).
 
+Truncate-and-re-gate recovery (da#424) — the remedy for the da#314 residual. The
+matn-sentence gate (class 9) has two failure modes on a ``<real name> + <matn/bio
+tail>`` span whose tail carries no :data:`_ISNAD_BOUNDARY` verb (so class 5's
+truncation never fires): it either DROPS the whole span — deleting the real leading
+narrator — or KEEPS it whole, matn and all. #423's provenance rule was deliberately
+scoped all-residue precisely so it could never do the former to a rijal biography,
+which left the residual for here.
+
+14. **Leading-name recovery** — when a span leads with a real nasab/kunya name and
+    the remainder is matn or provenance, :func:`_recover_leading_name` cuts at the
+    name/matn boundary (:func:`_leading_name_before_matn`) and re-gates the head
+    through :func:`clean_narrator_name`, recovering it: ``"ابو هريره فذهب رسول الله
+    وانتم تنتثلونها"`` → ``"ابو هريره"``; ``"ابن عباس …"`` / ``"ابو القاسم …"`` leading
+    a matn quote are recovered rather than dropped whole. It is a pure RECOVERY —
+    it only ever replaces a *drop* or a *matn-polluted whole span* with a cleaner
+    leading name, and NEVER turns a surviving name into a drop (no-worse-than-main).
+    The recovered head MUST carry a :data:`_NASAB_CONNECTORS` token, which is what
+    keeps a bare matn head (``"دعوني"``, ``"سريه تغزو …"`` — no nasab) from being
+    resurrected as a narrator; and the ``ف``-narrative boundary (``فذهب`` "so he
+    went") fires only when a matn signal follows it, so a real ``ف``-initial ism
+    (``فراس``) with no matn after it is never cut. It does NOT loosen #423's
+    all-residue provenance scoping — a substantive-but-matn span like ``"كمن زار
+    رسول الله"`` (verb ``زار``) has no nasab lead, so it is left KEPT, exactly as
+    #423 requires.
+
 The phrase constants are in **normalized-Arabic** form (post
 ``normalize_arabic``) because this runs on ``name_normalized``.
 """
@@ -1501,6 +1526,186 @@ def _is_matn_sentence(tokens: list[str], kept_text: str, was_truncated: bool) ->
     return density >= 2 or (has_matn_punct and density >= 1)
 
 
+def _is_name_matn_signal(token: str) -> bool:
+    """True when *token* ends the name and begins matn/provenance (da#424).
+
+    The non-positional half of the name/matn boundary test: the partitive ``من``,
+    an "asked" verb, a matn particle (``على``/``في``/``هذا``/``انتم`` …), a
+    matn-density verb (``كان``/``قال`` …), a matn opener (``قلت``/``نهى`` …, a
+    single ``و``/``ف`` proclitic folded), or a mubham collective (``رجل``/``بعض`` —
+    "a man / some of …", the head of a bio descriptor). Prophet references
+    (``رسول الله``/``النبي``) are handled POSITIONALLY by the caller via
+    :func:`_prophet_ref_len`, because ``رسول``/``نبي`` are only a reference when
+    ``الله`` follows. The bare divine name ``الله`` is deliberately NOT a signal
+    here — it is the second half of a theophoric ism (``عبد الله``) far more often
+    than a matn token, and the provenance forms that carry it (``من رسول الله``)
+    are already cut at ``من`` / ``رسول``.
+    """
+    if _is_partitive(token) or _is_ask_verb(token) or _is_matn_particle(token):
+        return True
+    if token in _MATN_DENSITY or token in _MUBHAM_LEADERS:
+        return True
+    folded = token[1:] if token[:1] in ("و", "ف") and len(token) > 1 else token
+    return token in _MATN_OPENERS or folded in _MATN_OPENERS
+
+
+def _is_fa_narrative(token: str) -> bool:
+    """True when *token* is a ``ف``-proclitic narrative-continuation verb (da#424).
+
+    The ``ف`` ("so / then") narrative proclitic on a ≥3-letter verb stem opens a
+    matn clause (``فذهب`` "so he went", ``فقام`` "so he stood"). Shape-only and
+    deliberately NOT self-sufficient: a ``ف``-initial ism (``فراس``, ``فيروز``,
+    ``فديك``) has the same shape, so :func:`_is_fa_narrative_boundary` adds the two
+    locality guards that tell a verb from an ism (preceding kunya / nasab connector,
+    and LOCAL matn corroboration). A ``ف``-proclitic on a *particle* (``فلو``,
+    ``فما``) is excluded here — it is already a :func:`_is_matn_particle` signal —
+    and a ``ف``-stem that is itself a nasab connector is excluded so nothing name-
+    bearing is mistaken for a verb.
+    """
+    if len(token) < 4 or token[0] != "ف":
+        return False
+    stem = token[1:]
+    if _is_matn_particle(token) or stem in _NASAB_CONNECTORS:
+        return False
+    return True
+
+
+def _is_matn_verb(token: str) -> bool:
+    """True when *token* is a matn VERB signal surviving to step 10 (da#424).
+
+    A matn opener (``قلت``/``نهى``/``صلى``/``روى`` …, a single ``و``/``ف`` proclitic
+    folded) or an "asked" verb. The :data:`_ISNAD_BOUNDARY` verbs (``قال``/``كان``/
+    ``حدثنا`` …) are already cut at step 3c, so the residual verb signals at this
+    point are the openers + ask-verbs. This is the ONLY boundary class the
+    KEPT-WHOLE recovery path truncates on — never a bare Prophet reference, particle
+    or mubham noun — so a rijal biography that mentions the Prophet nominally
+    (``خليفه رسول الله`` "Successor of the Messenger of Allah", ``شهد النبي في حجة
+    الوداع`` "witnessed the Prophet at the Farewell Pilgrimage") is left whole, not
+    lopped. A genuine matn NARRATIVE (``فذهب رسول الله …`` "so he went …") is caught
+    via the ``ف``-narrative rule that the caller ORs in.
+    """
+    if _is_ask_verb(token):
+        return True
+    folded = token[1:] if token[:1] in ("و", "ف") and len(token) > 1 else token
+    return token in _MATN_OPENERS or folded in _MATN_OPENERS
+
+
+def _fa_narrative_corroborated(rest: list[str]) -> bool:
+    """True when a NARRATION signal LOCALLY corroborates a ``ف``-narrative verb (da#424).
+
+    *rest* is the token slice immediately AFTER a candidate ``ف``-token. Two guards:
+
+    * **Locality** — the corroborating signal must appear BEFORE any intervening
+      nasab connector. A ``ف``-initial ism inside a lineage (``… بن فراس بن مالك …``)
+      is followed by ``بن``, which stops the scan and refuses corroboration, so the
+      ism is not mistaken for a verb. (Oyunbileg, PR #474 review — replaced an
+      ``any()`` over the WHOLE remainder that severed such names into ``X بن``.)
+    * **Narration-only evidence** — the signal must be a genuine narration marker: a
+      Prophet reference, an "asked" verb, a matn opener, or a matn-density discourse
+      word (:func:`_is_matn_verb` + :data:`_MATN_DENSITY`). A bare PREPOSITION is
+      NOT accepted (Nikolaos, PR #474 review): ``في``/``على``/``الى`` attach to a
+      noun as readily as a verb, so a plain ``ف``-initial NISBA / ethnonym
+      (``فارسي``, ``فلسطيني``, ``فرغاني``) followed by ``… في المدينه`` was read as a
+      narrative verb and clipped — dropping the very nisba that disambiguates two
+      otherwise-identical nasab leads (``عبد الله بن عمر الفارسي`` vs ``… الفلسطيني``),
+      a wrong-cross-narrator-MERGE hazard. Requiring a narration marker still
+      corroborates the genuine ``فذهب رسول الله`` (via the Prophet reference).
+    """
+    for j, tok in enumerate(rest):
+        if tok in _NASAB_CONNECTORS:
+            return False
+        if _prophet_ref_len(rest, j) > 0 or _is_matn_verb(tok) or tok in _MATN_DENSITY:
+            return True
+    return False
+
+
+def _is_fa_narrative_boundary(tokens: list[str], i: int) -> bool:
+    """True when ``tokens[i]`` is a ``ف``-narrative verb that ENDS the name (da#424).
+
+    Three conditions, all required — the ``ف``-narrative rule's precision guards:
+
+    1. ``tokens[i]`` looks like a ``ف``-proclitic verb (:func:`_is_fa_narrative`).
+    2. It is NOT the ism of an immediately-preceding kunya / nasab connector: a
+       token right after ``ابو``/``ابي``/``ابا``/``بن``/``ابن`` is that name's ism,
+       never a verb (``ابو فراس`` = "Abū Firās", ``بن فراس`` = "ibn Firās"), so a
+       ``ف``-initial ism there must never truncate. (Oyunbileg, PR #474.)
+    3. A matn signal corroborates it LOCALLY (:func:`_fa_narrative_corroborated`) —
+       before any intervening nasab connector.
+    """
+    if not _is_fa_narrative(tokens[i]):
+        return False
+    if i > 0 and tokens[i - 1] in _NASAB_CONNECTORS:
+        return False
+    return _fa_narrative_corroborated(tokens[i + 1 :])
+
+
+def _leading_name_before_matn(tokens: list[str], verb_only: bool) -> list[str]:
+    """The leading run of name tokens, cut at the first matn boundary (da#424).
+
+    Scans left to right and stops at the first matn boundary. A ``ف``-narrative verb
+    (``فذهب`` "so he went") that clears the :func:`_is_fa_narrative_boundary` locality
+    guards always ends the name. The rest of the boundary set depends on *verb_only*:
+
+    * ``verb_only=True`` (the KEPT-WHOLE path — the span would otherwise SURVIVE):
+      stop ONLY at a matn VERB (:func:`_is_matn_verb`). A bare Prophet reference,
+      particle or mubham noun is NOT a boundary here, so a bio apposition
+      (``خليفه رسول الله``, ``شهد النبي …``, ``وفد الى رسول الله``) is left whole.
+      This confines kept-span truncation to genuine narrative matn.
+    * ``verb_only=False`` (the DROP path — the span would otherwise be DELETED):
+      also stop at a Prophet reference (:func:`_prophet_ref_len`) or any
+      :func:`_is_name_matn_signal` token. Recovering here is purely additive — the
+      span was going to be dropped — so it may truncate aggressively.
+
+    Returns the tokens unchanged when no boundary is present. A theophoric ``الله``
+    (``عبد الله``) is never a boundary, so an idafa ism is kept whole; the provenance
+    ``من رسول الله`` is cut at ``من`` (only on the drop path).
+    """
+    for i, tok in enumerate(tokens):
+        if _is_fa_narrative_boundary(tokens, i):
+            return tokens[:i]
+        if verb_only:
+            if _is_matn_verb(tok):
+                return tokens[:i]
+        elif _prophet_ref_len(tokens, i) > 0 or _is_name_matn_signal(tok):
+            return tokens[:i]
+    return tokens
+
+
+def _recover_leading_name(tokens: list[str], verb_only: bool) -> str | None:
+    """Truncate-and-re-gate: recover a real leading name from a matn tail (da#424).
+
+    Cuts *tokens* at the first matn boundary (:func:`_leading_name_before_matn`,
+    passing *verb_only*) and re-gates the head through :func:`clean_narrator_name`.
+    Returns the recovered clean name, or ``None`` when nothing is recoverable.
+
+    Two guards make this safe and additive:
+
+    * The head must carry a :data:`_NASAB_CONNECTORS` token (a kunya/ibn/bint/bn).
+      This is what distinguishes a real leading narrator (``ابو هريره``, ``ابن عباس``)
+      from a bare matn head that merely precedes the first matn word (``دعوني``,
+      ``سريه تغزو``) — the latter has no nasab connector and is NOT resurrected.
+    * A boundary must actually exist (``0 < len(head) < len(tokens)``) — a clean
+      name with no matn tail returns ``None`` and is left untouched by the caller.
+
+    The final :func:`clean_narrator_name` re-gate applies every downstream guard to
+    the recovered head, so a head that is itself mubham / degenerate still drops.
+
+    A grading-COMMENTARY span (``"ابو عيسى هذا حديث حسن صحيح"`` — al-Tirmidhī's own
+    ḥadith verdict, keyed on his kunya) is deliberately NOT recovered: it is the
+    compiler's editorial commentary, not a narration by a distinct narrator, and the
+    compiler has a clean canonical of his own (class 9). Recovering the leading kunya
+    would re-mint a redundant commentary mention, so these are left to drop.
+    """
+    if any(_contains_token_sequence(tokens, formula) for formula in _GRADING_FORMULAE):
+        return None
+    head = _leading_name_before_matn(tokens, verb_only)
+    if not (0 < len(head) < len(tokens)):
+        return None
+    if not any(t in _NASAB_CONNECTORS for t in head):
+        return None
+    return clean_narrator_name(" ".join(head))
+
+
 def split_compound_narrators(name_normalized: str | None) -> list[str]:
     """Split a compound co-narrator join into its member names (da#258 class 6).
 
@@ -1846,7 +2051,29 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
     #     of the RETAINED tokens only, so «…» / ؟ in an isnad/matn tail that step 3c
     #     already truncated off does NOT drop the recovered leading name (#310).
     kept_text = " ".join(raw_tokens[: len(tokens)])
-    if _is_matn_sentence(tokens, kept_text, was_truncated):
+    matn = _is_matn_sentence(tokens, kept_text, was_truncated)
+
+    # 10b. Truncate-and-re-gate leading-name recovery (da#424). A span leading with
+    #     a real nasab/kunya name whose tail is matn or provenance — carrying no
+    #     _ISNAD_BOUNDARY verb, so step 3c never truncated it — is recovered to the
+    #     leading name rather than dropped whole or kept matn-polluted:
+    #     "ابو هريره فذهب رسول الله وانتم تنتثلونها" → "ابو هريره" (kept-whole →
+    #     cleaned); "ابن عباس …" / "ابو القاسم …" leading a matn quote (dropped by
+    #     the gate above → recovered). Purely a RECOVERY: it only replaces a drop or
+    #     a matn-polluted whole span with a cleaner name, never turns a survivor into
+    #     a drop. The recovered head must carry a nasab connector (so a bare matn
+    #     head — "دعوني", "سريه تغزو" — is not resurrected), and it re-gates through
+    #     the full cleaner. It does NOT loosen #423's all-residue provenance scoping:
+    #     a substantive-but-matn residual with no nasab lead ("كمن زار رسول الله") is
+    #     left KEPT, exactly as #423 requires.
+    #     The recovery is aggressive on the DROP path (matn — the span would be
+    #     deleted anyway, so any recovered name is a strict gain) and conservative on
+    #     the KEPT-WHOLE path (verb_only — truncate only at a genuine narrative verb,
+    #     so a bio apposition mentioning the Prophet nominally is left whole).
+    recovered = _recover_leading_name(tokens, verb_only=not matn)
+    if recovered is not None:
+        return recovered
+    if matn:
         return None
 
     # 11. Degenerate-result floor (da#311). A recovery that boils down to a single
