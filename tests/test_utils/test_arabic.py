@@ -7,12 +7,14 @@ import pytest
 from src.utils.arabic import (
     clean_whitespace,
     contains_transmission_marker,
+    extract_arabic_span,
     extract_transmission_phrases,
     is_arabic,
     normalize_alif,
     normalize_arabic,
     normalize_hamza,
     normalize_taa_marbuta,
+    normalize_urdu,
     strip_diacritics,
     strip_format_marks,
     transliterate,
@@ -128,6 +130,80 @@ class TestNormalizeTaaMarbuta:
 
 
 # ---------------------------------------------------------------------------
+# normalize_urdu (da#299)
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeUrdu:
+    """da#299 — Urdu/Persian letterforms fold to their Arabic equivalents."""
+
+    @pytest.mark.parametrize(
+        ("urdu_char", "arabic_char"),
+        [
+            ("ک", "ك"),  # ک KEHEH               -> ك KAF
+            ("ڪ", "ك"),  # ڪ SWASH KAF           -> ك KAF
+            ("ی", "ي"),  # ی FARSI YEH           -> ي YEH
+            ("ے", "ي"),  # ے YEH BARREE          -> ي YEH
+            ("ۓ", "ي"),  # ۓ YEH BARREE W/ HAMZA -> ي YEH
+            ("ہ", "ه"),  # ہ HEH GOAL            -> ه HEH
+            ("ۂ", "ه"),  # ۂ HEH GOAL W/ HAMZA   -> ه HEH
+            ("ۀ", "ه"),  # ۀ HEH W/ YEH ABOVE    -> ه HEH
+            ("ھ", "ه"),  # ھ HEH DOACHASHMEE     -> ه HEH
+            ("ں", "ن"),  # ں NOON GHUNNA         -> ن NOON
+        ],
+    )
+    def test_each_variant_folds(self, urdu_char: str, arabic_char: str) -> None:
+        assert normalize_urdu(urdu_char) == arabic_char
+
+    def test_urdu_name_folds_to_arabic_form(self) -> None:
+        # علیہ (Urdu ی U+06CC + ہ U+06C1) folds to عليه (Arabic yeh + heh).
+        assert normalize_urdu("علیہ") == "عليه"
+
+    def test_all_arabic_is_noop(self) -> None:
+        """The fold only maps Urdu-specific codepoints — real Arabic passes through."""
+        for name in ("عبد الله بن عمر", "محمد", "ابو هريره", "علي"):
+            assert normalize_urdu(name) == name
+
+    def test_arabic_yeh_and_maksura_untouched(self) -> None:
+        # Regular yeh ي (U+064A) and alif-maqsura ى (U+0649) are Arabic, not folded.
+        assert normalize_urdu("علي") == "علي"
+        assert normalize_urdu("صلى") == "صلى"
+
+    def test_empty_string(self) -> None:
+        assert normalize_urdu("") == ""
+
+
+# ---------------------------------------------------------------------------
+# extract_arabic_span (da#299)
+# ---------------------------------------------------------------------------
+
+
+class TestExtractArabicSpan:
+    """da#299 — pull the Arabic name out of a mixed Latin+Arabic bio blob."""
+
+    def test_mixed_blob_keeps_only_arabic_runs(self) -> None:
+        blob = "Prophet Muhammad(saw) ( محمد صلی اللہ علیہ وسلم ( رضي الله عنه"
+        # Latin, parens and ASCII dropped; the two Arabic runs join into one span
+        # (the raw voweled / Urdu-script form is preserved — normalization is
+        # a separate step).
+        assert extract_arabic_span(blob) == "محمد صلی اللہ علیہ وسلم رضي الله عنه"
+
+    def test_no_arabic_returns_input(self) -> None:
+        assert extract_arabic_span("John Smith") == "John Smith"
+
+    def test_pure_arabic_unchanged(self) -> None:
+        assert extract_arabic_span("عبد الله بن عمر") == "عبد الله بن عمر"
+
+    def test_latin_between_runs_does_not_fuse(self) -> None:
+        # A dropped Latin chunk becomes a space, so the Arabic tokens stay distinct
+        # rather than fusing into one word.
+        assert extract_arabic_span("علي X عمر") == "علي عمر"
+
+    def test_empty_string(self) -> None:
+        assert extract_arabic_span("") == ""
+
+
+# ---------------------------------------------------------------------------
 # clean_whitespace
 # ---------------------------------------------------------------------------
 
@@ -178,6 +254,25 @@ class TestNormalizeArabic:
         result = normalize_arabic("Hello أحمد World")
         assert "Hello" in result
         assert "World" in result
+
+    def test_urdu_name_normalizes_to_arabic_twin(self) -> None:
+        """da#299 — an Urdu-script name collapses onto its Arabic-twin normal form."""
+        # محمد بن یعقوب (Urdu ی) vs محمد بن يعقوب (Arabic yeh).
+        assert normalize_arabic("محمد بن یعقوب") == normalize_arabic("محمد بن يعقوب")
+
+    def test_urdu_benediction_folds_to_yeh_form(self) -> None:
+        """da#299 — the Urdu taṣliya folds to the regular-yeh spelling."""
+        assert normalize_arabic("صلی اللہ علیہ وسلم") == "صلي الله عليه وسلم"
+
+    def test_urdu_fold_is_idempotent(self) -> None:
+        text = "محمد بن یعقوب الکلینی"
+        assert normalize_arabic(normalize_arabic(text)) == normalize_arabic(text)
+
+    def test_all_arabic_normal_form_unchanged_by_urdu_step(self) -> None:
+        """da#299 must not perturb an existing all-Arabic normalization result."""
+        # Regression guard: the new fold step is a no-op on Arabic-only input.
+        for name in ("عبد الله بن عمر", "ابو هريره", "سفيان بن عيينه"):
+            assert normalize_arabic(name) == name
 
 
 # ---------------------------------------------------------------------------

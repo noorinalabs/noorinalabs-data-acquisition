@@ -14,10 +14,12 @@ __all__ = [
     "normalize_alif",
     "normalize_hamza",
     "normalize_taa_marbuta",
+    "normalize_urdu",
     "normalize_arabic",
     "clean_whitespace",
     "strip_to_letters",
     "is_arabic",
+    "extract_arabic_span",
     "extract_transmission_phrases",
     "contains_transmission_marker",
     "canonical_surface",
@@ -55,6 +57,45 @@ _FORMAT_MARKS_RE: re.Pattern[str] = re.compile(
 
 # Multiple whitespace
 _MULTI_WS_RE: re.Pattern[str] = re.compile(r"\s+")
+
+# Urdu / Persian letter variants -> their Arabic-script equivalents (da#299). The
+# kaggle rijal bios spell names (and their benediction tails, "salla llahu alayhi
+# wa-sallam") with Urdu keyboard letterforms -- the Urdu yeh U+06CC, keheh
+# U+06A9, heh-goal U+06C1, ... -- which are DISTINCT codepoints from the Arabic
+# letters they render (yeh U+064A, kaf U+0643, heh U+0647). Left un-folded, an
+# Urdu-script name never collapses onto the canonical form of its Arabic twin, so
+# the honorific-strip and canonical-id keying both miss it. This fold is
+# precision-safe by construction: every key is a Urdu/Persian-specific codepoint
+# that does not occur in real Arabic name text, so folding it can only touch
+# Urdu-script input -- an all-Arabic name passes through untouched. Only variants
+# with an unambiguous Arabic target are folded; Urdu/Persian consonants that have
+# NO Arabic counterpart (peh, cheh, jeh, gaf, retroflexes) are deliberately left
+# alone rather than invented a fold for (precision-first).
+_URDU_FOLD_MAP: dict[str, str] = {
+    "ک": "ك",  # KEHEH                 -> KAF
+    "ڪ": "ك",  # SWASH KAF             -> KAF
+    "ی": "ي",  # FARSI YEH             -> YEH
+    "ے": "ي",  # YEH BARREE            -> YEH
+    "ۓ": "ي",  # YEH BARREE WITH HAMZA -> YEH
+    "ہ": "ه",  # HEH GOAL              -> HEH
+    "ۂ": "ه",  # HEH GOAL WITH HAMZA   -> HEH
+    "ۀ": "ه",  # HEH WITH YEH ABOVE    -> HEH
+    "ھ": "ه",  # HEH DOACHASHMEE       -> HEH
+    "ں": "ن",  # NOON GHUNNA           -> NOON
+}
+_URDU_TRANSLATION: dict[int, str] = str.maketrans(_URDU_FOLD_MAP)
+
+# Arabic-script characters (base block U+0600-06FF, supplement U+0750-077F,
+# extended-A U+08A0-08FF, plus the presentation-forms ranges U+FB50-FDFF /
+# U+FE70-FEFF). Used to pull the Arabic name out of a mixed Latin+Arabic bio blob
+# (da#299). Including the presentation-forms ranges keeps a stray ligature (e.g.
+# the tasliya U+FDFA) riding with the span rather than torn out mid-name.
+_ARABIC_SPAN_CLASS: str = r"؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿"
+# A maximal run of characters that are NEITHER Arabic-script NOR whitespace -- a
+# Latin word, an ASCII digit run, a parenthesis, punctuation. Replaced by a space
+# so the Arabic runs on either side of a dropped Latin chunk join into one span
+# rather than fusing across it.
+_NON_ARABIC_RUN_RE: re.Pattern[str] = re.compile(rf"[^{_ARABIC_SPAN_CLASS}\s]+")
 
 # Arabic script block: U+0600–U+06FF
 _ARABIC_CHAR_RE: re.Pattern[str] = re.compile(r"[\u0600-\u06FF]")
@@ -198,6 +239,19 @@ def normalize_taa_marbuta(text: str) -> str:
     return _TAA_MARBUTA_RE.sub("\u0647", text)
 
 
+def normalize_urdu(text: str) -> str:
+    """Fold Urdu/Persian letter variants to their Arabic equivalents (da#299).
+
+    Maps the Urdu-specific letterforms that render the SAME letter as an Arabic
+    codepoint (keheh->kaf, Farsi/barree yeh->yeh, heh-goal/doachashmee->heh,
+    noon-ghunna->noon) onto that Arabic letter (see :data:`_URDU_FOLD_MAP`). Every
+    mapped codepoint is Urdu/Persian-specific and never occurs in real Arabic name
+    text, so this is a no-op on all-Arabic input and only ever touches Urdu-script
+    names -- the property that makes it safe to run inside :func:`normalize_arabic`.
+    """
+    return text.translate(_URDU_TRANSLATION)
+
+
 def clean_whitespace(text: str) -> str:
     """Collapse multiple whitespace characters to a single space and strip edges."""
     return _MULTI_WS_RE.sub(" ", text).strip()
@@ -229,14 +283,22 @@ def normalize_arabic(text: str) -> str:
     Steps:
     1. Strip bidi / zero-width / format control marks
     2. Strip diacritics
-    3. Normalize alif variants
-    4. Normalize hamza variants
-    5. Normalize taa marbuta
-    6. Strip tatweel (kashida)
-    7. Collapse whitespace
+    3. Fold Urdu/Persian letter variants to Arabic (da#299)
+    4. Normalize alif variants
+    5. Normalize hamza variants
+    6. Normalize taa marbuta
+    7. Strip tatweel (kashida)
+    8. Collapse whitespace
+
+    The Urdu fold (step 3) runs BEFORE the alif/hamza/taa steps so a folded
+    letter is then carried through the rest of the pipeline identically to its
+    Arabic twin — e.g. Urdu ``ہ`` -> Arabic ``ه`` is indistinguishable from a
+    sourced ``ه`` downstream. It is a no-op on all-Arabic input (see
+    :func:`normalize_urdu`), so no existing normalization result changes.
     """
     text = strip_format_marks(text)
     text = strip_diacritics(text)
+    text = normalize_urdu(text)
     text = normalize_alif(text)
     text = normalize_hamza(text)
     text = normalize_taa_marbuta(text)
@@ -248,6 +310,29 @@ def normalize_arabic(text: str) -> str:
 def is_arabic(text: str) -> bool:
     """Return True if *text* contains at least one Arabic script character (U+0600–U+06FF)."""
     return bool(_ARABIC_CHAR_RE.search(text))
+
+
+def extract_arabic_span(text: str) -> str:
+    """Pull the Arabic-script name out of a mixed Latin+Arabic blob (da#299).
+
+    kaggle rijal bios store a name as a mixed blob — a Latin gloss, its
+    benediction abbreviation, then the Arabic name and an Arabic benediction tail
+    (``"Prophet Muhammad(saw) ( <arabic name> ( <arabic benediction>"``). Every
+    run of non-Arabic, non-space characters (Latin words, ASCII digits,
+    parentheses, punctuation) is replaced by a space and the whitespace collapsed,
+    so the surviving Arabic runs join into one span. The raw (voweled, still
+    Urdu-script) form is preserved — only :func:`normalize_arabic` folds it — so a
+    caller keeps the source's diacritics for display.
+
+    Returns the input (whitespace-collapsed) unchanged when it carries no Arabic
+    at all, so a pure-Latin name is never blanked. The benediction tail is NOT
+    stripped here (that is the name-quality cleaner's job); this only discards the
+    non-Arabic noise around the Arabic span.
+    """
+    if not text:
+        return text
+    span = clean_whitespace(_NON_ARABIC_RUN_RE.sub(" ", text))
+    return span if span else text.strip()
 
 
 def extract_transmission_phrases(text: str) -> list[tuple[int, int, str]]:

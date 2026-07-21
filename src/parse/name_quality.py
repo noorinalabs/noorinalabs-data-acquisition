@@ -167,6 +167,27 @@ __all__ = [
 # no markup character can survive into a canonical name (da#247 acceptance).
 _MARKUP_RE = re.compile(r"<[^>]*>")
 
+# Latin / English benediction abbreviations (da#299). English-gloss sources store
+# a romanized name carrying a parenthesized benediction — "Prophet Muhammad(saw)",
+# "Abu Hurayra (r.a.)", "Ali (as)". normalize_arabic leaves Latin untouched, so
+# the Arabic honorific phrases never catch these. Matched ONLY when parenthesized
+# or bracketed, so a bare "as"/"ra"/"sa" substring INSIDE a real romanized name is
+# never touched (precision-first). Covers the dotted forms ("s.a.w.", "r.a.").
+_LATIN_BENEDICTION_RE = re.compile(
+    r"[(\[]\s*(?:s\.?a\.?w\.?w?|p\.?b\.?u\.?h|r\.?a\.?a?|r\.?a\.?h|a\.?s|s\.?w\.?t|r\.?t\.?a)\s*\.?\s*[)\]]",
+    re.IGNORECASE,
+)
+
+# Leading Latin honorific TITLE words (da#299) prefixed to a romanized name in the
+# same English-gloss sources — "Prophet Muhammad", "Hazrat Ali", "Sayyidina …".
+# Stripped only when they LEAD the span (a title, not a name component); a name
+# that merely CONTAINS one of these tokens mid-string is untouched. Closed set of
+# unambiguous honorific prefixes — precision-first.
+_LATIN_TITLE_RE = re.compile(
+    r"^\s*(?:prophet|hazrat|hadhrat|sayyidina|sayyiduna|sayyidna|imam)\s+",
+    re.IGNORECASE,
+)
+
 # Editorial connective ("that is / i.e.") — never part of a name.
 _CONNECTIVE_TOKENS = frozenset({"يعني"})
 
@@ -269,6 +290,19 @@ _HONORIFIC_PHRASES: tuple[str, ...] = (
     "رحمه الله",
     "عز وجل",
     "تبارك وتعالى",
+    # Urdu-folded taṣliya (da#299): normalize_arabic now folds the Urdu yeh ی
+    # (U+06CC) to the Arabic yeh ي, so a benediction typed in Urdu script —
+    # "صلی اللہ علیہ وسلم" — normalizes to "صلي الله عليه وسلم" (regular yeh),
+    # NOT the alif-maqsura "صلى …" spelling the Arabic-sourced forms above carry.
+    # Same asymmetry the da#308 رضى/رضي pair already handles: list the yeh spelling
+    # so an Urdu-script name folds to the SAME benediction-stripped canonical form
+    # as its Arabic twin. Longest-first (the strip loop) so the وسلم/واله forms win
+    # before the bare "صلي الله عليه".
+    "صلي الله عليه واله وسلم",
+    "صلي الله عليه وسلم",
+    "صلي الله عليه واله",
+    "صلي الله عليه و اله",
+    "صلي الله عليه",
     # taṣliya LIGATURE (da#311): the single-codepoint ﷺ (U+FDFA, "ARABIC LIGATURE
     # SALLALLAHOU ALAYHE WASALLAM") is the same benediction as the spelled-out
     # "صلى الله عليه وسلم" above but survives normalize_arabic untouched (it is
@@ -1548,6 +1582,17 @@ def _strip_markup_and_honorifics(name_normalized: str) -> str:
     for phrase in _HONORIFIC_TITLE_PHRASES:
         if phrase in text:
             text = text.replace(phrase, " ")
+
+    # 2c. Latin / English benediction + leading-title residue (da#299). A romanized
+    #     name from an English-gloss source carries a parenthesized benediction
+    #     ("Muhammad(saw)") and/or a leading honorific title ("Prophet Muhammad");
+    #     normalize_arabic leaves Latin untouched, so neither is caught by the Arabic
+    #     honorific phrases above. Strip the parenthesized benediction anywhere and
+    #     the honorific title only where it LEADS. (For the kaggle bio path the
+    #     Arabic-span extraction has already dropped all Latin, so this is a no-op
+    #     there; it recovers the name for the other English-gloss sources.)
+    text = _LATIN_BENEDICTION_RE.sub(" ", text)
+    text = _LATIN_TITLE_RE.sub("", text)
     return text
 
 

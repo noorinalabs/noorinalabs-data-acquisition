@@ -84,6 +84,7 @@ from src.parse.schemas import (
 )
 from src.utils.arabic import (
     contains_transmission_marker,
+    extract_arabic_span,
     extract_transmission_phrases,
     is_arabic,
     normalize_arabic,
@@ -973,7 +974,15 @@ def _parse_narrators_bio(narrators_dir: Path) -> pa.Table | None:
                 col: table.column(col)[i].as_py() for col in table.column_names
             }
 
-            name_ar = safe_str(row_dict.get(field_map.get("name_ar", "")))
+            name_ar_raw = safe_str(row_dict.get(field_map.get("name_ar", "")))
+            # kaggle rijāl bios store the name as a mixed Latin + Urdu-script +
+            # Arabic blob ("Prophet Muhammad(saw) ( محمد … ( رضي الله عنه"). Pull
+            # the Arabic span out so the stored name_ar is the Arabic name rather
+            # than the Latin gloss + parenthesised benediction (da#299). A value
+            # with no Arabic at all is returned unchanged, so an English-only bio
+            # row is not blanked; the benediction tail is left for the name-quality
+            # cleaner (bio_promote / ner) to strip, exactly as for the other sources.
+            name_ar = extract_arabic_span(name_ar_raw) if name_ar_raw else name_ar_raw
             ext_id = safe_str(row_dict.get(field_map.get("external_id", "")))
             # The bio_id is a narrator-biography provenance key namespaced by the
             # *bio source* (``kaggle_narrators``), which is NOT a hadith
