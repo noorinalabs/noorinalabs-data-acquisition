@@ -33,6 +33,7 @@ from src.parse.name_quality import (
     clean_narrator_name_display,
     cleaner_removed_content,
     is_mubham_relational,
+    is_recoverable_gloss_tail,
 )
 from src.resolve._inputs import require_input
 from src.resolve._run_record import write_canonical
@@ -244,6 +245,15 @@ def promote_bios_to_canonical(
     skipped_source = 0
     skipped_pollution = 0
     skipped_truncated_merge = 0
+    # da#397/da#398: split the refusal by WHAT the truncation removed. Class A
+    # (gloss-tail) is a complete nasab that lost only a teacher-key isnad tail — the
+    # RECOVERABLE-pending-disambiguation subset; class B (name-cut) is a bare ism/kunya
+    # residue, a dispute/speech cut, or a disputed-identity marker, and refusing it
+    # stays correct. Both are still refused below; the split only QUANTIFIES the
+    # recoverable subset (da#398 scope-1) and is the precondition for a future
+    # disambiguation-gated recovery. See is_recoverable_gloss_tail + da#397 PR#441.
+    skipped_truncated_merge_gloss_tail = 0
+    skipped_truncated_merge_name_cut = 0
     # The ACCEPTED truncated-residue residual (da#385). The guard only refuses a
     # truncated residue that would claim an *attested* node (mention_count > 0);
     # every other truncated residue is accepted — it either lands on a zero-mention
@@ -288,6 +298,12 @@ def promote_bios_to_canonical(
                 skipped_pollution += 1
                 continue
             truncated = cleaner_removed_content(norm, cleaned)
+            # da#397/da#398: classify the truncation as gloss-tail (class A, recoverable
+            # pending biographical homonym disambiguation) vs name-cut (class B, correctly
+            # refused) for the refusal-counter split. Computed on the PRE-clean `norm`
+            # (before it is reassigned to `cleaned` just below). This does NOT change the
+            # merge decision — both classes are still refused at the guard.
+            truncation_is_gloss_tail = truncated and is_recoverable_gloss_tail(norm, cleaned)
             norm = cleaned
 
             bio_id = safe_str(row.get("bio_id"))
@@ -345,6 +361,13 @@ def promote_bios_to_canonical(
             existing = canonical_map.get(cid)
             if truncated and existing is not None and (existing.get("mention_count") or 0) > 0:
                 skipped_truncated_merge += 1
+                # da#397/da#398: split the refusal — the gloss-tail (class A) count is
+                # the recall cost of the deliberate class-2 over-refusal, made a live
+                # per-run metric rather than a one-off script measurement (da#398 scope-1).
+                if truncation_is_gloss_tail:
+                    skipped_truncated_merge_gloss_tail += 1
+                else:
+                    skipped_truncated_merge_name_cut += 1
                 continue
 
             if cid not in canonical_map:
@@ -486,6 +509,26 @@ def promote_bios_to_canonical(
             ),
         )
 
+    # da#397/da#398: surface the gloss-tail refusals — the RECOVERABLE-pending-
+    # disambiguation subset. These are complete nasabs that lost only a teacher-key
+    # isnad tail, refused solely because make_canonical_id cannot rule out a homonym
+    # (45/240 class-A accept-target name-keys carry conflicting jarḥ grades, da#423).
+    # Emitting the count turns da#398's recall cost into a live metric, not a one-off
+    # script. Owner of the eventual recovery = biographical homonym disambiguation
+    # (jarḥ-grade / death-year separation), same bar as da#347b/da#431. The name-cut
+    # count is carried alongside so the split is legible from the log line alone.
+    if skipped_truncated_merge_gloss_tail:
+        logger.info(
+            "bio_promote_gloss_tail_refusals_deferred",
+            gloss_tail=skipped_truncated_merge_gloss_tail,
+            name_cut=skipped_truncated_merge_name_cut,
+            note=(
+                "class-A gloss-tail refusals (complete nasab, teacher-key عن/isnad tail "
+                "removed) — recall cost of the deliberate class-2 over-refusal; recovery "
+                "deferred behind biographical homonym disambiguation (da#397/da#398/da#423)"
+            ),
+        )
+
     logger.info(
         "bio_promote_complete",
         bio_files=len(bio_files),
@@ -496,6 +539,8 @@ def promote_bios_to_canonical(
         skipped_source=skipped_source,
         skipped_pollution=skipped_pollution,
         skipped_truncated_merge=skipped_truncated_merge,
+        skipped_truncated_merge_gloss_tail=skipped_truncated_merge_gloss_tail,
+        skipped_truncated_merge_name_cut=skipped_truncated_merge_name_cut,
         truncated_residue_onto_unattested=truncated_residue_onto_unattested,
         truncated_residue_minted=truncated_residue_minted,
         aliases_added=alias_stats.added,

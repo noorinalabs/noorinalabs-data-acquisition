@@ -156,6 +156,7 @@ __all__ = [
     "clean_narrator_name_display",
     "asserted_name_tokens",
     "cleaner_removed_content",
+    "is_recoverable_gloss_tail",
     "is_mubham_relational",
     "split_compound_narrators",
     "strip_markup",
@@ -1927,6 +1928,105 @@ def cleaner_removed_content(name_normalized: str | None, cleaned: str | None) ->
     if not name_normalized or not cleaned:
         return False
     return tuple(cleaned.split()) != asserted_name_tokens(name_normalized)
+
+
+# --- Gloss-tail vs name-cut discrimination (da#397) -----------------------------
+# Isnad TRANSMISSION connectors that open a "teacher key" — a rijāl compiler's
+# "<narrator> عن <teacher>" / "<narrator> حدثنا <student>" chain fragment appended
+# AFTER a complete name to disambiguate a narrator known through one chain. A removed
+# tail opening on one of these is a GLOSS about how the narrator transmitted, not
+# alternative name material. Deliberately a SUBSET of _ISNAD_BOUNDARY: it holds the
+# transmission verbs + عن and EXCLUDES the dispute/speech openers (قيل / قال / يقال /
+# وقيل — "it is said" / "he said"), which introduce a DISPUTED or alternative identity
+# and must not read as a mere gloss, and the relative-pronoun / temporal boundaries.
+_TEACHER_KEY_OPENERS = frozenset(
+    {
+        "عن",  # "from" — the canonical teacher key
+        "عنه",  # "from him"
+        "حدثنا",
+        "حدثني",
+        "حدث",
+        "حدثت",
+        "حدثاه",
+        "اخبرنا",
+        "اخبرني",
+        "انبانا",
+        "سمعت",
+        "سمع",
+        "روت",  # "she narrated" (روى sibling)
+    }
+)
+
+# Explicit disputed-identity markers (da#397). Even when a removed tail opens on a
+# teacher key AND the residue is a complete nasab, a tail carrying one of these grades
+# the SUBJECT unidentified/disputed — the ``محمد بن شرحبيل … وقيل اسمه عمرو مجهول`` case
+# — so the residue is NOT a safely-discriminating name. Checked against the removed
+# tail only, keeping the graded-مجهول / ``وقيل اسمه`` case conservative (class B /
+# refused). ``يعرف`` catches the ``لا يعرف`` ("not known") tail; the residue itself is
+# never inspected for these (a real name never carries them).
+_DISPUTED_IDENTITY_MARKERS = frozenset({"مجهول", "يعرف", "وقيل", "قيل", "يقال"})
+
+# Patronymic nasab connectors (da#397). A "complete nasab" residue must carry an
+# ``ibn`` link — narrower than :data:`_NASAB_CONNECTORS` (which also spares kunya
+# ``ابو``/``ابي`` and tribal ``بنو``): da#397's discriminating-name test is a
+# lineage ``<ism> بن <father> …``, not a bare kunya.
+_PATRONYMIC_CONNECTORS = frozenset({"بن", "ابن"})
+
+
+def is_recoverable_gloss_tail(name_normalized: str | None, cleaned: str | None) -> bool:
+    """True when a truncation is a class-A *gloss-tail* cut (da#397).
+
+    Discriminates da#397's two categorically different truncations, which
+    :func:`cleaner_removed_content` alone conflates:
+
+    * **Class A — gloss-tail (this returns True):** the removed tail opens on an isnad
+      TRANSMISSION connector (``عن`` / ``حدثنا`` / … — a teacher key, not name
+      material) AND the residue is a *complete nasab* (``>= 3`` tokens carrying a
+      patronymic ``بن``/``ابن``) AND the removed tail carries no disputed-identity
+      marker. The residue IS the discriminating name the source asserted
+      (``اسحاق بن مره عن انس`` → ``اسحاق بن مره``), so it is the
+      RECOVERABLE-pending-disambiguation subset.
+    * **Class B — name-cut (this returns False):** a bare ism/kunya residue
+      (``عبيده``, ``ابو نهشل``), a non-teacher-key cut (``… يقال`` / ``… الذي``), or a
+      tail/span carrying a disputed-identity marker (``مجهول`` / ``وقيل`` — the
+      ``محمد بن شرحبيل … مجهول`` homonym). Refusing these stays correct.
+
+    IMPORTANT — this does NOT decide the merge. Recovering class A onto an attested
+    narrator is NOT provably safe: :func:`~src.parse.identity.make_canonical_id` folds
+    Arabic inflection but NOT homonymy, and a complete nasab can still collide with a
+    homonym — measured, 45 of 240 class-A accept-target name-keys carry conflicting
+    jarḥ grades (one key graded both *thiqa* and *kadhdhab* = provably >1 person; da#397
+    PR#441 / da#423). So :func:`~src.resolve.bio_promote.promote_bios_to_canonical`
+    still REFUSES class A; this predicate only *quantifies* the recoverable subset
+    (splitting the refusal counter, da#398 scope-1) and is the precondition for a
+    future disambiguation-gated recovery. Same coarseness caveat as
+    :func:`cleaner_removed_content`: a token diff cannot answer the homonymy question.
+
+    Returns ``False`` for a non-truncation (nothing was cut) and for class B.
+    """
+    if not cleaned or not cleaner_removed_content(name_normalized, cleaned):
+        return False
+    asserted = asserted_name_tokens(name_normalized)
+    residue = tuple(cleaned.split())
+    # The removed material must be a TRAILING cut — residue is a strict prefix of the
+    # asserted tokens. When it is not (a colon-prose cut, or any unexpected shape) the
+    # removed-tail opener cannot be identified, so classify conservatively as name-cut.
+    if len(residue) >= len(asserted) or asserted[: len(residue)] != residue:
+        return False
+    removed_tail = asserted[len(residue) :]
+    # (a) tail opens on a teacher-key / transmission connector (not a dispute/speech
+    #     opener, not a relative pronoun / temporal boundary).
+    if removed_tail[0] not in _TEACHER_KEY_OPENERS:
+        return False
+    # (b) no disputed-identity marker anywhere in the removed tail — the graded-مجهول /
+    #     ``وقيل اسمه`` case stays conservative (class B).
+    if any(t in _DISPUTED_IDENTITY_MARKERS for t in removed_tail):
+        return False
+    # (c) residue is a COMPLETE nasab: >= 3 tokens carrying a patronymic connector. A
+    #     bare ism/kunya residue may not merge regardless of tail (da#397).
+    if len(residue) < 3:
+        return False
+    return any(t in _PATRONYMIC_CONNECTORS for t in residue)
 
 
 def clean_narrator_name_display(name_ar: str | None) -> str | None:
