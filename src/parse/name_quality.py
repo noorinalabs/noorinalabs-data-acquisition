@@ -1920,6 +1920,13 @@ def cleaner_removed_content(name_normalized: str | None, cleaned: str | None) ->
     is a homonymy question this function cannot answer — it needs biographical
     disambiguation, not a token diff.
 
+    The finer *gloss-tail vs name-cut* split this boolean deliberately withholds is
+    carried by :func:`is_recoverable_gloss_tail` (da#397): it recognises the
+    tail-after-a-complete-name class (a complete nasab that lost only a teacher-key
+    isnad tail) as the recoverable-pending-disambiguation subset. This predicate stays
+    the coarse affix/removal line; that one adds the sub-classification — and neither
+    decides identity, which still needs biographical disambiguation.
+
     Comparing against :func:`asserted_name_tokens` — rather than a re-tokenization of
     the raw input — is what draws the affix/removal line; a re-tokenization sees the
     entry number, the connective and the honorific as "content removed" and refuses a

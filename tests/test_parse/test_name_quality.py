@@ -6,8 +6,10 @@ import pytest
 
 from src.parse.identity import make_canonical_id
 from src.parse.name_quality import (
+    asserted_name_tokens,
     clean_narrator_name,
     clean_narrator_name_display,
+    cleaner_removed_content,
     is_mubham_relational,
     split_compound_narrators,
     strip_markup,
@@ -1570,3 +1572,83 @@ class TestBioPromotedNarratorsSurvive:
     )
     def test_pure_provenance_fragment_still_drops(self, fragment: str) -> None:
         assert clean_narrator_name(normalize_arabic(fragment)) is None
+
+
+class TestCleanerRemovedContentContract:
+    """Pin `cleaner_removed_content`'s docstring CONTRACT (da#398).
+
+    da#398 corrected the docstring headline: a ``True`` means the cleaner "removed
+    more than an affix", NOT that it "cut into the name the source asserted." These
+    tests hold that contract against regression — the boolean is deliberately COARSE
+    and, in particular, returns ``True`` for BOTH a *cut-into-the-name* residue (a bare
+    ism) AND a *tail-after-a-complete-name* residue (a full nasab that lost only an
+    isnad tail). A caller keying identity on the cleaner's output must not read ``True``
+    as "the residue is not the asserted name" — for the tail class, it IS.
+
+    The finer split those two classes need is a SEPARATE predicate
+    (`is_recoverable_gloss_tail`, da#397); this boolean answers only the affix/removal
+    question, and this contract keeps `asserted_name_tokens` from quietly absorbing one
+    of the cleaner's cuts (which would evaporate the refusals it carries against a green
+    suite).
+    """
+
+    # Affix-only normalization → the asserted name is left WHOLE → False.
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "( 4875 ) عبد الله بن موسى",  # bracketed catalog entry number
+            "[ 969 ] احمد بن يوسف الثعلبي",  # square-bracket entry number
+            "مالك يعني بن انس",  # editorial connective يعني
+            "مالك بن انس رضي الله عنه",  # honorific suffix
+        ],
+    )
+    def test_affix_normalization_is_not_removed_content(self, raw: str) -> None:
+        normalized = normalize_arabic(raw)
+        cleaned = clean_narrator_name(normalized)
+        assert cleaned is not None, raw
+        assert not cleaner_removed_content(normalized, cleaned), (
+            f"normalization read as a cut: {raw}"
+        )
+        # The affix/removal line is drawn against the cleaner's OWN pre-truncation
+        # tokens, not a re-tokenization of the raw input.
+        assert tuple(cleaned.split()) == asserted_name_tokens(normalized)
+
+    def test_true_does_not_imply_cut_into_the_name(self) -> None:
+        """The load-bearing da#398 contract: ``True`` covers a cut-into-name AND a tail-cut.
+
+        Both a *cut-into-the-name* (bare-ism residue) and a *tail-after-a-complete-name*
+        (full-nasab residue that lost only a teacher-key isnad tail) return ``True`` — so
+        ``True`` alone cannot be read as "the residue is not the name the source
+        asserted." The tail-class residue below is a complete nasab.
+        """
+        # cut INTO the name: `عبيده` is a bare ism, a fragment of the asserted span.
+        cut_into = normalize_arabic("عبيدة مولى رسول الله ذكره بن شاهين واستدركه أبو موسى")
+        cut_into_cleaned = clean_narrator_name(cut_into)
+        assert cut_into_cleaned == "عبيده"
+        assert cleaner_removed_content(cut_into, cut_into_cleaned)
+
+        # tail AFTER a complete name: the full nasab is intact; only `عن انس` was cut.
+        tail_cut = normalize_arabic("اسحاق بن مره عن انس")
+        tail_cut_cleaned = clean_narrator_name(tail_cut)
+        assert tail_cut_cleaned == "اسحاق بن مره"
+        assert cleaner_removed_content(tail_cut, tail_cut_cleaned)
+
+        # The contract: same ``True``, categorically different residues. The tail-class
+        # residue is a COMPLETE nasab (>= 3 tokens carrying بن) — a real asserted name —
+        # while the cut-into-name residue is a bare ism. `True` does not distinguish them.
+        assert len(tail_cut_cleaned.split()) >= 3 and "بن" in tail_cut_cleaned.split()
+        assert len(cut_into_cleaned.split()) == 1
+
+    def test_removed_content_is_a_strict_shortening(self) -> None:
+        """Whenever the predicate is True, the residue is strictly shorter than asserted.
+
+        The dual framing of the contract: a cut removes tokens, so a ``True`` residue is
+        a proper prefix-length-reduction of what the source asserted — never equal, never
+        longer. This is what makes a truncation visible where a normalization is not.
+        """
+        for raw in ("اسحاق بن مره عن انس", "عبيدة مولى رسول الله ذكره بن شاهين واستدركه أبو موسى"):
+            normalized = normalize_arabic(raw)
+            cleaned = clean_narrator_name(normalized)
+            assert cleaned is not None, raw
+            assert cleaner_removed_content(normalized, cleaned), raw
+            assert len(cleaned.split()) < len(asserted_name_tokens(normalized)), raw
