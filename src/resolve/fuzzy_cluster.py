@@ -65,7 +65,8 @@ from __future__ import annotations
 import itertools
 import os
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
+from collections.abc import Iterable, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
@@ -221,13 +222,25 @@ _MAX_MATCH_KEYS_PER_RECORD: int | None = 64
 # ``C(t, 2)`` token pairs per record for its ``t`` significant tokens; a pollution
 # record with a 1,000-token "name" contributes ~500k posting entries and joins
 # that many blocks, which is what made the blocking build itself balloon to
-# multi-GB. Only the first ``_MAX_BLOCKING_TOKENS_PER_RECORD`` significant tokens
-# (deterministic sorted order) generate blocking pairs; the record is still fully
-# scored inside whatever blocks it does join, and the precision guards still read
-# its full token set. At 64 this affects <1% of records (the same pathological
-# tail) and never a normal name (p99 significant-token count is 34). ``None``
-# disables the cap.
+# multi-GB. Only ``_MAX_BLOCKING_TOKENS_PER_RECORD`` significant tokens generate
+# blocking pairs; the record is still fully scored inside whatever blocks it does
+# join, and the precision guards still read its full token set. At 64 this affects
+# 0.71% of records (771/107,951, da#295 corpus measure) and never a normal name
+# (p99 significant-token count is 55). ``None`` disables the cap. WHICH tokens survive
+# the cap is decided by :func:`_select_blocking_tokens` (da#295), not alphabetical
+# order.
 _MAX_BLOCKING_TOKENS_PER_RECORD: int | None = 64
+
+# Blocking-token *selection* strategy under the cap (da#295). The da#270 cap
+# originally kept ``sorted(tokens)[:cap]`` — the alphabetically-first tokens — so a
+# >cap-token record whose *name* tokens sort late could lose its name block
+# entirely (a genuine under-merge variant). :func:`_select_blocking_tokens` instead
+# keeps name tokens first, then the rarest (highest-IDF) tokens — the most
+# discriminative. This marker is folded into the resume fingerprint: block-list
+# membership depends on the selection rule, and the checkpoint skip-set is
+# POSITIONAL block indices, so any change to the rule MUST invalidate an in-flight
+# checkpoint (the da#303 misalignment class). Bump the version on any change here.
+_BLOCKING_TOKEN_SELECTION = "name-first-idf-v1"
 
 # Crash-resume for the multi-day block-scoring pass (da#272, PR2). The
 # checkpointed state is the union-find parent array + the set of applied block
@@ -349,6 +362,55 @@ def _significant_tokens(keys: list[str]) -> set[str]:
             if len(tok) >= 2 and tok not in _CONNECTOR_TOKENS:
                 tokens.add(tok)
     return tokens
+
+
+def _blocking_token_doc_freq(tok_caches: Iterable[set[str]]) -> Counter[str]:
+    """Corpus document frequency of every significant token (da#295).
+
+    ``df(token)`` = the number of records whose significant-token set contains it.
+    Computed once per run from the existing ``tok_cache`` (no extra tokenization);
+    the inverse (IDF) ranks tokens rarest-first for :func:`_select_blocking_tokens`,
+    so the most discriminative tokens survive the blocking-token cap.
+    """
+    df: Counter[str] = Counter()
+    for toks in tok_caches:
+        df.update(toks)
+    return df
+
+
+def _select_blocking_tokens(
+    name_tokens: set[str],
+    all_tokens: set[str],
+    doc_freq: Mapping[str, int],
+    cap: int,
+) -> set[str]:
+    """The ≤``cap`` significant tokens a record blocks on under the cap (da#295).
+
+    Selection order — **name tokens first, then rarest-first by corpus document
+    frequency** (highest IDF = most discriminative). Equal-df ties break
+    alphabetically so the choice is deterministic across runs (a resume
+    requirement). The full ``combinations`` fan-out is what the cap bounds; *which*
+    tokens feed it is decided here.
+
+    Rationale over the da#270 ``sorted(tokens)[:cap]`` default: alphabetical
+    truncation could drop a >cap-token record's *name* tokens when they sort late,
+    losing its name block entirely (a genuine under-merge variant, issue #295).
+    Keeping name tokens first guarantees the name block survives; ranking the
+    remainder rarest-first keeps the tokens that actually discriminate.
+
+    Returns ``all_tokens`` unchanged when the record is at or under the cap, so the
+    generated blocking pairs are byte-for-byte identical to the pre-da#295
+    behaviour for every record under the cap (the PR #277 invariant). Callers still
+    canonicalize the emitted pair by sorting, so pair keys stay consistent across
+    records regardless of selection.
+    """
+    if len(all_tokens) <= cap:
+        return all_tokens
+    names = name_tokens & all_tokens
+    others = all_tokens - names
+    ordered = sorted(names, key=lambda t: (doc_freq.get(t, 0), t))
+    ordered += sorted(others, key=lambda t: (doc_freq.get(t, 0), t))
+    return set(ordered[:cap])
 
 
 def count_unblockable(records: list[dict[str, Any]]) -> int:
@@ -816,17 +878,28 @@ def cluster_records(
     # ``_MAX_BLOCKING_TOKENS_PER_RECORD`` (da#270) caps t per record before the
     # C(t, 2) fan-out: a pollution record whose "name" is a captured isnad fragment
     # can carry >1,000 significant tokens, and its ~500k posting entries were what
-    # ballooned this build to multi-GB. Taking the first N sorted tokens is
-    # deterministic and bounds the fan-out; the record is still fully scored inside
-    # whatever blocks it joins, and the precision guards below read its full token
-    # set (``tok_cache``), so only the *reach* of the pathological tail is trimmed.
+    # ballooned this build to multi-GB. The cap bounds the fan-out; the record is
+    # still fully scored inside whatever blocks it joins, and the precision guards
+    # below read its full token set (``tok_cache``), so only the *reach* of the
+    # pathological tail is trimmed. WHICH tokens survive the cap is chosen by
+    # :func:`_select_blocking_tokens` (da#295) — name tokens first, then rarest-first
+    # by corpus IDF — so a >cap record keeps its name block instead of the
+    # alphabetically-first tokens. Under-cap records are returned unchanged, so their
+    # blocking pairs are identical to the pre-cap build (PR #277 invariant). The
+    # emitted pair is always canonicalized (``sorted``) so pair keys are consistent
+    # across records regardless of each record's selection.
     max_block_tokens = _MAX_BLOCKING_TOKENS_PER_RECORD
+    doc_freq = _blocking_token_doc_freq(tok_cache) if max_block_tokens is not None else Counter()
     pair_index: dict[tuple[str, str], list[int]] = defaultdict(list)
     for i in range(n):
-        block_tokens = sorted(tok_cache[i])
-        if max_block_tokens is not None:
-            block_tokens = block_tokens[:max_block_tokens]
-        for key in itertools.combinations(block_tokens, 2):
+        block_tokens = tok_cache[i]
+        if max_block_tokens is not None and len(block_tokens) > max_block_tokens:
+            name = safe_str(records[i].get("name_ar_normalized"))
+            name_tokens = _significant_tokens([name]) if name else set()
+            block_tokens = _select_blocking_tokens(
+                name_tokens, block_tokens, doc_freq, max_block_tokens
+            )
+        for key in itertools.combinations(sorted(block_tokens), 2):
             pair_index[key].append(i)
 
     # Apply the common-name cap: drop over-dense blocks up front so neither the
@@ -1353,13 +1426,16 @@ def cluster_canonical_narrators(
             canonical_path, {"content": _FINGERPRINT_CANONICAL_COLS}
         )
         # The da#270 caps (_MAX_MATCH_KEYS_PER_RECORD / _MAX_BLOCKING_TOKENS_PER_RECORD)
+        # AND the da#295 blocking-token selection strategy (_BLOCKING_TOKEN_SELECTION)
         # are module constants, not threaded params, but they shape the block
-        # UNIVERSE — the match-key cap feeds keys_cache/tok_cache and the
-        # blocking-token cap feeds pair_index → the `blocks` list membership,
+        # UNIVERSE — the match-key cap feeds keys_cache/tok_cache, the blocking-token
+        # cap bounds pair_index, and the selection rule decides WHICH tokens a
+        # >cap record contributes → all three change the `blocks` list membership,
         # order, and count. Because the resume skip-set is POSITIONAL block indices,
-        # a resume across a cap change would otherwise match the fingerprint yet
-        # restore indices pointing at different blocks. Hashing the caps discards
-        # the checkpoint on any cap change (da#303).
+        # a resume across any of these would otherwise match the fingerprint yet
+        # restore indices pointing at different blocks. Hashing them discards the
+        # checkpoint on any change (da#303). (_CONNECTOR_TOKENS is a known missing
+        # input, stable today; the da#271 track-3 PR that mutates it owns adding it.)
         fingerprint = hash_strings(
             digests["content"],
             round(threshold, 6),
@@ -1367,6 +1443,7 @@ def cluster_canonical_narrators(
             len(records),
             _MAX_MATCH_KEYS_PER_RECORD,
             _MAX_BLOCKING_TOKENS_PER_RECORD,
+            _BLOCKING_TOKEN_SELECTION,
         )
 
     clusters = cluster_records(

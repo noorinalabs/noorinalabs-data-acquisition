@@ -541,6 +541,83 @@ def test_blocking_token_cap_bounds_reach(monkeypatch: pytest.MonkeyPatch) -> Non
     assert sorted(len(g) for g in capped) == [1, 1], "cap drops the late-token block"
 
 
+# ---------------------------------------------------------------------------
+# da#295: informed blocking-token retention under the cap (name-first + IDF)
+# ---------------------------------------------------------------------------
+def test_select_blocking_tokens_keeps_name_tokens_first() -> None:
+    """The cap keeps a record's NAME tokens even when they sort alphabetically last.
+
+    This is the da#295 fix: alphabetical ``sorted(tokens)[:cap]`` would drop
+    late-sorting name tokens in favour of early-sorting alias/pollution tokens,
+    losing the record's name block. Name-first retention keeps them.
+    """
+    name_tokens = {"يمم", "ينن"}  # sort AFTER every ب-initial token below
+    padding = {"ببا", "ببب", "ببت", "ببج"}
+    all_tokens = name_tokens | padding
+    # Uniform df so ONLY the name-first rule (not IDF) decides — isolates the axis.
+    doc_freq = dict.fromkeys(all_tokens, 1)
+    kept = fc._select_blocking_tokens(name_tokens, all_tokens, doc_freq, cap=2)
+    assert kept == name_tokens, "name tokens must survive the cap despite sorting last"
+
+
+def test_select_blocking_tokens_fills_remainder_rarest_first() -> None:
+    """After name tokens, the cap fills from the rarest (highest-IDF) tokens."""
+    name_tokens = {"nم"}
+    # df: rare=1 (most discriminative) ... common=9. Rarest should win the slots.
+    others = {"rare1": 1, "rare2": 2, "midxx": 5, "common": 9}
+    all_tokens = name_tokens | set(others)
+    doc_freq = {"nم": 3, **others}
+    kept = fc._select_blocking_tokens(name_tokens, all_tokens, doc_freq, cap=3)
+    # name token always in; the two remaining slots go to the two rarest others.
+    assert kept == {"nم", "rare1", "rare2"}
+
+
+def test_select_blocking_tokens_ties_break_alphabetically() -> None:
+    """Equal-df ties break alphabetically so selection is deterministic on resume."""
+    name_tokens: set[str] = set()
+    all_tokens = {"bbb", "aaa", "ccc"}
+    doc_freq = dict.fromkeys(all_tokens, 4)  # all tied
+    kept = fc._select_blocking_tokens(name_tokens, all_tokens, doc_freq, cap=2)
+    assert kept == {"aaa", "bbb"}, "ties keep the alphabetically-first tokens"
+
+
+def test_select_blocking_tokens_under_cap_returns_all_unchanged() -> None:
+    """PR #277 invariant: a record at or under the cap is returned unchanged.
+
+    Identity (``is``) matters — the caller then emits ``combinations(sorted(...))``
+    exactly as the pre-da#295 build did, so under-cap blocking is byte-identical.
+    """
+    all_tokens = {"aa", "bb", "cc"}
+    kept = fc._select_blocking_tokens({"aa"}, all_tokens, dict.fromkeys(all_tokens, 1), cap=3)
+    assert kept is all_tokens
+
+
+def test_blocking_cap_retains_late_sorting_name_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end: a >cap record still merges on its late-sorting name (da#295).
+
+    ``poll`` carries its two real name tokens (يمم/ينن, which sort LAST) plus four
+    alias tokens that sort first. Under the old alphabetical cap of 2 the alias
+    tokens would evict the name tokens and ``poll`` would never co-block with its
+    genuine name variant. Name-first retention keeps the name block, so they merge.
+
+    Mutation check: reverting the selection to ``sorted(tok_cache[i])[:cap]`` makes
+    both records land in singleton clusters (``[1, 1]``) — this asserts ``[2]``.
+    """
+    poll = _rec(
+        "يمم ينن",
+        source_corpora=["x"],
+        aliases=["ببا", "ببب", "ببت", "ببج"],
+    )
+    variant = _rec("يمم ينن", source_corpora=["y"])
+
+    monkeypatch.setattr(fc, "_MAX_BLOCKING_TOKENS_PER_RECORD", 2)
+    clusters = cluster_records([poll, variant])
+
+    assert sorted(len(g) for g in clusters) == [2], (
+        "the late-sorting name block must survive the cap and merge the variant"
+    )
+
+
 def test_unset_precision_defaults_to_unknown(tmp_path: Path) -> None:
     """da#239: records carrying no precision key must round-trip through the
     builder with both precision columns defaulted to UNKNOWN — never null."""
