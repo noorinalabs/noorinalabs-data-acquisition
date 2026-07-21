@@ -16,6 +16,7 @@ from typing import Any
 
 import pyarrow.parquet as pq
 
+from src.graph.load_nodes import build_loaded_hadith_ids
 from src.parse.composition import is_canonical_hadith_id
 from src.parse.identity import (
     DoubledCorpusPrefixError,
@@ -141,6 +142,52 @@ def _chain_index(row: dict[str, Any]) -> int:
     return int(v) if v is not None else 0
 
 
+def _staging_loaded_hadith_ids(staging_dir: Path) -> set[str] | None:
+    """The ``Hadith.id`` node ids the node loader loads from *staging_dir* (da#373).
+
+    Builds the set from the SAME ``hadiths_*.parquet`` the node loader reads, via
+    :func:`src.graph.load_nodes.build_loaded_hadith_ids`, so the chain-edge gate
+    sees the node loader's real kept set — composition AND cross-edition matn
+    dedup — not just the id-grammar composition slice ``is_canonical_hadith_id``
+    can re-derive. Returns ``None`` when *staging_dir* holds no hadith files, in
+    which case the caller falls back to the id-grammar gate (pre-da#373 behavior)
+    — there are no Hadith nodes to orphan against anyway.
+    """
+    files = _parquet_files(staging_dir, "hadiths_")
+    if not files:
+        return None
+    return build_loaded_hadith_ids(files)
+
+
+def _mention_hadith_survives(hid: str, loaded_hadith_ids: set[str] | None) -> bool:
+    """True if a mention's hadith should still yield a chain edge (da#333 + da#373).
+
+    Drops exactly the mentions whose hadith the node loader did NOT load, so a
+    TRANSMITTED_TO / NARRATED edge is never emitted against a missing Hadith node:
+
+    * ``loaded_hadith_ids`` is the node loader's real kept set (da#373). A
+      well-formed id absent from it — a non-canonical edition (da#333, the ~196k
+      fawaz six-books chains) OR a cross-edition-deduped sanadset tradition — is
+      dropped. The cross-edition half is the one ``is_canonical_hadith_id``
+      structurally could not see: the matn dedup decision is not recoverable from
+      the id string.
+    * ``None`` means no staging hadith files were available to consult, so fall
+      back to the id-grammar composition gate (:func:`is_canonical_hadith_id`).
+
+    **Total** — a malformed id returns ``True`` (survives here) and is deferred to
+    the per-group malformed quarantine that counts it (da#355); it is never
+    silently reclassified as a non-canonical drop, mirroring the totality of
+    ``is_canonical_hadith_id``.
+    """
+    if loaded_hadith_ids is None:
+        return is_canonical_hadith_id(hid)
+    try:
+        node_id = hadith_node_id(hid)
+    except DoubledCorpusPrefixError:
+        return True  # defer to the da#355 malformed quarantine
+    return node_id in loaded_hadith_ids
+
+
 # ---------------------------------------------------------------------------
 # 1. TRANSMITTED_TO — consecutive narrator pairs in each chain
 # ---------------------------------------------------------------------------
@@ -252,8 +299,16 @@ def _load_transmitted_to(
     curated_dir: Path | None = None,
     strict: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    loaded_hadith_ids: set[str] | None = None,
 ) -> EdgeLoadResult:
-    """Load TRANSMITTED_TO edges from narrator_mentions_resolved.parquet."""
+    """Load TRANSMITTED_TO edges from narrator_mentions_resolved.parquet.
+
+    *loaded_hadith_ids* is the node loader's real kept set (da#373); when the
+    caller does not supply it, it is derived from *staging_dir*'s hadith files.
+    See :func:`_mention_hadith_survives`.
+    """
+    if loaded_hadith_ids is None:
+        loaded_hadith_ids = _staging_loaded_hadith_ids(staging_dir)
     files = _resolved_mentions_files(staging_dir, curated_dir)
     if not files:
         if strict:
@@ -288,7 +343,7 @@ def _load_transmitted_to(
             hid = row.get("hadith_id") or row.get("source_hadith_id")
             if not hid:
                 continue
-            if not is_canonical_hadith_id(hid):
+            if not _mention_hadith_survives(hid, loaded_hadith_ids):
                 # da#333: a mention whose hadith is NOT a canonical node — e.g.
                 # fawaz's six-books chains, deduplicated to the lk spine — must not
                 # produce a TRANSMITTED_TO edge, mirroring the node dedup
@@ -403,8 +458,15 @@ def _load_narrated(
     curated_dir: Path | None = None,
     strict: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    loaded_hadith_ids: set[str] | None = None,
 ) -> EdgeLoadResult:
-    """Load NARRATED edges — first narrator (position 0) in each chain -> hadith."""
+    """Load NARRATED edges — first narrator (position 0) in each chain -> hadith.
+
+    *loaded_hadith_ids* is the node loader's real kept set (da#373); derived from
+    *staging_dir* when not supplied. See :func:`_mention_hadith_survives`.
+    """
+    if loaded_hadith_ids is None:
+        loaded_hadith_ids = _staging_loaded_hadith_ids(staging_dir)
     files = _resolved_mentions_files(staging_dir, curated_dir)
     if not files:
         if strict:
@@ -432,7 +494,7 @@ def _load_narrated(
             pos = row.get("position_in_chain", 0)
             if not hid or not nid:
                 continue
-            if not is_canonical_hadith_id(hid):
+            if not _mention_hadith_survives(hid, loaded_hadith_ids):
                 # da#333: mirror the node dedup — a mention whose hadith is not a
                 # canonical node (fawaz six-books, deduped to lk) yields no NARRATED
                 # edge. Such an edge would otherwise be a guaranteed missing-endpoint
@@ -1028,14 +1090,31 @@ def load_all_edges(
     """
     results: list[EdgeLoadResult] = []
 
+    # Compute the node loader's real kept set ONCE (da#373) and share it with both
+    # chain-edge loaders, so they gate on the same set the node loader loaded —
+    # composition AND cross-edition matn dedup — instead of re-deriving a partial
+    # gate from the id string. This is what stops a repaired matn key from
+    # re-orphaning ~196k dangling chains.
+    loaded_hadith_ids = _staging_loaded_hadith_ids(staging_dir)
+
     results.append(
         _load_transmitted_to(
-            client, staging_dir, curated_dir=curated_dir, strict=strict, batch_size=batch_size
+            client,
+            staging_dir,
+            curated_dir=curated_dir,
+            strict=strict,
+            batch_size=batch_size,
+            loaded_hadith_ids=loaded_hadith_ids,
         )
     )
     results.append(
         _load_narrated(
-            client, staging_dir, curated_dir=curated_dir, strict=strict, batch_size=batch_size
+            client,
+            staging_dir,
+            curated_dir=curated_dir,
+            strict=strict,
+            batch_size=batch_size,
+            loaded_hadith_ids=loaded_hadith_ids,
         )
     )
     results.append(_load_appears_in(client, staging_dir, strict=strict, batch_size=batch_size))

@@ -62,7 +62,7 @@ from __future__ import annotations
 import hashlib
 
 from src.parse.identity import HADITH_ID_PREFIX, ID_DELIMITER
-from src.utils.arabic import is_arabic, normalize_arabic
+from src.utils.arabic import is_arabic, normalize_arabic, strip_to_letters
 
 # source_corpus -> allowed collection slugs.
 #   None           = load all collections for this source. Equivalent to the
@@ -190,17 +190,28 @@ def canonical_matn_identity(matn_ar: str | None, matn_en: str | None) -> str | N
 
     The Arabic matn is preferred and normalized via
     :func:`src.utils.arabic.normalize_arabic` (diacritics / alif / hamza / taa
-    marbuta / tatweel folded, whitespace collapsed) so spelling variants between
-    editions converge; the English matn (lowercased) is the fallback when no
-    Arabic matn is present. The normalization mirrors ``src.resolve.parallels``'s
-    tokenizer so the dedup gate and the PARALLEL_OF detector agree on what the
-    "same text" is. The digest (not the raw matn) is returned so the loader's
-    identity index stays compact for the full ~650k-row corpus.
+    marbuta / tatweel folded, whitespace collapsed), then reduced to letters and
+    single spaces by :func:`src.utils.arabic.strip_to_letters`; the English matn
+    (lowercased) is stripped the same way and is the fallback when no Arabic matn
+    is present.
+
+    Stripping punctuation is what makes this gate actually FIRE (da#373). Two
+    editions of one tradition differ only by commas, editorial dashes and
+    quotation marks, and ``normalize_arabic`` folds orthography but keeps
+    punctuation — so an *exact* hash over its output almost never collided (it
+    dropped 3 rows of 853,218), silently admitting every cross-edition duplicate
+    it was built to remove. Punctuation is not part of the matn, so stripping it
+    only ever merges genuine textual twins, never distinct traditions.
+    ``src.resolve.parallels`` still tokenizes on ``normalize_arabic`` output
+    alone, but it compares token *sets* by Jaccard, which tolerates the odd
+    punctuation-bearing token; an exact hash cannot, which is why the strip lives
+    here. The digest (not the raw matn) is returned so the loader's identity
+    index stays compact for the full ~650k-row corpus.
     """
     if matn_ar and is_arabic(matn_ar):
-        normalized = normalize_arabic(matn_ar)
+        normalized = strip_to_letters(normalize_arabic(matn_ar))
     elif matn_en and matn_en.strip():
-        normalized = matn_en.lower()
+        normalized = strip_to_letters(matn_en.lower())
     else:
         return None
     tokens = normalized.split()

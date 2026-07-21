@@ -16,6 +16,7 @@ __all__ = [
     "normalize_taa_marbuta",
     "normalize_arabic",
     "clean_whitespace",
+    "strip_to_letters",
     "is_arabic",
     "extract_transmission_phrases",
     "contains_transmission_marker",
@@ -200,6 +201,26 @@ def normalize_taa_marbuta(text: str) -> str:
 def clean_whitespace(text: str) -> str:
     """Collapse multiple whitespace characters to a single space and strip edges."""
     return _MULTI_WS_RE.sub(" ", text).strip()
+
+
+def strip_to_letters(text: str) -> str:
+    """Reduce *text* to Unicode letters and single spaces (da#373).
+
+    Every character that is neither a letter nor whitespace — punctuation,
+    digits, editorial dashes, quotation marks — is replaced by a space, and
+    runs of whitespace are then collapsed. Replacing (not deleting) means a
+    mark sitting *between* two words never fuses them, with or without an
+    adjacent space (``"متن،متن"`` and ``"متن، متن"`` both yield ``"متن متن"``).
+
+    This is the punctuation invariance :func:`normalize_arabic` deliberately
+    omits (it folds orthography but keeps punctuation): two editions of one
+    tradition differ by commas / dashes / quotes, so an *exact* matn hash must
+    strip them or it never collides. Unicode-letter aware, so it also serves
+    the English matn path. Idempotent — its output is only letters and single
+    spaces, both fixed points.
+    """
+    stripped = "".join(ch if ch.isalpha() or ch.isspace() else " " for ch in text)
+    return _MULTI_WS_RE.sub(" ", stripped).strip()
 
 
 def normalize_arabic(text: str) -> str:

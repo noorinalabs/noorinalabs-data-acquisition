@@ -1493,3 +1493,142 @@ class TestCompositionGateOnChainEdges:
         # ... and the mis network-edge file is routed by relation (skipped off
         # STUDIED_UNDER, da#133) without error — the gate did not perturb it.
         assert studied.created == 0
+
+
+class TestCrossEditionDedupVisibleToEdges:
+    """da#373 — the chain-edge loader gates on the node loader's REAL kept set, so a
+    cross-edition-deduped sanadset hadith yields no TRANSMITTED_TO / NARRATED edge.
+
+    Without this the edge loader re-derived only the composition gate from the id
+    string (``is_canonical_hadith_id`` keeps every sanadset id — the matn dedup is
+    invisible to it), so a repaired matn key would emit ~196k chain edges against
+    Hadith nodes the node loader dropped — the da#333 orphan bug on the axis nobody
+    had closed. Endpoints are set to exist, so the ONLY reason an edge is not
+    created is the da#373 drop: that is what makes these tests bite.
+    """
+
+    _SHARED_MATN = "انما الاعمال بالنيات"
+    _UNIQUE_MATN = "لا ضرر ولا ضرار"
+
+    def _write_curated_plus_dup(self, staging_dir: Path) -> None:
+        # lk curated edition occupies the identity; the sanadset copy shares its matn
+        # and is therefore cross-edition-deduped away by the node loader.
+        write_hadiths(
+            staging_dir,
+            [{"source_id": "lk:bukhari:1", "source_corpus": "lk", "matn_ar": self._SHARED_MATN}],
+            suffix="lk",
+        )
+        write_hadiths(
+            staging_dir,
+            [
+                {
+                    "source_id": "sanadset:1:dup",
+                    "source_corpus": "sanadset",
+                    "matn_ar": self._SHARED_MATN,
+                }
+            ],
+            suffix="sanadset_dup",
+        )
+
+    def test_deduped_sanadset_mention_drops_transmitted_to(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        self._write_curated_plus_dup(staging_dir)
+        write_narrator_mentions_resolved(
+            curated_dir,
+            [
+                {
+                    "mention_id": "m1",
+                    "hadith_id": "sanadset:1:dup",
+                    "source_corpus": "sanadset",
+                    "position_in_chain": 0,
+                    "canonical_narrator_id": "nar:1",
+                },
+                {
+                    "mention_id": "m2",
+                    "hadith_id": "sanadset:1:dup",
+                    "source_corpus": "sanadset",
+                    "position_in_chain": 1,
+                    "canonical_narrator_id": "nar:2",
+                },
+            ],
+        )
+        # Both narrator endpoints exist — so a pair, if built, WOULD create an edge.
+        mock_client.set_read_results(
+            [{"from_id": "nar:1", "to_id": "nar:2", "from_exists": True, "to_exists": True}]
+        )
+        results = load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
+        tt = next(r for r in results if r.edge_type == "TRANSMITTED_TO")
+        assert tt.created == 0
+        assert not any(
+            "[:TRANSMITTED_TO" in str(q) and "MERGE" in str(q) for q, _ in mock_client.calls
+        )
+
+    def test_deduped_sanadset_mention_drops_narrated(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        self._write_curated_plus_dup(staging_dir)
+        write_narrator_mentions_resolved(
+            curated_dir,
+            [
+                {
+                    "mention_id": "m1",
+                    "hadith_id": "sanadset:1:dup",
+                    "source_corpus": "sanadset",
+                    "position_in_chain": 0,
+                    "canonical_narrator_id": "nar:1",
+                },
+            ],
+        )
+        mock_client.set_read_results([{"narrator_exists": True, "hadith_exists": True}])
+        results = load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
+        narrated = next(r for r in results if r.edge_type == "NARRATED")
+        assert narrated.created == 0
+        assert not any("[r:NARRATED]" in str(q) for q, _ in mock_client.calls)
+
+    def test_non_deduped_sanadset_mention_keeps_transmitted_to(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        # A sanadset hadith with a UNIQUE matn (no curated twin) IS loaded, so its
+        # chain MUST survive — the fix must not over-drop legitimately-loaded chains.
+        write_hadiths(
+            staging_dir,
+            [{"source_id": "lk:bukhari:1", "source_corpus": "lk", "matn_ar": self._SHARED_MATN}],
+            suffix="lk",
+        )
+        write_hadiths(
+            staging_dir,
+            [
+                {
+                    "source_id": "sanadset:1:uniq",
+                    "source_corpus": "sanadset",
+                    "matn_ar": self._UNIQUE_MATN,
+                }
+            ],
+            suffix="sanadset_uniq",
+        )
+        write_narrator_mentions_resolved(
+            curated_dir,
+            [
+                {
+                    "mention_id": "m1",
+                    "hadith_id": "sanadset:1:uniq",
+                    "source_corpus": "sanadset",
+                    "position_in_chain": 0,
+                    "canonical_narrator_id": "nar:1",
+                },
+                {
+                    "mention_id": "m2",
+                    "hadith_id": "sanadset:1:uniq",
+                    "source_corpus": "sanadset",
+                    "position_in_chain": 1,
+                    "canonical_narrator_id": "nar:2",
+                },
+            ],
+        )
+        mock_client.set_read_results(
+            [{"from_id": "nar:1", "to_id": "nar:2", "from_exists": True, "to_exists": True}]
+        )
+        results = load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
+        tt = next(r for r in results if r.edge_type == "TRANSMITTED_TO")
+        assert tt.created == 1

@@ -1051,3 +1051,149 @@ class TestLoadAllNodes:
 
         results = load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
         assert all(r.created + r.merged > 0 or r.node_type in ("Chain",) for r in results)
+
+
+def _hadith_ids_written(client: MockNeo4jClient) -> set[str]:
+    """The set of Hadith node ids the loader actually wrote (from the MERGE batches)."""
+    ids: set[str] = set()
+    for query, batch in client.calls:
+        if isinstance(batch, list) and "MERGE (n:Hadith {id: row.id})" in str(query):
+            ids.update(item["id"] for item in batch)
+    return ids
+
+
+class TestBuildLoadedHadithIds:
+    """da#373 — build_loaded_hadith_ids reproduces EXACTLY the Hadith.id set the node
+    loader loads, so the edge loader can gate chain edges on the same kept set."""
+
+    _SHARED_MATN = "انما الاعمال بالنيات"
+    _UNIQUE_MATN = "لا ضرر ولا ضرار"
+
+    def test_matches_node_loader_kept_set(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        from src.graph.load_nodes import build_loaded_hadith_ids
+
+        write_hadiths(
+            staging_dir,
+            [{"source_id": "lk:bukhari:1", "source_corpus": "lk", "matn_ar": self._SHARED_MATN}],
+            suffix="lk",
+        )
+        write_hadiths(
+            staging_dir,
+            [
+                {
+                    "source_id": "sanadset:1:dup",
+                    "source_corpus": "sanadset",
+                    "matn_ar": self._SHARED_MATN,
+                },
+                {
+                    "source_id": "sanadset:1:uniq",
+                    "source_corpus": "sanadset",
+                    "matn_ar": self._UNIQUE_MATN,
+                },
+            ],
+            suffix="sanadset",
+        )
+        # fawaz six-books duplicate — dropped by the composition gate (da#191).
+        write_hadiths(
+            staging_dir,
+            [
+                {
+                    "source_id": "fawaz:bukhari:1",
+                    "source_corpus": "fawaz",
+                    "collection_name": "bukhari",
+                    "matn_ar": self._UNIQUE_MATN,
+                }
+            ],
+            suffix="fawaz",
+        )
+
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        loaded_by_loader = _hadith_ids_written(mock_client)
+
+        files = sorted(staging_dir.glob("hadiths_*.parquet"))
+        built = build_loaded_hadith_ids(files)
+
+        # The set the edge loader will consult is exactly the set the node loader loaded.
+        assert built == loaded_by_loader
+        assert "hdt:lk:bukhari:1" in built
+        assert "hdt:sanadset:1:uniq" in built
+        assert "hdt:sanadset:1:dup" not in built  # cross-edition deduped (da#220)
+        assert "hdt:fawaz:bukhari:1" not in built  # composition-dropped (da#191)
+
+    def test_punctuation_only_duplicate_is_deduped(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        # The sanadset copy differs from the curated lk edition ONLY by punctuation;
+        # da#373's strip makes the matn identities collide, so it is dropped. Before
+        # the strip it survived — this is the dead-gate defect at the loader level.
+        write_hadiths(
+            staging_dir,
+            [
+                {
+                    "source_id": "lk:bukhari:1",
+                    "source_corpus": "lk",
+                    "matn_ar": "انما الاعمال بالنيات",
+                }
+            ],
+            suffix="lk",
+        )
+        write_hadiths(
+            staging_dir,
+            [
+                {
+                    "source_id": "sanadset:1:dup",
+                    "source_corpus": "sanadset",
+                    "matn_ar": "«انما الاعمال بالنيات».",
+                }
+            ],
+            suffix="sanadset",
+        )
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        ids = _hadith_ids_written(mock_client)
+        assert "hdt:lk:bukhari:1" in ids
+        assert "hdt:sanadset:1:dup" not in ids
+
+
+class TestMalformedIdDiagnostic:
+    """da#373 follow-up / da#355 — a quarantined double-prefixed staging row must
+    record WHY (the ``doubled leading corpus`` marker), not a bare ``malformed`` tag.
+
+    Unit-tier guard for the same contract the live
+    ``tests/integration/test_source_id_collision.py`` asserts against a real Neo4j.
+    The shared keep-decision (``_hadith_load_outcome``) swallows the
+    ``DoubledCorpusPrefixError``, so ``_load_hadiths`` must re-mint and record its
+    message verbatim in the non-strict (production ``_cmd_load``) path — a bare
+    generic string would silently degrade da#355's "stop guessing, start recording"
+    diagnostic, which is exactly the axis #373 is repairing.
+    """
+
+    def test_double_prefixed_row_records_marker_and_quarantines(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        write_hadiths(
+            staging_dir,
+            [
+                {
+                    "source_id": "sunnah:sunnah:bukhari:1:1:1",
+                    "collection_name": "bukhari",
+                    "source_corpus": "sunnah",
+                },
+                {
+                    "source_id": "lk:bukhari:1:1",
+                    "collection_name": "bukhari",
+                    "source_corpus": "lk",
+                },
+            ],
+            suffix="streaming",
+        )
+        results = load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        hadith_result = next(r for r in results if r.node_type == "Hadith")
+        assert hadith_result.skipped >= 1
+        assert hadith_result.malformed_ids >= 1
+        assert any("doubled leading corpus" in e for e in hadith_result.validation_errors), (
+            hadith_result.validation_errors
+        )
+        # Only the well-formed row loads; the doubled id never becomes a node.
+        assert _hadith_ids_written(mock_client) == {"hdt:lk:bukhari:1:1"}
