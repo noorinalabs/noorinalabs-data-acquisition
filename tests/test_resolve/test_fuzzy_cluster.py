@@ -130,6 +130,72 @@ def test_conflicting_death_years_block_merge() -> None:
     assert sorted(len(g) for g in clusters) == [1, 1]  # stayed apart
 
 
+# ---------------------------------------------------------------------------
+# da#380 — the death-year veto is weighted by `death_year_provenance`. An
+# `uncorroborated` year (a weak Stage-2 fuzzy bio year, persisted but excluded
+# from steering identity — disambiguate.py da#356) must NOT veto a real merge at
+# the tight `_DEATH_YEAR_TOLERANCE`; only a gross spread still blocks it. These
+# guards go RED if the provenance tag is ignored (the pre-da#380 behaviour).
+# ---------------------------------------------------------------------------
+def test_uncorroborated_death_year_does_not_veto_small_spread() -> None:
+    """A small disagreement with one `uncorroborated` year still merges.
+
+    Spread = 5 AH — beyond `_DEATH_YEAR_TOLERANCE` (2) but far under
+    `_UNCORROBORATED_DEATH_SPREAD` (50). Ignoring the provenance tag (the old
+    year-blind veto) would split this real pair — this assertion is the guard.
+    """
+    a = _rec("محمد بن عبد الله", source_corpora=["itqan"], death_year_ah=150)
+    b = _rec(
+        "محمد بن عبد الله",
+        source_corpora=["sanadset"],
+        death_year_ah=155,
+        death_year_provenance="uncorroborated",
+    )
+    # Predicate-level guard: the discount is what clears the veto.
+    assert fc._death_years_conflict(a, b) is False
+    assert fc._death_years_conflict(b, a) is False  # symmetric
+    # End-to-end: the pair merges into one cluster.
+    clusters = cluster_records([a, b])
+    assert sorted(len(g) for g in clusters) == [2]
+
+
+def test_uncorroborated_gross_death_spread_still_blocks() -> None:
+    """A generations-apart namesake still blocks even when a year is uncorroborated."""
+    a = _rec("محمد بن عبد الله", source_corpora=["itqan"], death_year_ah=150)
+    b = _rec(
+        "محمد بن عبد الله",
+        source_corpora=["sanadset"],
+        death_year_ah=320,  # spread 170 > _UNCORROBORATED_DEATH_SPREAD (50)
+        death_year_provenance="uncorroborated",
+    )
+    assert fc._death_years_conflict(a, b) is True
+    clusters = cluster_records([a, b])
+    assert sorted(len(g) for g in clusters) == [1, 1]  # stayed apart
+
+
+def test_corroborated_death_years_keep_tight_tolerance() -> None:
+    """Two `corroborated` years 5 AH apart still conflict — the tight band is preserved.
+
+    Same spread (5) as the merging uncorroborated case above; here BOTH years are
+    corroborated, so the discount must NOT apply and the veto must still fire.
+    """
+    a = _rec(
+        "محمد بن عبد الله",
+        source_corpora=["itqan"],
+        death_year_ah=150,
+        death_year_provenance="corroborated",
+    )
+    b = _rec(
+        "محمد بن عبد الله",
+        source_corpora=["sanadset"],
+        death_year_ah=155,
+        death_year_provenance="corroborated",
+    )
+    assert fc._death_years_conflict(a, b) is True
+    clusters = cluster_records([a, b])
+    assert sorted(len(g) for g in clusters) == [1, 1]  # stayed apart
+
+
 def test_conflicting_gender_blocks_merge() -> None:
     """Similar names with explicit differing gender must NOT merge."""
     a = _rec("عبد الله بن محمد", source_corpora=["itqan"], gender="male")
