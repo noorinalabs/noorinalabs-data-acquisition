@@ -1652,3 +1652,172 @@ class TestCleanerRemovedContentContract:
             assert cleaned is not None, raw
             assert cleaner_removed_content(normalized, cleaned), raw
             assert len(cleaned.split()) < len(asserted_name_tokens(normalized)), raw
+
+
+class TestTruncateAndReGateRecovery:
+    """da#424 — recover a real leading narrator from a matn/provenance tail.
+
+    The da#314 residual: a ``<real name> + <matn/bio tail>`` span whose tail carries
+    no ``_ISNAD_BOUNDARY`` verb (so class 5's truncation never fires) is either
+    DROPPED whole — deleting the real leading narrator — or KEPT whole, matn and all.
+    #423's provenance rule was scoped all-residue precisely so it could never delete
+    a rijal biography, which left this residual for here.
+
+    The remedy is a truncate-and-re-gate that cuts at the name/matn boundary and
+    re-gates the leading head. It is a PURE RECOVERY: measured against
+    ``origin/deployments/phase-9/wave-26`` over every Arabic fixture in this file it
+    newly deletes ZERO rows (``TestRecoveryIsNoWorseThanMain`` pins the deletion
+    direction) — it only ever replaces a drop or a matn-polluted whole span with a
+    cleaner leading name.
+    """
+
+    # === AC1: a matn NARRATIVE tail after a real name — kept WHOLE by main (a
+    # matn-polluted "name"), cleaned to the leading name here. The boundary is the
+    # ف-narrative verb فذهب ("so he went"), corroborated by the رسول الله that
+    # follows it. Verbatim shape from the issue body. ===
+    def test_matn_narrative_tail_truncated_to_leading_name(self) -> None:
+        row = "ابو هريره فذهب رسول الله وانتم تنتثلونها"
+        assert clean_narrator_name(normalize_arabic(row)) == normalize_arabic("ابو هريره")
+
+    # === AC1 (reverse): main KEEPS the polluted whole span; the recovery must
+    # change it, not leave it. Pins that the ف-narrative truncation actually fires. ===
+    def test_matn_narrative_span_is_not_left_whole(self) -> None:
+        row = normalize_arabic("ابو هريره فذهب رسول الله وانتم تنتثلونها")
+        assert clean_narrator_name(row) != row
+
+    # === AC2: a real narrator LEADING a matn quote that main drops ENTIRELY —
+    # Ivana Horvat's two recoveries (ابن عباس, ابو القاسم). The tail is provenance /
+    # particle-dense matn (no isnad verb), so the matn-sentence gate drops the whole
+    # span on main; truncate-and-re-gate recovers the leading name. ===
+    @pytest.mark.parametrize(
+        "row,expected",
+        [
+            ("ابن عباس هذا من رسول الله على ذلك", "ابن عباس"),
+            ("ابو القاسم هذا من رسول الله على ذلك", "ابو القاسم"),
+            ("ابن عباس على هذا في ذلك كذلك", "ابن عباس"),
+            ("ابو القاسم كل ذلك في هذا على انتم", "ابو القاسم"),
+        ],
+    )
+    def test_real_narrator_leading_matn_quote_recovered(self, row: str, expected: str) -> None:
+        # main drops the whole span (verified: TestRecoveryIsNoWorseThanMain harvests
+        # exactly these as None->name recoveries); the recovery returns the lead.
+        assert clean_narrator_name(normalize_arabic(row)) == normalize_arabic(expected)
+
+    # === A bare matn head (no nasab connector) is NOT resurrected. The recovered
+    # head MUST carry a kunya/ibn/bn — دعوني ("leave me") / سريه تغزو ("a raiding
+    # party") have none, so these matn bodies stay dropped, never handed back as a
+    # narrator. These are the verbatim corpus rows that the da#314 pushed-fold
+    # regression minted 52 nodes from. ===
+    @pytest.mark.parametrize(
+        "matn",
+        [
+            # verbatim mid-matn corpus rows (TestScrubDoesNotDeleteRealNarrators) —
+            # both DROP on main and must keep dropping; the recovery scan reaches a
+            # ف-narrative boundary (فالذي / في) but the head before it (دعوني /
+            # سريه تغزو) has no nasab connector, so nothing is handed back.
+            "دعوني فالذي انا فيه خير اوصيكم بثلاث اخرجوا المشركين من جزيره العرب واجيزوا الوفد بنحو ما كنت اجيزهم",  # noqa: E501
+            "سريه تغزو في سبيل الله والذي نفسي بيده لوددت اني اقتل في سبيل الله",
+        ],
+    )
+    def test_bare_matn_head_without_nasab_is_not_resurrected(self, matn: str) -> None:
+        assert clean_narrator_name(normalize_arabic(matn)) is None
+
+    # === #423's all-residue scoping is NOT loosened: a substantive-but-matn residual
+    # with a VERB but no nasab lead ("كمن زار رسول الله") is left KEPT, exactly as
+    # the accepted-residual fixture (TestMatnProvenanceAndOath) requires — the
+    # recovery has no nasab-bearing lead to recover, so it does not touch it. ===
+    def test_accepted_verb_residual_still_kept(self) -> None:
+        assert clean_narrator_name(normalize_arabic("كمن زار رسول الله")) is not None
+
+    # === A bio apposition that mentions the Prophet NOMINALLY (خليفه رسول الله,
+    # شهد النبي …, وفد الى رسول الله) is a rijal biography, NOT matn — the recovery's
+    # KEPT-WHOLE path truncates ONLY at a narrative verb, never at a bare Prophet
+    # reference or particle, so these survive WHOLE, not lopped to a dangling head.
+    # (Deleting them is the exact #423 failure; lopping the epithet is a lesser
+    # version of the same over-reach.) ===
+    @pytest.mark.parametrize(
+        "bio",
+        [
+            "الحارث بن عمرو السهمي الباهلي شهد النبي في حجة الوداع عداده",
+            "ضمرة بن سعد السلمي شهد مع النبي حنينا",
+            "زرارة بن عمرو النخعي وفد الى رسول الله",
+            "الطيب ولد رسول الله",
+        ],
+    )
+    def test_bio_apposition_kept_whole_not_truncated(self, bio: str) -> None:
+        norm = normalize_arabic(bio)
+        assert clean_narrator_name(norm) == norm
+
+    # === A grading-COMMENTARY span (al-Tirmidhī's own verdict keyed on his kunya)
+    # is NOT recovered — the compiler has a clean canonical of his own (class 9), so
+    # recovering the kunya would re-mint a redundant commentary mention. Stays
+    # dropped. ===
+    def test_grading_commentary_not_recovered(self) -> None:
+        assert clean_narrator_name(normalize_arabic("ابو عيسى هذا حديث حسن صحيح")) is None
+
+    # === PRECISION: a real name is never truncated by the recovery. A theophoric
+    # idafa (عبد الله — الله is not a boundary), an idafa-kunya (ابو عبد الله), and a
+    # ف-INITIAL ism (فراس — a ف-narrative boundary needs a matn signal AFTER it, and
+    # there is none) all pass through unchanged. ===
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "عبد الله بن عمر",
+            "ابو عبد الله محمد بن اسماعيل البخاري",
+            "عبد الله بن فراس",
+            "ابو هريره",
+            "ابن عباس",
+        ],
+    )
+    def test_real_name_unchanged(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) == normalize_arabic(name)
+
+    # === Idempotency: the recovered value re-cleans to itself (clean(clean(x)) ==
+    # clean(x)). ===
+    @pytest.mark.parametrize(
+        "row",
+        [
+            "ابو هريره فذهب رسول الله وانتم تنتثلونها",
+            "ابن عباس هذا من رسول الله على ذلك",
+        ],
+    )
+    def test_recovery_is_idempotent(self, row: str) -> None:
+        once = clean_narrator_name(normalize_arabic(row))
+        assert once is not None
+        assert clean_narrator_name(once) == once
+
+
+class TestRecoveryIsNoWorseThanMain:
+    """The deletion direction of the da#424 A/B, pinned as unit assertions.
+
+    A drop-gate change has two failure directions (Sofia Cardoso, #423); the one
+    that matters most here is DELETING a real narrator. Every regression fixture the
+    #423/#314 series proved must survive — bio-promoted companions at mention_count 0,
+    the Prophet's daughter, the first Caliph — must STILL survive the recovery, which
+    only ever turns a drop or a polluted whole span into a cleaner name.
+
+    The full-corpus, bidirectional, unweighted A/B (row-level, mention_count=0 slice
+    visible) is DATA-GATED — no raw corpus ships in the repo (``data/raw`` is empty)
+    — and is deferred to a re-run, per the issue. These fixtures are the verbatim
+    corpus rows the series accumulated, standing in for the deletion-direction sweep.
+    """
+
+    @pytest.mark.parametrize(
+        "survivor",
+        [
+            # #423/#314 bio-promoted companions (all mention_count 0)
+            "ابو بكر الصديق عبدالله بن ابي قحافه عثمان التيمي خليفه رسول الله و",
+            "الطيب ولد رسول الله",
+            "ذواليدين صلي مع النبي",
+            "الحارث بن عمرو السهمي الباهلي شهد النبي في حجة الوداع عداده ف",
+            "ضمرة بن سعد السلمي شهد مع النبي حنينا",
+            "رغبان مولى حبيب بن مسلمة الفهري رأى أصحاب النبي يركعون ركعتين قبل المغرب",
+            "أبو صفية رجل من المهاجرين من 3 أصحاب النبي",
+            "زرارة بن عمرو النخعي وفد إلى رسول الله",
+            "Umm Kulthum bint Muhammad أم كلثوم بنت سيد البشر رسول الله",
+            # the muhaddithat precision dual — the Prophet's own name+title
+            "محمد رسول الله",
+        ],
+    )
+    def test_regression_survivor_still_survives(self, survivor: str) -> None:
+        assert clean_narrator_name(normalize_arabic(survivor)) is not None
