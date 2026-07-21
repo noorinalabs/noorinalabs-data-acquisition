@@ -446,6 +446,47 @@ def test_bio_promote_applies_name_quality_filter(tmp_path: Path) -> None:
     assert clean_name in names
 
 
+def test_bio_only_display_name_ar_strips_benediction(tmp_path: Path) -> None:
+    """da#301: on the BIO-ONLY new-node path the DISPLAY name_ar is benediction-free.
+
+    name_ar_normalized + make_canonical_id already used the cleaned form, but the
+    display name_ar kept the raw eulogy — visible in the node label of a bio-only
+    narrator (the loader keys node.name on name_ar first). The voweled surface is
+    preserved; identity (canonical_id, name_ar_normalized) is unchanged.
+    """
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+
+    # A voweled bio name with a benediction suffix, minted BIO-ONLY (no attested
+    # mention node pre-exists this run, so it takes the new-node branch).
+    raw_display = "أَبُو هُرَيْرَة رضي الله عنه"
+    clean_display = "أَبُو هُرَيْرَة"
+    _write_bios(
+        staging,
+        "kaggle",
+        [
+            {
+                "bio_id": "kaggle:99",
+                "source": "kaggle_narrators",
+                "name_ar": raw_display,
+                "name_ar_normalized": normalize_arabic(raw_display),
+            }
+        ],
+    )
+
+    rows = pq.read_table(promote_bios_to_canonical(staging, out_dir)).to_pylist()
+    cid = make_canonical_id(normalize_arabic("ابو هريره"))
+    rec = next(r for r in rows if r["canonical_id"] == cid)
+
+    # DISPLAY name_ar: benediction stripped, vowels preserved (not the raw eulogy).
+    assert rec["name_ar"] == clean_display
+    assert "رضي الله عنه" not in rec["name_ar"]
+    # Identity/matching unchanged — normalized form is still the cleaned bare name.
+    assert rec["name_ar_normalized"] == normalize_arabic("ابو هريره")
+
+
 # Verbatim `full_name` values from the acquired Itqan buckets — NOT synthetic. A
 # fabricated prose row would not exercise the truncation, and the guard could not go
 # red (feedback_fixture_makes_guard_assertion_inert). Provenance:

@@ -30,6 +30,7 @@ from src.parse.base import safe_str
 from src.parse.identity import make_canonical_id
 from src.parse.name_quality import (
     clean_narrator_name,
+    clean_narrator_name_display,
     cleaner_removed_content,
     is_mubham_relational,
 )
@@ -351,9 +352,21 @@ def promote_bios_to_canonical(
                 # node after a truncation, not after an asserted name. Count it.
                 if truncated:
                     truncated_residue_minted += 1
+                # da#301: strip the benediction/eulogy from the DISPLAY name_ar on
+                # the new-node (bio-only) path. name_ar_normalized + make_canonical_id
+                # already use the cleaned form (`norm`), but the display `name_ar`
+                # kept the raw eulogy ("… رضي الله عنه"). That is harmless when the
+                # bio MERGES onto a clean mention-derived node (the else branch never
+                # overwrites its name_ar), but a BIO-ONLY narrator surfaces the
+                # benediction in its label (the loader keys node.name on name_ar
+                # first). clean_narrator_name_display strips it while preserving the
+                # voweled surface; None (name_ar empty or all-eulogy) falls back to
+                # the cleaned normalized form via the loader's name_ar_normalized
+                # coalesce. Identity/matching are unchanged — cid + norm are as before.
+                display_name_ar = clean_narrator_name_display(name_ar) if name_ar else None
                 canonical_map[cid] = {
                     "canonical_id": cid,
-                    "name_ar": name_ar,
+                    "name_ar": display_name_ar,
                     "name_en": safe_str(row.get("name_en")),
                     "name_ar_normalized": norm,
                     "aliases": [],
