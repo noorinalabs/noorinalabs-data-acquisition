@@ -279,6 +279,44 @@ class TestSanadsetParser:
         bio_ids = bio_table.column("bio_id").to_pylist()
         assert all(bid.startswith("kaggle_narrators:bios:") for bid in bio_ids)
 
+    def test_mixed_blob_bio_name_arabic_span_extracted(self, tmp_path: Path) -> None:
+        """da#299 — a mixed Latin+Urdu-script+Arabic bio name stores the Arabic span.
+
+        kaggle rijāl bios carry the name as a mixed blob
+        ("Prophet Muhammad(saw) ( محمد … ( رضي الله عنه"). The parser pulls the
+        Arabic span out for ``name_ar`` (dropping the Latin gloss + parenthesised
+        benediction), and ``name_ar_normalized`` folds the Urdu letterforms to
+        Arabic — so an Urdu-script bio and its Arabic twin share a normal form.
+        """
+        raw_dir = tmp_path / "raw" / "sanadset"
+        raw_dir.mkdir(parents=True)
+        narrators_dir = raw_dir / "narrators"
+        narrators_dir.mkdir()
+        staging_dir = tmp_path / "staging"
+
+        _make_sanadset_csv(raw_dir / "hadiths.csv")
+        (narrators_dir / "bios.csv").write_text(
+            "name,death_year\n"
+            "Prophet Muhammad(saw) ( محمد بن یعقوب صلی اللہ علیہ وسلم ( رضي الله عنه,329\n",
+            encoding="utf-8",
+        )
+
+        with patch("src.parse.sanadset.get_settings") as mock_settings:
+            mock_settings.return_value.data_raw_dir = tmp_path / "raw"
+            mock_settings.return_value.data_staging_dir = staging_dir
+            outputs = parse_sanadset(raw_dir=raw_dir, staging_dir=staging_dir)
+
+        row = pq.read_table(outputs["narrators_bio"]).to_pylist()[0]
+        # name_ar keeps ONLY the Arabic span — the Latin gloss + parens are gone.
+        assert "Prophet" not in row["name_ar"]
+        assert "(" not in row["name_ar"]
+        assert row["name_ar"].startswith("محمد بن")
+        # name_ar_normalized folds the Urdu Farsi-yeh (U+06CC) to the Arabic yeh,
+        # so the folded name substring is present and no Urdu yeh survives.
+        norm = row["name_ar_normalized"]
+        assert "ی" not in norm
+        assert "محمد بن يعقوب" in norm
+
 
 class TestSanadsetCollections:
     """Collection emission for APPEARS_IN linkage (da#219 / Path B-B1)."""

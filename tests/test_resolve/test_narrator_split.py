@@ -33,13 +33,16 @@ from src.resolve.narrator_split import (
     SPLIT_MAX_CLUSTERS,
     SPLIT_MIN_SUPPORT,
     DatableMention,
+    _attested_death,
     _band_midpoint,
+    _collect_datable,
     _cut_bands,
     _generation_for_year,
     plan_split,
     split_generic_narrators,
 )
 from src.resolve.schemas import NARRATOR_MENTIONS_RESOLVED_SCHEMA, NARRATORS_CANONICAL_SCHEMA
+from src.resolve.tabaqa_dates import NARRATOR_DEATH_MAX_AH, NARRATOR_DEATH_MIN_AH
 from src.utils.arabic import normalize_arabic
 
 _ABU_ABDALLAH = normalize_arabic("أبو عبد الله")
@@ -201,6 +204,85 @@ def test_same_band_label_collision_tiebreak_by_anchor() -> None:
     assert {b.discriminator for b in plan.peeled} == {"d:280-400|aaa", "d:280-400|bbb"}
     ids = {b.new_id for b in plan.peeled}
     assert len(ids) == len(plan.peeled)  # every peeled id distinct
+
+
+# --------------------------------------------------------------------------- #
+# da#446 — implausible-attested scrub + estimate clamp on the date axis
+# --------------------------------------------------------------------------- #
+def _rec(death: Any, precision: str, generation: str | None = None) -> dict[str, Any]:
+    return {
+        "death_year_ah": death,
+        "death_date_precision": precision,
+        "generation": generation,
+    }
+
+
+def test_attested_death_keeps_plausible() -> None:
+    # A genuine attested isnad-narrator death is used as evidence unchanged.
+    assert _attested_death(_rec(256, "exact")) == 256
+    assert _attested_death(_rec(11, "exact")) == 11
+    assert _attested_death(_rec(NARRATOR_DEATH_MAX_AH, "range")) == NARRATOR_DEATH_MAX_AH
+
+
+def test_attested_death_scrubs_implausible_late_collector() -> None:
+    # The da#446 pollution: a late collector/commentator (d. 754 AH) mislabelled onto
+    # an early node. Its attested death is real but impossible for an isnad narrator, so
+    # it is dropped from the evidence pool (would otherwise drive the axis to 754+47=801).
+    assert _attested_death(_rec(754, "exact")) is None
+    assert _attested_death(_rec(859, "exact")) is None  # observed prod max
+    assert _attested_death(_rec(5, "exact")) is None  # before the Prophet's death
+
+
+def test_attested_death_generation_aware() -> None:
+    # A Companion (sahabi) carrying an attested death of 300 AH is impossible for that
+    # ṭabaqa even though 300 sits inside the loose [11, 450] envelope — dropped.
+    assert _attested_death(_rec(300, "exact", "sahabi")) is None
+    # …but a plausible-for-its-generation death is kept.
+    assert _attested_death(_rec(105, "exact", "sahabi")) == 105
+    assert _attested_death(_rec(300, "exact", "later")) == 300
+
+
+def test_attested_death_estimate_precision_still_excluded() -> None:
+    # The pre-existing da#340 rule holds: an estimated window is never evidence,
+    # independent of plausibility.
+    assert _attested_death(_rec(256, "tabaqa_estimate")) is None
+    assert _attested_death(_rec(256, "isnad_estimate")) is None
+    assert _attested_death(_rec(None, "exact")) is None
+
+
+def _one_chain(
+    candidate_id: str, anchor_id: str, cand_pos: int, anchor_pos: int
+) -> tuple[
+    list[tuple[str, int, int, str]],
+    dict[tuple[str, int], list[tuple[int, str]]],
+]:
+    """A single two-narrator chain (hadith ``h``, chain 0) with the candidate at
+    ``cand_pos`` and one attested anchor at ``anchor_pos`` — the minimal input for
+    :func:`_collect_datable`."""
+    chain = sorted([(cand_pos, candidate_id), (anchor_pos, anchor_id)])
+    chains = {("h", 0): chain}
+    mentions = [("h", 0, cand_pos, "m0")]
+    return mentions, chains
+
+
+def test_collect_datable_clamps_overflow_estimate() -> None:
+    # Teacher anchor at the maximum plausible death (450) → 450 + MID_GAP overflows the
+    # envelope; the per-mention estimate is clamped to NARRATOR_DEATH_MAX_AH, never 497.
+    mentions, chains = _one_chain("cand", "anc", cand_pos=1, anchor_pos=0)
+    datable = _collect_datable(mentions, chains, {"anc": NARRATOR_DEATH_MAX_AH}, {"anc": "anchor"})
+    assert len(datable) == 1
+    assert 450 + MID_GAP > NARRATOR_DEATH_MAX_AH  # the raw estimate really does overflow
+    assert datable[0].estimate == NARRATOR_DEATH_MAX_AH
+
+
+def test_collect_datable_clamps_underflow_estimate() -> None:
+    # Student anchor at the Prophet's-death floor (11) → 11 − MID_GAP underflows to −36;
+    # clamped to NARRATOR_DEATH_MIN_AH so the axis never emits a negative death year.
+    mentions, chains = _one_chain("cand", "anc", cand_pos=0, anchor_pos=1)
+    datable = _collect_datable(mentions, chains, {"anc": NARRATOR_DEATH_MIN_AH}, {"anc": "anchor"})
+    assert len(datable) == 1
+    assert NARRATOR_DEATH_MIN_AH - MID_GAP < NARRATOR_DEATH_MIN_AH  # raw estimate underflows
+    assert datable[0].estimate == NARRATOR_DEATH_MIN_AH
 
 
 # --------------------------------------------------------------------------- #
@@ -387,6 +469,54 @@ def test_stage_splits_two_bands_and_peels(tmp_path: Path) -> None:
     assert len(audit) == 1
     assert audit[0]["primary_id"] == cand
     assert audit[0]["new_id"] == peeled[0]["canonical_id"]
+
+
+def test_stage_da446_scrub_prevents_phantom_from_polluted_anchor(tmp_path: Path) -> None:
+    # da#446 — the scrub must prevent a phantom twin that da#452's coherence gate does
+    # NOT catch. A hub has one genuine band (candidate estimate ≈150) plus a spurious
+    # band that exists ONLY because a late collector (d.253 AH) is mislabelled ``sahabi``
+    # and welded in as a teacher — candidate estimate 253 + MID_GAP = 300 AH. That 300
+    # estimate is date-COHERENT (∈ the atbāʿ window 220–300), so Gate 0 (da#452) would
+    # keep it and the node would split into a phantom twin. da#446's generation-aware
+    # scrub drops the sahabi-d253 anchor from the evidence pool (253 ≫ 110+50), so the
+    # spurious mentions go undatable, leaving one band → the node abstains, whole.
+    out = tmp_path / "curated"
+    cand = make_canonical_id(_ABU_ABDALLAH)
+    legit_death = 150 - MID_GAP  # plausible anchor, generation unknown → estimate ≈150
+    polluted_death = 300 - MID_GAP  # 253 AH — coherent estimate, but impossible sahabi
+    canonical = [
+        _canonical_row(cand, _ABU_ABDALLAH, 55),
+        _anchor_row("nar:legit", legit_death),
+        # A late collector mislabelled sahabi: absolute-plausible (<=450) and its induced
+        # estimate is window-coherent, so ONLY the generation-aware scrub removes it.
+        _canonical_row(
+            "nar:poll",
+            normalize_arabic("راو متاخر مؤرخ"),
+            5,
+            death_year_ah=polluted_death,
+            death_date_precision="exact",
+            generation="sahabi",
+        ),
+    ]
+    mentions = _hadiths_against_anchor(cand, "nar:legit", 40, 0, "g")
+    mentions += _hadiths_against_anchor(cand, "nar:poll", 15, 0, "p")
+    _write(out, canonical, mentions)
+
+    # Sanity: the polluted anchor really would induce a coherent, qualifying second band
+    # were it not scrubbed — so this test bites on da#446, not da#452.
+    assert _generation_for_year(300) is not NarratorGeneration.UNKNOWN
+
+    result = split_generic_narrators(out)
+    assert result is None  # abstained — no phantom twin minted
+
+    by_id = _read_canonical(out)
+    twins = [
+        r
+        for r in by_id.values()
+        if r["name_ar_normalized"] == _ABU_ABDALLAH and r["canonical_id"] != cand
+    ]
+    assert twins == []
+    assert not (out / "narrator_splits.parquet").exists()
 
 
 def test_stage_peel_re_derives_attestation(tmp_path: Path) -> None:

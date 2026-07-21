@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import pytest
 
+from src.parse.identity import make_canonical_id
 from src.parse.name_quality import (
+    asserted_name_tokens,
     clean_narrator_name,
     clean_narrator_name_display,
+    cleaner_removed_content,
     is_mubham_relational,
     split_compound_narrators,
     strip_markup,
 )
-from src.utils.arabic import normalize_arabic
+from src.utils.arabic import extract_arabic_span, normalize_arabic
 
 
 class TestIsMubhamRelational:
@@ -403,6 +406,66 @@ class TestBenedictionAndProphetReference:
         )
 
 
+class TestUrduAndLatinResidue:
+    """da#299 — Urdu-script + Latin benediction/title residue in kaggle rijāl bios.
+
+    The kaggle bios store a mixed Latin + Urdu-script + Arabic blob. The Arabic
+    span is pulled out (:func:`extract_arabic_span`), Urdu letterforms fold to
+    Arabic (in :func:`normalize_arabic`), and the benediction — whether the Urdu
+    yeh-form or the Arabic maksura-form — is stripped, so an Urdu-script name
+    reaches the SAME benediction-free canonical form as its Arabic twin.
+    """
+
+    def _canonical(self, blob: str) -> str | None:
+        cleaned = clean_narrator_name(normalize_arabic(extract_arabic_span(blob)))
+        return make_canonical_id(cleaned) if cleaned else None
+
+    def test_urdu_blob_folds_to_arabic_twin_canonical(self) -> None:
+        urdu_blob = "Prophet Muhammad(saw) ( محمد صلی اللہ علیہ وسلم ( رضي الله عنه"
+        arabic_twin = "محمد صلى الله عليه وسلم رضي الله عنه"
+        assert self._canonical(urdu_blob) == self._canonical(arabic_twin)
+
+    def test_urdu_blob_reduces_to_the_bare_name(self) -> None:
+        urdu_blob = "Prophet Muhammad(saw) ( محمد صلی اللہ علیہ وسلم ( رضي الله عنه"
+        assert clean_narrator_name(normalize_arabic(extract_arabic_span(urdu_blob))) == "محمد"
+
+    def test_urdu_folded_tasliya_is_stripped(self) -> None:
+        # the Urdu benediction folds to the yeh-spelled "صلي …" form, which the
+        # da#299 honorific entries strip (mirrors the da#308 رضى/رضي pair).
+        name = "محمد بن یعقوب صلی اللہ علیہ وسلم"
+        assert clean_narrator_name(normalize_arabic(name)) == "محمد بن يعقوب"
+
+    # --- Latin / English benediction abbreviations stripped (parenthesized only) ---
+    @pytest.mark.parametrize(
+        ("polluted", "expected"),
+        [
+            ("Prophet Muhammad(saw)", "Muhammad"),
+            ("Abu Hurayra (r.a.)", "Abu Hurayra"),
+            ("Ali (as)", "Ali"),
+            ("Bilal (pbuh)", "Bilal"),
+            ("Hazrat Bilal", "Bilal"),
+            ("Sayyidina Umar", "Umar"),
+        ],
+    )
+    def test_latin_benediction_and_title_stripped(self, polluted: str, expected: str) -> None:
+        assert clean_narrator_name(normalize_arabic(polluted)) == expected
+
+    # --- PRECISION: a bare (non-parenthesized) benediction substring inside a real
+    #     romanized name is NOT stripped; real names pass through untouched ---
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "Anas",
+            "Malik",
+            "Al-Zuhri",
+            "Asma",  # leading "as" substring, no parens → untouched
+            "Rabia",  # leading "ra" substring, no parens → untouched
+        ],
+    )
+    def test_precision_real_romanized_names_kept(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) == name
+
+
 class TestMatnSentenceGate:
     """da#308 — matn / grading-commentary sentences dropped, real names spared.
 
@@ -584,7 +647,9 @@ class TestMatnSentenceGate:
     def test_truncated_matn_tail_punct_does_not_drop_name(
         self, polluted: str, expected: str
     ) -> None:
-        assert clean_narrator_name(normalize_arabic(polluted)) == expected
+        # `expected` is compared in normalized space so a name carrying alif-maqsura
+        # ("يحيى القطان") matches the ى→ي-folded cleaner output ("يحيي القطان") — da#427.
+        assert clean_narrator_name(normalize_arabic(polluted)) == normalize_arabic(expected)
 
     # --- PRECISION (Kavitha #2): connector-less real names (nasab == 0) — mononyms
     # and nisba/laqab-only forms — are NOT spared by the nasab guard, so they must
@@ -879,6 +944,21 @@ class TestCleanNarratorNameDisplay:
         polluted = "الشيخ الجليل أبو جعفر محمد بن علي بن الحسين بن بابويه"
         assert clean_narrator_name_display(polluted) == ("أبو جعفر محمد بن علي بن الحسين بن بابويه")
 
+    def test_dual_benediction_leaves_no_dangling_token(self) -> None:
+        # da#471: the dual-pronoun benediction "رضي الله عنهما" (after a PAIR of
+        # Companions) was only prefix-matched by "رضي الله عنه", leaving a dangling
+        # "ا"/"ما" fragment ("عبد الله بن عمر ا"). Now stripped whole — the display
+        # is the clean voweled name, and the normalized cleaner drops it too.
+        display = clean_narrator_name_display("عَبْدُ اللَّهِ بْنُ عُمَر رضي الله عنهما")
+        assert display == "عَبْدُ اللَّهِ بْنُ عُمَر"
+        assert clean_narrator_name(normalize_arabic("عبد الله بن عمر رضي الله عنهما")) == (
+            "عبد الله بن عمر"
+        )
+        # alif-maqsura spelling of the dual form is stripped the same way.
+        assert clean_narrator_name(normalize_arabic("عبد الله بن عمر رضى الله عنهما")) == (
+            "عبد الله بن عمر"
+        )
+
     @pytest.mark.parametrize("empty", [None, "", "   ", "<NAR>"])
     def test_empty_display_returns_none(self, empty: str | None) -> None:
         assert clean_narrator_name_display(empty) is None
@@ -1059,8 +1139,10 @@ class TestMatnSentenceVerseGate:
             "وكان ذلك في يوم من الايام على عهد النبي",
             # function-word-dense matn, no verb opener
             "هذا هو الذي كان على ذلك",
-            # bare/short function-word fragments (proclitic folded)
-            "على",
+            # bare/short function-word fragments (proclitic folded). NB "على" was
+            # removed from this drop set by da#427: it now folds to "علي" (the name
+            # ʿAlī) and is deliberately kept, not dropped — see
+            # TestAlifMaqsuraFold::test_ali_preposition_collision_keeps_the_name.
             "فلو",
             "ما",
         ],
@@ -1494,3 +1576,493 @@ class TestBioPromotedNarratorsSurvive:
     )
     def test_pure_provenance_fragment_still_drops(self, fragment: str) -> None:
         assert clean_narrator_name(normalize_arabic(fragment)) is None
+
+
+class TestCleanerRemovedContentContract:
+    """Pin `cleaner_removed_content`'s docstring CONTRACT (da#398).
+
+    da#398 corrected the docstring headline: a ``True`` means the cleaner "removed
+    more than an affix", NOT that it "cut into the name the source asserted." These
+    tests hold that contract against regression — the boolean is deliberately COARSE
+    and, in particular, returns ``True`` for BOTH a *cut-into-the-name* residue (a bare
+    ism) AND a *tail-after-a-complete-name* residue (a full nasab that lost only an
+    isnad tail). A caller keying identity on the cleaner's output must not read ``True``
+    as "the residue is not the asserted name" — for the tail class, it IS.
+
+    The finer split those two classes need is a SEPARATE predicate
+    (`is_recoverable_gloss_tail`, da#397); this boolean answers only the affix/removal
+    question, and this contract keeps `asserted_name_tokens` from quietly absorbing one
+    of the cleaner's cuts (which would evaporate the refusals it carries against a green
+    suite).
+    """
+
+    # Affix-only normalization → the asserted name is left WHOLE → False.
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "( 4875 ) عبد الله بن موسى",  # bracketed catalog entry number
+            "[ 969 ] احمد بن يوسف الثعلبي",  # square-bracket entry number
+            "مالك يعني بن انس",  # editorial connective يعني
+            "مالك بن انس رضي الله عنه",  # honorific suffix
+        ],
+    )
+    def test_affix_normalization_is_not_removed_content(self, raw: str) -> None:
+        normalized = normalize_arabic(raw)
+        cleaned = clean_narrator_name(normalized)
+        assert cleaned is not None, raw
+        assert not cleaner_removed_content(normalized, cleaned), (
+            f"normalization read as a cut: {raw}"
+        )
+        # The affix/removal line is drawn against the cleaner's OWN pre-truncation
+        # tokens, not a re-tokenization of the raw input.
+        assert tuple(cleaned.split()) == asserted_name_tokens(normalized)
+
+    def test_true_does_not_imply_cut_into_the_name(self) -> None:
+        """The load-bearing da#398 contract: ``True`` covers a cut-into-name AND a tail-cut.
+
+        Both a *cut-into-the-name* (bare-ism residue) and a *tail-after-a-complete-name*
+        (full-nasab residue that lost only a teacher-key isnad tail) return ``True`` — so
+        ``True`` alone cannot be read as "the residue is not the name the source
+        asserted." The tail-class residue below is a complete nasab.
+        """
+        # cut INTO the name: `عبيده` is a bare ism, a fragment of the asserted span.
+        cut_into = normalize_arabic("عبيدة مولى رسول الله ذكره بن شاهين واستدركه أبو موسى")
+        cut_into_cleaned = clean_narrator_name(cut_into)
+        assert cut_into_cleaned == "عبيده"
+        assert cleaner_removed_content(cut_into, cut_into_cleaned)
+
+        # tail AFTER a complete name: the full nasab is intact; only `عن انس` was cut.
+        tail_cut = normalize_arabic("اسحاق بن مره عن انس")
+        tail_cut_cleaned = clean_narrator_name(tail_cut)
+        assert tail_cut_cleaned == "اسحاق بن مره"
+        assert cleaner_removed_content(tail_cut, tail_cut_cleaned)
+
+        # The contract: same ``True``, categorically different residues. The tail-class
+        # residue is a COMPLETE nasab (>= 3 tokens carrying بن) — a real asserted name —
+        # while the cut-into-name residue is a bare ism. `True` does not distinguish them.
+        assert len(tail_cut_cleaned.split()) >= 3 and "بن" in tail_cut_cleaned.split()
+        assert len(cut_into_cleaned.split()) == 1
+
+    def test_removed_content_is_a_strict_shortening(self) -> None:
+        """Whenever the predicate is True, the residue is strictly shorter than asserted.
+
+        The dual framing of the contract: a cut removes tokens, so a ``True`` residue is
+        a proper prefix-length-reduction of what the source asserted — never equal, never
+        longer. This is what makes a truncation visible where a normalization is not.
+        """
+        for raw in ("اسحاق بن مره عن انس", "عبيدة مولى رسول الله ذكره بن شاهين واستدركه أبو موسى"):
+            normalized = normalize_arabic(raw)
+            cleaned = clean_narrator_name(normalized)
+            assert cleaned is not None, raw
+            assert cleaner_removed_content(normalized, cleaned), raw
+            assert len(cleaned.split()) < len(asserted_name_tokens(normalized)), raw
+
+
+class TestTruncateAndReGateRecovery:
+    """da#424 — recover a real leading narrator from a matn/provenance tail.
+
+    The da#314 residual: a ``<real name> + <matn/bio tail>`` span whose tail carries
+    no ``_ISNAD_BOUNDARY`` verb (so class 5's truncation never fires) is either
+    DROPPED whole — deleting the real leading narrator — or KEPT whole, matn and all.
+    #423's provenance rule was scoped all-residue precisely so it could never delete
+    a rijal biography, which left this residual for here.
+
+    The remedy is a truncate-and-re-gate that cuts at the name/matn boundary and
+    re-gates the leading head. It is a PURE RECOVERY: measured against
+    ``origin/deployments/phase-9/wave-26`` over every Arabic fixture in this file it
+    newly deletes ZERO rows (``TestRecoveryIsNoWorseThanMain`` pins the deletion
+    direction) — it only ever replaces a drop or a matn-polluted whole span with a
+    cleaner leading name.
+    """
+
+    # === AC1: a matn NARRATIVE tail after a real name — kept WHOLE by main (a
+    # matn-polluted "name"), cleaned to the leading name here. The boundary is the
+    # ف-narrative verb فذهب ("so he went"), corroborated by the رسول الله that
+    # follows it. Verbatim shape from the issue body. ===
+    def test_matn_narrative_tail_truncated_to_leading_name(self) -> None:
+        row = "ابو هريره فذهب رسول الله وانتم تنتثلونها"
+        assert clean_narrator_name(normalize_arabic(row)) == normalize_arabic("ابو هريره")
+
+    # === AC1 (reverse): main KEEPS the polluted whole span; the recovery must
+    # change it, not leave it. Pins that the ف-narrative truncation actually fires. ===
+    def test_matn_narrative_span_is_not_left_whole(self) -> None:
+        row = normalize_arabic("ابو هريره فذهب رسول الله وانتم تنتثلونها")
+        assert clean_narrator_name(row) != row
+
+    # === AC2: a real narrator LEADING a matn quote that main drops ENTIRELY —
+    # Ivana Horvat's two recoveries (ابن عباس, ابو القاسم). The tail is provenance /
+    # particle-dense matn (no isnad verb), so the matn-sentence gate drops the whole
+    # span on main; truncate-and-re-gate recovers the leading name. ===
+    @pytest.mark.parametrize(
+        "row,expected",
+        [
+            ("ابن عباس هذا من رسول الله على ذلك", "ابن عباس"),
+            ("ابو القاسم هذا من رسول الله على ذلك", "ابو القاسم"),
+            # NB the leading matn particle is هذا, not على: post-da#427 على folds to
+            # علي (the name) and is no longer a _MATN_PARTICLES boundary, so a tail
+            # LEADING with على would keep it as part of the recovered name.
+            ("ابن عباس هذا في ذلك كذلك لذلك", "ابن عباس"),
+            ("ابو القاسم كل ذلك في هذا على انتم", "ابو القاسم"),
+        ],
+    )
+    def test_real_narrator_leading_matn_quote_recovered(self, row: str, expected: str) -> None:
+        # main drops the whole span (verified: TestRecoveryIsNoWorseThanMain harvests
+        # exactly these as None->name recoveries); the recovery returns the lead.
+        assert clean_narrator_name(normalize_arabic(row)) == normalize_arabic(expected)
+
+    # === A bare matn head (no nasab connector) is NOT resurrected. The recovered
+    # head MUST carry a kunya/ibn/bn — دعوني ("leave me") / سريه تغزو ("a raiding
+    # party") have none, so these matn bodies stay dropped, never handed back as a
+    # narrator. These are the verbatim corpus rows that the da#314 pushed-fold
+    # regression minted 52 nodes from. ===
+    @pytest.mark.parametrize(
+        "matn",
+        [
+            # verbatim mid-matn corpus rows (TestScrubDoesNotDeleteRealNarrators) —
+            # both DROP on main and must keep dropping; the recovery scan reaches a
+            # ف-narrative boundary (فالذي / في) but the head before it (دعوني /
+            # سريه تغزو) has no nasab connector, so nothing is handed back.
+            "دعوني فالذي انا فيه خير اوصيكم بثلاث اخرجوا المشركين من جزيره العرب واجيزوا الوفد بنحو ما كنت اجيزهم",  # noqa: E501
+            "سريه تغزو في سبيل الله والذي نفسي بيده لوددت اني اقتل في سبيل الله",
+        ],
+    )
+    def test_bare_matn_head_without_nasab_is_not_resurrected(self, matn: str) -> None:
+        assert clean_narrator_name(normalize_arabic(matn)) is None
+
+    # === #423's all-residue scoping is NOT loosened: a substantive-but-matn residual
+    # with a VERB but no nasab lead ("كمن زار رسول الله") is left KEPT, exactly as
+    # the accepted-residual fixture (TestMatnProvenanceAndOath) requires — the
+    # recovery has no nasab-bearing lead to recover, so it does not touch it. ===
+    def test_accepted_verb_residual_still_kept(self) -> None:
+        assert clean_narrator_name(normalize_arabic("كمن زار رسول الله")) is not None
+
+    # === A bio apposition that mentions the Prophet NOMINALLY (خليفه رسول الله,
+    # شهد النبي …, وفد الى رسول الله) is a rijal biography, NOT matn — the recovery's
+    # KEPT-WHOLE path truncates ONLY at a narrative verb, never at a bare Prophet
+    # reference or particle, so these survive WHOLE, not lopped to a dangling head.
+    # (Deleting them is the exact #423 failure; lopping the epithet is a lesser
+    # version of the same over-reach.) ===
+    @pytest.mark.parametrize(
+        "bio",
+        [
+            "الحارث بن عمرو السهمي الباهلي شهد النبي في حجة الوداع عداده",
+            "ضمرة بن سعد السلمي شهد مع النبي حنينا",
+            "زرارة بن عمرو النخعي وفد الى رسول الله",
+            "الطيب ولد رسول الله",
+        ],
+    )
+    def test_bio_apposition_kept_whole_not_truncated(self, bio: str) -> None:
+        norm = normalize_arabic(bio)
+        assert clean_narrator_name(norm) == norm
+
+    # === A grading-COMMENTARY span (al-Tirmidhī's own verdict keyed on his kunya)
+    # is NOT recovered — the compiler has a clean canonical of his own (class 9), so
+    # recovering the kunya would re-mint a redundant commentary mention. Stays
+    # dropped. ===
+    def test_grading_commentary_not_recovered(self) -> None:
+        assert clean_narrator_name(normalize_arabic("ابو عيسى هذا حديث حسن صحيح")) is None
+
+    # === PRECISION: a real name is never truncated by the recovery. A theophoric
+    # idafa (عبد الله — الله is not a boundary), an idafa-kunya (ابو عبد الله), and a
+    # ف-INITIAL ism (فراس — a ف-narrative boundary needs a matn signal AFTER it, and
+    # there is none) all pass through unchanged. ===
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "عبد الله بن عمر",
+            "ابو عبد الله محمد بن اسماعيل البخاري",
+            "عبد الله بن فراس",
+            "ابو هريره",
+            "ابن عباس",
+        ],
+    )
+    def test_real_name_unchanged(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) == normalize_arabic(name)
+
+    # === Idempotency: the recovered value re-cleans to itself (clean(clean(x)) ==
+    # clean(x)). ===
+    @pytest.mark.parametrize(
+        "row",
+        [
+            "ابو هريره فذهب رسول الله وانتم تنتثلونها",
+            "ابن عباس هذا من رسول الله على ذلك",
+        ],
+    )
+    def test_recovery_is_idempotent(self, row: str) -> None:
+        once = clean_narrator_name(normalize_arabic(row))
+        assert once is not None
+        assert clean_narrator_name(once) == once
+
+
+class TestRecoveryIsNoWorseThanMain:
+    """The deletion direction of the da#424 A/B, pinned as unit assertions.
+
+    A drop-gate change has two failure directions (Sofia Cardoso, #423); the one
+    that matters most here is DELETING a real narrator. Every regression fixture the
+    #423/#314 series proved must survive — bio-promoted companions at mention_count 0,
+    the Prophet's daughter, the first Caliph — must STILL survive the recovery, which
+    only ever turns a drop or a polluted whole span into a cleaner name.
+
+    The full-corpus, bidirectional, unweighted A/B (row-level, mention_count=0 slice
+    visible) is DATA-GATED — no raw corpus ships in the repo (``data/raw`` is empty)
+    — and is deferred to a re-run, per the issue. These fixtures are the verbatim
+    corpus rows the series accumulated, standing in for the deletion-direction sweep.
+    """
+
+    @pytest.mark.parametrize(
+        "survivor",
+        [
+            # #423/#314 bio-promoted companions (all mention_count 0)
+            "ابو بكر الصديق عبدالله بن ابي قحافه عثمان التيمي خليفه رسول الله و",
+            "الطيب ولد رسول الله",
+            "ذواليدين صلي مع النبي",
+            "الحارث بن عمرو السهمي الباهلي شهد النبي في حجة الوداع عداده ف",
+            "ضمرة بن سعد السلمي شهد مع النبي حنينا",
+            "رغبان مولى حبيب بن مسلمة الفهري رأى أصحاب النبي يركعون ركعتين قبل المغرب",
+            "أبو صفية رجل من المهاجرين من 3 أصحاب النبي",
+            "زرارة بن عمرو النخعي وفد إلى رسول الله",
+            "Umm Kulthum bint Muhammad أم كلثوم بنت سيد البشر رسول الله",
+            # the muhaddithat precision dual — the Prophet's own name+title
+            "محمد رسول الله",
+        ],
+    )
+    def test_regression_survivor_still_survives(self, survivor: str) -> None:
+        assert clean_narrator_name(normalize_arabic(survivor)) is not None
+
+
+class TestFaNarrativeIsmPrecision:
+    """da#424 review (Oyunbileg, PR #474) — a ف-initial ISM is not a ف-narrative verb.
+
+    ``_is_fa_narrative`` accepts any ف-initial ≥4-char token whose stem is not a
+    nasab connector / particle, so real narrator names built on a ف-initial ism
+    (``فراس`` Firās, ``فديك`` Fudayk, ``فوزي`` Fawzī, ``فتحي`` Fatḥī, …) tripped the
+    ف-narrative boundary. The original corroboration scanned the WHOLE remainder with
+    ``any()``, so a far-downstream bio preposition (``… القرشي في المدينه``) made a
+    ف-ism read as a narrative verb and SEVERED the nasab chain into a dangling
+    ``X بن`` fragment — a real, identifiable narrator quietly reduced to a fragment.
+    It didn't register as a deletion (NEWLY-DELETED stayed 0), which is why a
+    metric-only review missed it; it took reading the Arabic and constructing
+    adversarial isnad shapes.
+
+    Two locality guards fix it (:func:`_is_fa_narrative_boundary`): a ف-token
+    immediately after a kunya / nasab connector (``ابو``/``بن``/…) is that name's
+    ism, never a verb; and the corroborating matn signal must appear BEFORE any
+    intervening nasab connector. These are Oyunbileg's five repro shapes.
+    """
+
+    # A ف-initial ism followed by BIO content (nisba + preposition) must NEVER be
+    # severed — the ف-ism token itself must survive into the cleaned name, and the
+    # result must never be a dangling ``X بن`` fragment.
+    @pytest.mark.parametrize(
+        "row,fa_ism",
+        [
+            ("عبد الله بن فراس بن مالك القرشي في المدينه", "فراس"),
+            ("محمد بن فديك الديلي في الكوفه على قوله", "فديك"),
+            ("احمد بن فوزي الدمشقي في سنه مءتين", "فوزي"),
+            ("علي بن فتحي البصري عند اهل الحديث", "فتحي"),
+            ("ابو فراس الحمداني في الشام على الثغر", "فراس"),
+        ],
+    )
+    def test_fa_initial_ism_not_severed_by_downstream_bio(self, row: str, fa_ism: str) -> None:
+        cleaned = clean_narrator_name(normalize_arabic(row))
+        assert cleaned is not None, f"real narrator dropped entirely: {row}"
+        toks = cleaned.split()
+        # the ف-ism must survive — it is part of the name, not a matn verb that was cut
+        assert normalize_arabic(fa_ism) in toks, f"ف-ism severed from the name: {cleaned!r}"
+        # and the result must never be a dangling ``X بن`` truncation
+        assert toks[-1] not in ("بن", "ابن"), f"severed to a nasab fragment: {cleaned!r}"
+
+    # SURVIVOR PATH (Nikolaos, PR #474): a plain ف-initial NISBA / ethnonym
+    # (فارسي / فلسطيني / فرغاني) NOT preceded by a connector, followed only by a bare
+    # PREPOSITION (في …), must be kept WHOLE. A bare preposition is not narration
+    # evidence — it attaches to a noun as readily as a verb — so it must not
+    # corroborate a ف-narrative boundary. Clipping the nisba drops the disambiguator
+    # between two otherwise-identical nasab leads (a wrong-merge hazard). An
+    # ism-after-connector fixture alone does NOT cover this shape.
+    @pytest.mark.parametrize(
+        "row,nisba",
+        [
+            ("عبد الله بن عمر فلسطيني في القدس", "فلسطيني"),
+            ("عبد الله بن عمر فرغاني في بخارى", "فرغاني"),
+            ("عبد الرحمن بن عوف فارسي الاصل في المدينه", "فارسي"),
+        ],
+    )
+    def test_fa_nisba_before_bare_preposition_is_kept_whole(self, row: str, nisba: str) -> None:
+        cleaned = clean_narrator_name(normalize_arabic(row))
+        assert cleaned == normalize_arabic(row), f"nisba clipped on the survivor path: {cleaned!r}"
+        assert normalize_arabic(nisba) in cleaned.split()
+
+    # A ف-token right after a kunya / nasab connector is the ism (``ابو فراس``,
+    # ``بن فراس``) and must not truncate even when a matn signal follows.
+    @pytest.mark.parametrize(
+        "row,expected",
+        [
+            ("ابو فراس", "ابو فراس"),
+            ("عبد الله بن فراس", "عبد الله بن فراس"),
+            ("محمد بن فديك", "محمد بن فديك"),
+        ],
+    )
+    def test_fa_ism_after_connector_is_kept(self, row: str, expected: str) -> None:
+        assert clean_narrator_name(normalize_arabic(row)) == normalize_arabic(expected)
+
+    # LOCALITY guard specifically: a ف-ism preceded by a NON-connector ism (so the
+    # preceding-connector guard cannot help) but immediately followed by ``بن`` —
+    # the corroboration scan hits ``بن`` before any matn signal and refuses to cut.
+    # The span-wide ``any()`` bug would sever this NASAB-bearing head (dropping the
+    # ف-ism and its lineage), so this isolates the locality fix.
+    @pytest.mark.parametrize(
+        "row,fa_ism",
+        [
+            ("محمد بن سعيد فراس بن مالك في المدينه", "فراس"),
+            ("احمد بن عمر فديك بن زيد الكوفي على قوله", "فديك"),
+        ],
+    )
+    def test_fa_ism_before_nasab_connector_is_not_cut(self, row: str, fa_ism: str) -> None:
+        cleaned = clean_narrator_name(normalize_arabic(row))
+        assert cleaned is not None and normalize_arabic(fa_ism) in cleaned.split()
+
+    # The genuine ف-narrative verb (matn object LOCAL, before any nasab connector)
+    # still truncates — the fix narrows the rule, it does not disable it.
+    def test_genuine_fa_narrative_still_truncates(self) -> None:
+        assert clean_narrator_name(
+            normalize_arabic("ابو هريره فذهب رسول الله وانتم تنتثلونها")
+        ) == normalize_arabic("ابو هريره")
+
+    # A bare matn head opening with a ف-narrative verb (no nasab lead) still drops —
+    # the locality fix must not resurrect it.
+    def test_fa_narrative_matn_head_without_nasab_still_drops(self) -> None:
+        assert (
+            clean_narrator_name(normalize_arabic("فذهب رسول الله وانتم تنتثلونها الى المدينه"))
+            is None
+        )
+
+
+class TestAlifMaqsuraFold:
+    """da#427 — normalize_arabic folds alif maqṣūra ى→ي; the name-quality sets follow.
+
+    The ~13 ``الذى``/``التى``/``والذى`` matn relative pronouns now normalize to the
+    ``الذي``/``التي`` boundary set and are scrubbed. The fold is homographic-safe on
+    names — no ism/nisba lands on a particle or boundary token — with ONE collision
+    the fold does not resolve in normalization (``على`` "on" → ``علي``, the name ʿAlī),
+    handled here by REMOVING ``على`` from _MATN_PARTICLES so a bare ``علي`` narrator is
+    never dropped. That trade is a recall loss in the safe direction (leaves residue
+    in; never deletes a name).
+    """
+
+    # === TARGET: the matn relative pronouns now reach the boundary set ===
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("فلان الذى قال كذا", "فلان"),  # truncated at the الذى boundary
+            ("حميد التى فيها", "حميد"),
+        ],
+    )
+    def test_matn_relative_pronoun_truncates_at_boundary(self, raw: str, expected: str) -> None:
+        assert clean_narrator_name(normalize_arabic(raw)) == normalize_arabic(expected)
+
+    @pytest.mark.parametrize("bare", ["الذى", "التى", "والذى"])
+    def test_bare_relative_pronoun_dropped(self, bare: str) -> None:
+        # a span that is ONLY the (now-folded) boundary pronoun leaves no name → drop
+        assert clean_narrator_name(normalize_arabic(bare)) is None
+
+    # === COLLISION: على -> علي (ʿAlī). The name MUST survive; the preposition is
+    # no longer detectable as a matn particle (documented recall loss). ===
+    @pytest.mark.parametrize("ali", ["على", "علي", "علي بن ابي طالب", "ابو الحسن علي"])
+    def test_ali_preposition_collision_keeps_the_name(self, ali: str) -> None:
+        assert clean_narrator_name(normalize_arabic(ali)) is not None
+
+    def test_ali_not_dropped_as_bare_particle(self) -> None:
+        # bare "على" (folds to علي) must NOT drop as an all-particle fragment (2c) —
+        # that would delete ʿAlī, one of the most-attested transmitters.
+        assert clean_narrator_name(normalize_arabic("على")) == normalize_arabic("علي")
+
+    # === Real alif-maqsura names survive and fold consistently ===
+    @pytest.mark.parametrize(
+        "name",
+        ["يحيى", "يحيى بن معين", "موسى بن جعفر", "عيسى", "ابو موسى الاشعري", "المثنى بن سعيد"],
+    )
+    def test_maqsura_names_preserved(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) == normalize_arabic(name)
+
+    # === SET-LEVEL INVARIANT (#423 shape): no name/nisba folds onto a droppable
+    # token. This is the load-bearing safety proof — if a future edit adds a
+    # maqsura-final name-shape to a droppable set, or restores على to the particle
+    # set, this fails. ===
+    def test_no_name_folds_onto_a_droppable_token(self) -> None:
+        from src.parse.name_quality import (
+            _APPOSITION_CONNECTORS,
+            _ISNAD_BOUNDARY,
+            _MATN_DENSITY,
+            _MATN_OPENERS,
+            _MATN_PARTICLES,
+            _NASAB_CONNECTORS,
+        )
+
+        # common alif-maqsura-final isms / nisbas (folded to their ي forms)
+        folded_names = {
+            normalize_arabic(n)
+            for n in (
+                "يحيى",
+                "موسى",
+                "عيسى",
+                "المثنى",
+                "مصطفى",
+                "مرتضى",
+                "كسرى",
+                "ليلى",
+                "سلمى",
+                "بشرى",
+                "يعلى",
+                "على",  # the preposition that folds onto the name علي
+            )
+        }
+        droppable = (
+            _MATN_PARTICLES
+            | _ISNAD_BOUNDARY
+            | _MATN_OPENERS
+            | _MATN_DENSITY
+            | _APPOSITION_CONNECTORS
+            | _NASAB_CONNECTORS
+        )
+        assert folded_names.isdisjoint(droppable), folded_names & droppable
+
+    def test_ali_specifically_not_in_matn_particles(self) -> None:
+        """The على→علي collision pin (mirrors the أم/ام homograph pin)."""
+        from src.parse.name_quality import _MATN_PARTICLES
+
+        assert normalize_arabic("علي") not in _MATN_PARTICLES
+        assert normalize_arabic("على") not in _MATN_PARTICLES
+
+    def test_no_droppable_set_member_carries_alif_maqsura(self) -> None:
+        """Completeness: every ى in a droppable set was converted to ي (da#427)."""
+        from src.parse.name_quality import (
+            _APPOSITION_CONNECTORS,
+            _ISNAD_BOUNDARY,
+            _ISNAD_FORMULA_FRAGMENTS,
+            _MATN_DENSITY,
+            _MATN_OPENERS,
+            _MATN_PARTICLES,
+        )
+
+        for s in (
+            _MATN_PARTICLES,
+            _ISNAD_BOUNDARY,
+            _MATN_OPENERS,
+            _MATN_DENSITY,
+            _APPOSITION_CONNECTORS,
+            _ISNAD_FORMULA_FRAGMENTS,
+        ):
+            assert all("ى" not in tok for tok in s), [t for t in s if "ى" in t]
+
+    def test_apposition_particle_homograph_invariant_still_holds(self) -> None:
+        """After مولى→مولي the أم/ام pin (da#423) is unchanged — still the sole overlap."""
+        from src.parse.name_quality import _APPOSITION_CONNECTORS, _MATN_PARTICLES
+
+        assert _APPOSITION_CONNECTORS & _MATN_PARTICLES == frozenset({"ام"})
+
+    # === Composition with the da#299 Urdu-yeh fold: an Urdu-script and an
+    # Arabic-script benediction both strip to the same recovered name ===
+    def test_composes_with_da299_benediction_strip(self) -> None:
+        urdu = clean_narrator_name(normalize_arabic("ابو هريره صلی الله علیه وسلم"))
+        arabic = clean_narrator_name(normalize_arabic("ابو هريره صلى الله عليه وسلم"))
+        assert urdu == arabic == normalize_arabic("ابو هريره")

@@ -49,6 +49,15 @@ Algorithm (per eligible canonical id ``C``, name ``N``)
    death estimate is ``neighbour_death ± MID_GAP`` (``MID_GAP`` the midpoint of
    :data:`~src.resolve.mononym_split._MIN_GAP`/``_MAX_GAP``), averaged over the
    mention's attested neighbours. A mention with no attested neighbour is *undatable*.
+   **da#446 — implausible-attested scrub.** A neighbour's attested death is used as
+   evidence only when it is plausible for an isnad narrator
+   (:func:`~src.resolve.tabaqa_dates.is_plausible_narrator_death_ah`): the universal
+   date-axis pollution is late collectors/commentators (d. ~700–780 AH) welded onto
+   early nodes, whose real-but-impossible death year would drive this estimate to
+   nonsense (−44 / 805 AH). Such a neighbour is dropped from the pool (so the mention
+   is undated rather than mis-dated), and the averaged estimate is clamped to the
+   plausibility envelope (:func:`~src.resolve.tabaqa_dates.clamp_death_ah`) so the
+   boundary ±MID_GAP shift cannot underflow/overflow it out of range either.
 3. **Cluster** the per-mention estimates 1-D, gap-based: sort and cut wherever a
    consecutive gap exceeds :data:`SPLIT_BAND_GAP` (~one generation).
 4. **ABSTAIN — leave ``C`` as ONE node — UNLESS ALL hold** (the over-split guard):
@@ -150,7 +159,12 @@ from src.resolve.attestation import derive_attestation
 from src.resolve.generic_name import is_generic_name
 from src.resolve.mononym_split import _MAX_GAP, _MIN_GAP, is_registered_mononym
 from src.resolve.schemas import NARRATOR_MENTIONS_RESOLVED_SCHEMA, NARRATORS_CANONICAL_SCHEMA
-from src.resolve.tabaqa_dates import _GENERATION_DEATH_WINDOW_AH
+from src.resolve.tabaqa_dates import (
+    _GENERATION_DEATH_WINDOW_AH,
+    clamp_death_ah,
+    generation_from_value,
+    is_plausible_narrator_death_ah,
+)
 from src.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -447,17 +461,29 @@ def _as_int(value: Any) -> int | None:
 
 
 def _attested_death(rec: dict[str, Any]) -> int | None:
-    """A record's death year iff it is *attested* (present, precision not an estimate).
+    """A record's death year iff it is *attested* AND plausible for an isnad narrator.
 
     An estimated window — the ṭabaqa layer's ``tabaqa_estimate`` OR a prior isnad-split
     peel's ``isnad_estimate`` (da#340), i.e. any precision in
     :data:`_ESTIMATED_PRECISIONS` — is never used as evidence, keeping the pass
     cascade-free and re-runs a strict no-op.
+
+    da#446 — implausible-attested scrub. An attested death that is impossible for a
+    narrator standing in an isnad (:func:`~src.resolve.tabaqa_dates.is_plausible_narrator_death_ah`,
+    generation-aware on the record's own ``generation``) is dropped from the
+    neighbour-death evidence pool: the universal date-axis pollution is late
+    collectors/commentators (d. ~700–780 AH) mislabelled onto early nodes, whose
+    real-but-impossible death year would otherwise drive a mention's
+    ``neighbour_death ± MID_GAP`` estimate to nonsense (−44 / 805 AH). A neighbour
+    with no *plausible* attested death simply contributes no adjacency evidence — the
+    mention it neighbours is treated as undatable, never dated off a corrupt anchor.
     """
     year = _as_int(rec.get("death_year_ah"))
     if year is None:
         return None
     if rec.get("death_date_precision") in _ESTIMATED_PRECISIONS:
+        return None
+    if not is_plausible_narrator_death_ah(year, generation_from_value(rec.get("generation"))):
         return None
     return year
 
@@ -703,10 +729,15 @@ def _collect_datable(
             if nname:
                 anchors.append(nname)
         if estimates:
+            # da#446: clamp the per-mention estimate to the plausibility envelope. The
+            # neighbour-death pool is already implausibility-scrubbed (_attested_death),
+            # but the ±MID_GAP transmission-gap shift still underflows/overflows at the
+            # boundary (a student of an 11 AH Companion → 11 − 47 = −36), so the axis is
+            # bounded here to stop it emitting −44 / 805 AH.
             datable.append(
                 DatableMention(
                     mention_id=mention_id,
-                    estimate=round(sum(estimates) / len(estimates)),
+                    estimate=clamp_death_ah(round(sum(estimates) / len(estimates))),
                     anchor_names=tuple(sorted(set(anchors))),
                 )
             )
@@ -798,6 +829,7 @@ def split_generic_narrators(output_dir: Path, *, staging_dir: Path | None = None
     attested_by_id: dict[str, int] = {}
     record_by_id: dict[str, dict[str, Any]] = {}
     candidate_ids: set[str] = set()
+    scrubbed_deaths = 0  # da#446: attested deaths dropped as implausible for an isnad narrator
     for rec in records:
         cid = safe_str(rec.get("canonical_id"))
         if cid is None:
@@ -809,6 +841,13 @@ def split_generic_narrators(output_dir: Path, *, staging_dir: Path | None = None
         attested = _attested_death(rec)
         if attested is not None:
             attested_by_id[cid] = attested
+        elif (
+            _as_int(rec.get("death_year_ah")) is not None
+            and rec.get("death_date_precision") not in _ESTIMATED_PRECISIONS
+        ):
+            # A present, non-estimate death that _attested_death rejected can only be the
+            # da#446 implausibility scrub — count it for the audit log.
+            scrubbed_deaths += 1
         mention_count = _as_int(rec.get("mention_count")) or 0
         if (
             name_norm is not None
@@ -816,6 +855,14 @@ def split_generic_narrators(output_dir: Path, *, staging_dir: Path | None = None
             and not is_registered_mononym(name_norm)
         ):
             candidate_ids.add(cid)
+
+    if scrubbed_deaths:
+        logger.info(
+            "narrator_split_implausible_deaths_scrubbed",
+            scrubbed=scrubbed_deaths,
+            attested_pool=len(attested_by_id),
+            canonical_total=len(records),
+        )
 
     if not candidate_ids:
         logger.info("narrator_split_no_candidates", canonical_total=len(records))

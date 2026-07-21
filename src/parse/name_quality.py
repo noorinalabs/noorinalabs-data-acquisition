@@ -141,6 +141,31 @@ Sunni/Tirmidhī matn shapes and missed the dominant Shia dialogue-hadith form
     leaving it title-polluted (it was never dropped, since ``الشيخ`` with the
     definite article never matched the bare ``شيخ`` in :data:`_MUBHAM_LEADERS`).
 
+Truncate-and-re-gate recovery (da#424) — the remedy for the da#314 residual. The
+matn-sentence gate (class 9) has two failure modes on a ``<real name> + <matn/bio
+tail>`` span whose tail carries no :data:`_ISNAD_BOUNDARY` verb (so class 5's
+truncation never fires): it either DROPS the whole span — deleting the real leading
+narrator — or KEEPS it whole, matn and all. #423's provenance rule was deliberately
+scoped all-residue precisely so it could never do the former to a rijal biography,
+which left the residual for here.
+
+14. **Leading-name recovery** — when a span leads with a real nasab/kunya name and
+    the remainder is matn or provenance, :func:`_recover_leading_name` cuts at the
+    name/matn boundary (:func:`_leading_name_before_matn`) and re-gates the head
+    through :func:`clean_narrator_name`, recovering it: ``"ابو هريره فذهب رسول الله
+    وانتم تنتثلونها"`` → ``"ابو هريره"``; ``"ابن عباس …"`` / ``"ابو القاسم …"`` leading
+    a matn quote are recovered rather than dropped whole. It is a pure RECOVERY —
+    it only ever replaces a *drop* or a *matn-polluted whole span* with a cleaner
+    leading name, and NEVER turns a surviving name into a drop (no-worse-than-main).
+    The recovered head MUST carry a :data:`_NASAB_CONNECTORS` token, which is what
+    keeps a bare matn head (``"دعوني"``, ``"سريه تغزو …"`` — no nasab) from being
+    resurrected as a narrator; and the ``ف``-narrative boundary (``فذهب`` "so he
+    went") fires only when a matn signal follows it, so a real ``ف``-initial ism
+    (``فراس``) with no matn after it is never cut. It does NOT loosen #423's
+    all-residue provenance scoping — a substantive-but-matn span like ``"كمن زار
+    رسول الله"`` (verb ``زار``) has no nasab lead, so it is left KEPT, exactly as
+    #423 requires.
+
 The phrase constants are in **normalized-Arabic** form (post
 ``normalize_arabic``) because this runs on ``name_normalized``.
 """
@@ -156,6 +181,7 @@ __all__ = [
     "clean_narrator_name_display",
     "asserted_name_tokens",
     "cleaner_removed_content",
+    "is_recoverable_gloss_tail",
     "is_mubham_relational",
     "split_compound_narrators",
     "strip_markup",
@@ -166,6 +192,27 @@ __all__ = [
 # wraps a real name. The trailing ``.replace`` mops up any stray lone bracket so
 # no markup character can survive into a canonical name (da#247 acceptance).
 _MARKUP_RE = re.compile(r"<[^>]*>")
+
+# Latin / English benediction abbreviations (da#299). English-gloss sources store
+# a romanized name carrying a parenthesized benediction — "Prophet Muhammad(saw)",
+# "Abu Hurayra (r.a.)", "Ali (as)". normalize_arabic leaves Latin untouched, so
+# the Arabic honorific phrases never catch these. Matched ONLY when parenthesized
+# or bracketed, so a bare "as"/"ra"/"sa" substring INSIDE a real romanized name is
+# never touched (precision-first). Covers the dotted forms ("s.a.w.", "r.a.").
+_LATIN_BENEDICTION_RE = re.compile(
+    r"[(\[]\s*(?:s\.?a\.?w\.?w?|p\.?b\.?u\.?h|r\.?a\.?a?|r\.?a\.?h|a\.?s|s\.?w\.?t|r\.?t\.?a)\s*\.?\s*[)\]]",
+    re.IGNORECASE,
+)
+
+# Leading Latin honorific TITLE words (da#299) prefixed to a romanized name in the
+# same English-gloss sources — "Prophet Muhammad", "Hazrat Ali", "Sayyidina …".
+# Stripped only when they LEAD the span (a title, not a name component); a name
+# that merely CONTAINS one of these tokens mid-string is untouched. Closed set of
+# unambiguous honorific prefixes — precision-first.
+_LATIN_TITLE_RE = re.compile(
+    r"^\s*(?:prophet|hazrat|hadhrat|sayyidina|sayyiduna|sayyidna|imam)\s+",
+    re.IGNORECASE,
+)
 
 # Editorial connective ("that is / i.e.") — never part of a name.
 _CONNECTIVE_TOKENS = frozenset({"يعني"})
@@ -234,41 +281,42 @@ def _is_isnad_residue_token(token: str) -> bool:
 # Honorific / eulogy phrases (normalized) that name no narrator. Stripped from
 # anywhere in the span (they appear appended to real names too).
 _HONORIFIC_PHRASES: tuple[str, ...] = (
-    "صلى الله عليه واله وسلم",
-    "صلى الله عليه وسلم",
-    # Shia taṣliya without the trailing وسلم (da#271): the dominant benediction in
-    # thaqalayn/lk — the bare "صلى الله عليه واله" (and its spaced "و اله" variant)
-    # was NOT covered by the two forms above, so "رسول الله صلى الله عليه واله" (a
-    # mc-365 false narrator) survived. Listed AFTER the longer وسلم-suffixed form so
-    # that one is stripped first where present.
-    "صلى الله عليه واله",
-    "صلى الله عليه و اله",
     "عليه السلام",
     "عليهم السلام",
     "عليها السلام",
     "رضي الله عنه",
     "رضي الله عنها",
     "رضي الله عنهم",
-    # alif-maqsura spelling (da#308): normalize_arabic does NOT fold ى→ي, so the
-    # very common "رضى الله عنه" survives normalization distinct from the ي form
-    # above and left an un-scrubbed benediction tail (e.g. "ابي هريره رضى الله عنه
-    # ان" — mc-1215). Listed so the residue is stripped and the real leading name
-    # ("ابي هريره") is recovered rather than kept honorific-polluted or dropped.
-    "رضى الله عنه",
-    "رضى الله عنها",
-    "رضى الله عنهم",
+    # DUAL pronoun form (da#471): "رضي الله عنهما" ("… with both of them"), the
+    # standard benediction after a PAIR of Companions ("عبد الله بن عمر رضي الله
+    # عنهما"). It was absent, so the strip matched only the "رضي الله عنه" PREFIX
+    # and left a dangling "ما"/"ا" fragment — harmless while name_ar_normalized was
+    # the only cleaner output, but da#301 surfaces the cleaner on the DISPLAY name,
+    # where "عبد الله بن عمر ا" would become a Narrator label. The LONGEST-FIRST
+    # strip loop removes it before the shorter عنه/عنها/عنهم forms.
+    "رضي الله عنهما",
     # bare / truncated benediction fragments (da#311) — the source often stores a
-    # benediction cut off before its pronoun tail ("… رضي الله", "… صلى الله عليه"
+    # benediction cut off before its pronoun tail ("… رضي الله", "… صلي الله عليه"
     # with no عنه/وسلم). Stripped LONGEST-FIRST (see the strip loop) so the full
-    # "رضي الله عنه" / "صلى الله عليه وسلم" forms above are removed first where
-    # present; the bare forms then catch the truncated residue. Neither "رضي الله"
-    # ("God is pleased") nor "صلى الله عليه" is ever part of a real narrator name.
-    "صلى الله عليه",
+    # "رضي الله عنه" / "صلي الله عليه وسلم" forms are removed first where present;
+    # the bare forms then catch the truncated residue. Neither "رضي الله" ("God is
+    # pleased") nor "صلي الله عليه" is ever part of a real narrator name.
     "رضي الله",
-    "رضى الله",
     "رحمه الله",
     "عز وجل",
-    "تبارك وتعالى",
+    "تبارك وتعالي",
+    # taṣliya, yeh-spelled (da#299 + da#427). normalize_arabic folds BOTH the Urdu
+    # yeh ی (U+06CC, da#299 — an Urdu-script "صلی اللہ علیہ وسلم") AND the Arabic
+    # alif-maqsura ى (U+0649, da#427 — a "صلى الله عليه وسلم") onto the regular yeh
+    # ي (U+064A). So the yeh spelling below is now the SOLE canonical benediction
+    # form — every source's taṣliya normalizes to it, and the alif-maqsura "صلى …"
+    # literals this list used to carry are redundant post-fold and were removed.
+    # Longest-first (the strip loop) so the وسلم/واله forms win before the bare form.
+    "صلي الله عليه واله وسلم",
+    "صلي الله عليه وسلم",
+    "صلي الله عليه واله",
+    "صلي الله عليه و اله",
+    "صلي الله عليه",
     # taṣliya LIGATURE (da#311): the single-codepoint ﷺ (U+FDFA, "ARABIC LIGATURE
     # SALLALLAHOU ALAYHE WASALLAM") is the same benediction as the spelled-out
     # "صلى الله عليه وسلم" above but survives normalize_arabic untouched (it is
@@ -412,7 +460,7 @@ _APPOSITION_CONNECTORS = frozenset(
         "ام",  # mother of
         "اخت",  # sister of
         "اهل",  # family/people of
-        "مولى",  # client/freedman of
+        "مولي",  # client/freedman of (مولى, alif-maqsura folded ى→ي — da#427)
         "مولاه",  # his client
         "خادم",  # servant of
         "خادمه",  # her/his servant
@@ -605,7 +653,7 @@ _ISNAD_BOUNDARY = frozenset(
         "لما",
         "فلما",
         "ثم",
-        "حتى",
+        "حتي",  # (حتى, alif-maqsura folded ى→ي — da#427)
         "والله",
         # editorial identification glosses ("he is …", "it is said …")
         "هو",
@@ -667,7 +715,7 @@ _MATN_DENSITY = frozenset(
         "لما",
         "فلما",
         "ثم",
-        "حتى",
+        "حتي",  # (حتى, alif-maqsura folded ى→ي — da#427)
         "والله",
         "هو",
         "وهو",
@@ -730,15 +778,18 @@ _MATN_OPENERS = frozenset(
         "قلنا",  # "we said"
         "كنا",  # "we were"
         "كنت",  # "I was"
-        "نهى",  # "he forbade"
+        "نهي",  # "he forbade" (نهى, alif-maqsura folded ى→ي — da#427)
         "امر",  # "he ordered"
-        "صلى",  # "he prayed" (verb; the taṣliya benediction is stripped in step 2)
+        "صلي",  # "he prayed" (صلى, folded — da#427; the taṣliya benediction, also
+        # yeh-folded, is stripped in step 2). NB post-fold this token is homographic
+        # with the yeh-final name صلي/Siliy — but no _MATN_OPENERS token is a nasab
+        # opener, so a leading matn verb never fires on a real kunya (see set docstring).
         "صلت",  # "she prayed"
         "رايت",  # "I saw"
         "بينما",  # "while"
         "بينا",  # "while"
         "نعم",  # "yes" (matn answer particle, minted as a lone junk narrator)
-        "بلى",  # "yes indeed"
+        "بلي",  # "yes indeed" (بلى, alif-maqsura folded ى→ي — da#427)
         # Shia dialogue-hadith openers (da#311) — the dominant matn shape in
         # thaqalayn/fawaz ("I asked Abu al-Hasan (as): ...", "Abu Abd Allah (as)
         # was asked: ..."), tuned on Sunni/Tirmidhī patterns only until now.
@@ -747,12 +798,13 @@ _MATN_OPENERS = frozenset(
         "سالت",  # سألت "I asked" (1st person; bare سال 3rd-person is already an
         # _ISNAD_BOUNDARY token — this is the distinct 1st-person conjugation)
         "سءل",  # سُئل "was asked" (passive)
-        "روى",  # "he narrated" (3rd person; a lone leading opener, distinct
-        # from the truncation-boundary سمعت/حدثنا/حدثني/اخبرنا/اخبرني/حدث/حدثت
-        # forms above, which recover a preceding real name instead)
-        "روي",  # "was narrated" (passive, ya-final — normalize_arabic does NOT
-        # fold ى→ي so this is a DISTINCT token from روى above; da#311 round-4b, a
-        # lone leading روي slips truncation and mints a 541-mention junk narrator)
+        "روي",  # "he narrated" / "was narrated" — 3rd-person روى and passive روي,
+        # now ONE token (da#427 folds ى→ي, so the maqsura روى and the yeh روي that
+        # were listed separately here — da#311 kept them distinct precisely because
+        # normalize_arabic did NOT then fold ى→ي — converge). A lone leading opener,
+        # distinct from the truncation-boundary سمعت/حدثنا/اخبرنا/حدث forms above
+        # (which recover a preceding real name); da#311 round-4b: a lone leading روي
+        # slips truncation and minted a 541-mention junk narrator.
         "كتبت",  # "I wrote (to)" — maktub/correspondence matn opener ("كتبت الى
         # ابي الحسن اساله …"); the 3rd-person كتب is an _ISNAD_BOUNDARY token.
         "يا",  # vocative "O …" ("يا رسول الله", "يا محمد", "يا معاذ …") — a
@@ -782,22 +834,29 @@ _MATN_OPENERS = frozenset(
 #
 # PRECISION: none is ever a component of a real name, and every rule that consults
 # this set runs AFTER the nasab-connector precision guard (so any genuine lineage /
-# kunya is already spared). Crucially ``على`` (preposition "on", alif-maqsura final)
-# is a DISTINCT token from ``علي`` (the name ʿAlī, ya final) because
-# ``normalize_arabic`` does NOT fold ى→ي — so no ʿAlī is ever mistaken for the
-# preposition. ``من`` is deliberately EXCLUDED (it is the partitive the mubham
-# guards 5/5b key on, and folding it in here would be redundant/entangling).
+# kunya is already spared). ``من`` is deliberately EXCLUDED (it is the partitive the
+# mubham guards 5/5b key on, and folding it in here would be redundant/entangling).
+#
+# ``على`` ("on / upon") is deliberately NOT a member (da#427). normalize_arabic now
+# folds alif-maqsura ى→ي, so the preposition ``على`` and the name ``علي`` (ʿAlī) BOTH
+# normalize to ``علي`` and are no longer distinguishable (the comment here used to
+# note the opposite, relying on ى≠ي). Adding ``علي`` would drop a bare ``علي``
+# narrator via rule 2c (all-particle) — deleting one of the most-attested
+# transmitters — so ``على`` is removed from the set instead, at the cost of no longer
+# detecting the ``على`` preposition as a matn particle. That is a recall loss in the
+# SAFE direction (leaves residue in; never deletes a name), and the alternative
+# deletes ʿAlī. The set-level invariant test pins that no name (``علي`` included)
+# folds onto a member of this or any other droppable set.
 _MATN_PARTICLES = frozenset(
     {
-        # prepositions
-        "على",  # "on / upon" (alif-maqsura — NOT the name علي)
+        # prepositions ("على" excluded — see header: folds onto the name علي)
         "في",  # "in"
-        "الى",  # "to / towards"
+        "الي",  # "to / towards" (الى, alif-maqsura folded — da#427)
         "عند",  # "at / with"
         "بعد",  # "after"
         "قبل",  # "before"
         "مع",  # "with"
-        "لدى",  # "at / with"
+        "لدي",  # "at / with" (لدى, folded — da#427)
         "بين",  # "between"
         "نحو",  # "towards / about"
         # personal / attached pronouns
@@ -845,7 +904,7 @@ _MATN_PARTICLES = frozenset(
         "انما",  # "only / but"
         "كي",  # "so that"
         "كيف",  # "how"
-        "متى",  # "when"
+        "متي",  # "when" (متى, alif-maqsura folded ى→ي — da#427)
         "اين",  # "where"
         "لذلك",  # "therefore"
         "لذا",  # "hence"
@@ -1467,6 +1526,186 @@ def _is_matn_sentence(tokens: list[str], kept_text: str, was_truncated: bool) ->
     return density >= 2 or (has_matn_punct and density >= 1)
 
 
+def _is_name_matn_signal(token: str) -> bool:
+    """True when *token* ends the name and begins matn/provenance (da#424).
+
+    The non-positional half of the name/matn boundary test: the partitive ``من``,
+    an "asked" verb, a matn particle (``على``/``في``/``هذا``/``انتم`` …), a
+    matn-density verb (``كان``/``قال`` …), a matn opener (``قلت``/``نهى`` …, a
+    single ``و``/``ف`` proclitic folded), or a mubham collective (``رجل``/``بعض`` —
+    "a man / some of …", the head of a bio descriptor). Prophet references
+    (``رسول الله``/``النبي``) are handled POSITIONALLY by the caller via
+    :func:`_prophet_ref_len`, because ``رسول``/``نبي`` are only a reference when
+    ``الله`` follows. The bare divine name ``الله`` is deliberately NOT a signal
+    here — it is the second half of a theophoric ism (``عبد الله``) far more often
+    than a matn token, and the provenance forms that carry it (``من رسول الله``)
+    are already cut at ``من`` / ``رسول``.
+    """
+    if _is_partitive(token) or _is_ask_verb(token) or _is_matn_particle(token):
+        return True
+    if token in _MATN_DENSITY or token in _MUBHAM_LEADERS:
+        return True
+    folded = token[1:] if token[:1] in ("و", "ف") and len(token) > 1 else token
+    return token in _MATN_OPENERS or folded in _MATN_OPENERS
+
+
+def _is_fa_narrative(token: str) -> bool:
+    """True when *token* is a ``ف``-proclitic narrative-continuation verb (da#424).
+
+    The ``ف`` ("so / then") narrative proclitic on a ≥3-letter verb stem opens a
+    matn clause (``فذهب`` "so he went", ``فقام`` "so he stood"). Shape-only and
+    deliberately NOT self-sufficient: a ``ف``-initial ism (``فراس``, ``فيروز``,
+    ``فديك``) has the same shape, so :func:`_is_fa_narrative_boundary` adds the two
+    locality guards that tell a verb from an ism (preceding kunya / nasab connector,
+    and LOCAL matn corroboration). A ``ف``-proclitic on a *particle* (``فلو``,
+    ``فما``) is excluded here — it is already a :func:`_is_matn_particle` signal —
+    and a ``ف``-stem that is itself a nasab connector is excluded so nothing name-
+    bearing is mistaken for a verb.
+    """
+    if len(token) < 4 or token[0] != "ف":
+        return False
+    stem = token[1:]
+    if _is_matn_particle(token) or stem in _NASAB_CONNECTORS:
+        return False
+    return True
+
+
+def _is_matn_verb(token: str) -> bool:
+    """True when *token* is a matn VERB signal surviving to step 10 (da#424).
+
+    A matn opener (``قلت``/``نهى``/``صلى``/``روى`` …, a single ``و``/``ف`` proclitic
+    folded) or an "asked" verb. The :data:`_ISNAD_BOUNDARY` verbs (``قال``/``كان``/
+    ``حدثنا`` …) are already cut at step 3c, so the residual verb signals at this
+    point are the openers + ask-verbs. This is the ONLY boundary class the
+    KEPT-WHOLE recovery path truncates on — never a bare Prophet reference, particle
+    or mubham noun — so a rijal biography that mentions the Prophet nominally
+    (``خليفه رسول الله`` "Successor of the Messenger of Allah", ``شهد النبي في حجة
+    الوداع`` "witnessed the Prophet at the Farewell Pilgrimage") is left whole, not
+    lopped. A genuine matn NARRATIVE (``فذهب رسول الله …`` "so he went …") is caught
+    via the ``ف``-narrative rule that the caller ORs in.
+    """
+    if _is_ask_verb(token):
+        return True
+    folded = token[1:] if token[:1] in ("و", "ف") and len(token) > 1 else token
+    return token in _MATN_OPENERS or folded in _MATN_OPENERS
+
+
+def _fa_narrative_corroborated(rest: list[str]) -> bool:
+    """True when a NARRATION signal LOCALLY corroborates a ``ف``-narrative verb (da#424).
+
+    *rest* is the token slice immediately AFTER a candidate ``ف``-token. Two guards:
+
+    * **Locality** — the corroborating signal must appear BEFORE any intervening
+      nasab connector. A ``ف``-initial ism inside a lineage (``… بن فراس بن مالك …``)
+      is followed by ``بن``, which stops the scan and refuses corroboration, so the
+      ism is not mistaken for a verb. (Oyunbileg, PR #474 review — replaced an
+      ``any()`` over the WHOLE remainder that severed such names into ``X بن``.)
+    * **Narration-only evidence** — the signal must be a genuine narration marker: a
+      Prophet reference, an "asked" verb, a matn opener, or a matn-density discourse
+      word (:func:`_is_matn_verb` + :data:`_MATN_DENSITY`). A bare PREPOSITION is
+      NOT accepted (Nikolaos, PR #474 review): ``في``/``على``/``الى`` attach to a
+      noun as readily as a verb, so a plain ``ف``-initial NISBA / ethnonym
+      (``فارسي``, ``فلسطيني``, ``فرغاني``) followed by ``… في المدينه`` was read as a
+      narrative verb and clipped — dropping the very nisba that disambiguates two
+      otherwise-identical nasab leads (``عبد الله بن عمر الفارسي`` vs ``… الفلسطيني``),
+      a wrong-cross-narrator-MERGE hazard. Requiring a narration marker still
+      corroborates the genuine ``فذهب رسول الله`` (via the Prophet reference).
+    """
+    for j, tok in enumerate(rest):
+        if tok in _NASAB_CONNECTORS:
+            return False
+        if _prophet_ref_len(rest, j) > 0 or _is_matn_verb(tok) or tok in _MATN_DENSITY:
+            return True
+    return False
+
+
+def _is_fa_narrative_boundary(tokens: list[str], i: int) -> bool:
+    """True when ``tokens[i]`` is a ``ف``-narrative verb that ENDS the name (da#424).
+
+    Three conditions, all required — the ``ف``-narrative rule's precision guards:
+
+    1. ``tokens[i]`` looks like a ``ف``-proclitic verb (:func:`_is_fa_narrative`).
+    2. It is NOT the ism of an immediately-preceding kunya / nasab connector: a
+       token right after ``ابو``/``ابي``/``ابا``/``بن``/``ابن`` is that name's ism,
+       never a verb (``ابو فراس`` = "Abū Firās", ``بن فراس`` = "ibn Firās"), so a
+       ``ف``-initial ism there must never truncate. (Oyunbileg, PR #474.)
+    3. A matn signal corroborates it LOCALLY (:func:`_fa_narrative_corroborated`) —
+       before any intervening nasab connector.
+    """
+    if not _is_fa_narrative(tokens[i]):
+        return False
+    if i > 0 and tokens[i - 1] in _NASAB_CONNECTORS:
+        return False
+    return _fa_narrative_corroborated(tokens[i + 1 :])
+
+
+def _leading_name_before_matn(tokens: list[str], verb_only: bool) -> list[str]:
+    """The leading run of name tokens, cut at the first matn boundary (da#424).
+
+    Scans left to right and stops at the first matn boundary. A ``ف``-narrative verb
+    (``فذهب`` "so he went") that clears the :func:`_is_fa_narrative_boundary` locality
+    guards always ends the name. The rest of the boundary set depends on *verb_only*:
+
+    * ``verb_only=True`` (the KEPT-WHOLE path — the span would otherwise SURVIVE):
+      stop ONLY at a matn VERB (:func:`_is_matn_verb`). A bare Prophet reference,
+      particle or mubham noun is NOT a boundary here, so a bio apposition
+      (``خليفه رسول الله``, ``شهد النبي …``, ``وفد الى رسول الله``) is left whole.
+      This confines kept-span truncation to genuine narrative matn.
+    * ``verb_only=False`` (the DROP path — the span would otherwise be DELETED):
+      also stop at a Prophet reference (:func:`_prophet_ref_len`) or any
+      :func:`_is_name_matn_signal` token. Recovering here is purely additive — the
+      span was going to be dropped — so it may truncate aggressively.
+
+    Returns the tokens unchanged when no boundary is present. A theophoric ``الله``
+    (``عبد الله``) is never a boundary, so an idafa ism is kept whole; the provenance
+    ``من رسول الله`` is cut at ``من`` (only on the drop path).
+    """
+    for i, tok in enumerate(tokens):
+        if _is_fa_narrative_boundary(tokens, i):
+            return tokens[:i]
+        if verb_only:
+            if _is_matn_verb(tok):
+                return tokens[:i]
+        elif _prophet_ref_len(tokens, i) > 0 or _is_name_matn_signal(tok):
+            return tokens[:i]
+    return tokens
+
+
+def _recover_leading_name(tokens: list[str], verb_only: bool) -> str | None:
+    """Truncate-and-re-gate: recover a real leading name from a matn tail (da#424).
+
+    Cuts *tokens* at the first matn boundary (:func:`_leading_name_before_matn`,
+    passing *verb_only*) and re-gates the head through :func:`clean_narrator_name`.
+    Returns the recovered clean name, or ``None`` when nothing is recoverable.
+
+    Two guards make this safe and additive:
+
+    * The head must carry a :data:`_NASAB_CONNECTORS` token (a kunya/ibn/bint/bn).
+      This is what distinguishes a real leading narrator (``ابو هريره``, ``ابن عباس``)
+      from a bare matn head that merely precedes the first matn word (``دعوني``,
+      ``سريه تغزو``) — the latter has no nasab connector and is NOT resurrected.
+    * A boundary must actually exist (``0 < len(head) < len(tokens)``) — a clean
+      name with no matn tail returns ``None`` and is left untouched by the caller.
+
+    The final :func:`clean_narrator_name` re-gate applies every downstream guard to
+    the recovered head, so a head that is itself mubham / degenerate still drops.
+
+    A grading-COMMENTARY span (``"ابو عيسى هذا حديث حسن صحيح"`` — al-Tirmidhī's own
+    ḥadith verdict, keyed on his kunya) is deliberately NOT recovered: it is the
+    compiler's editorial commentary, not a narration by a distinct narrator, and the
+    compiler has a clean canonical of his own (class 9). Recovering the leading kunya
+    would re-mint a redundant commentary mention, so these are left to drop.
+    """
+    if any(_contains_token_sequence(tokens, formula) for formula in _GRADING_FORMULAE):
+        return None
+    head = _leading_name_before_matn(tokens, verb_only)
+    if not (0 < len(head) < len(tokens)):
+        return None
+    if not any(t in _NASAB_CONNECTORS for t in head):
+        return None
+    return clean_narrator_name(" ".join(head))
+
+
 def split_compound_narrators(name_normalized: str | None) -> list[str]:
     """Split a compound co-narrator join into its member names (da#258 class 6).
 
@@ -1548,6 +1787,17 @@ def _strip_markup_and_honorifics(name_normalized: str) -> str:
     for phrase in _HONORIFIC_TITLE_PHRASES:
         if phrase in text:
             text = text.replace(phrase, " ")
+
+    # 2c. Latin / English benediction + leading-title residue (da#299). A romanized
+    #     name from an English-gloss source carries a parenthesized benediction
+    #     ("Muhammad(saw)") and/or a leading honorific title ("Prophet Muhammad");
+    #     normalize_arabic leaves Latin untouched, so neither is caught by the Arabic
+    #     honorific phrases above. Strip the parenthesized benediction anywhere and
+    #     the honorific title only where it LEADS. (For the kaggle bio path the
+    #     Arabic-span extraction has already dropped all Latin, so this is a no-op
+    #     there; it recovers the name for the other English-gloss sources.)
+    text = _LATIN_BENEDICTION_RE.sub(" ", text)
+    text = _LATIN_TITLE_RE.sub("", text)
     return text
 
 
@@ -1801,7 +2051,29 @@ def clean_narrator_name(name_normalized: str | None) -> str | None:
     #     of the RETAINED tokens only, so «…» / ؟ in an isnad/matn tail that step 3c
     #     already truncated off does NOT drop the recovered leading name (#310).
     kept_text = " ".join(raw_tokens[: len(tokens)])
-    if _is_matn_sentence(tokens, kept_text, was_truncated):
+    matn = _is_matn_sentence(tokens, kept_text, was_truncated)
+
+    # 10b. Truncate-and-re-gate leading-name recovery (da#424). A span leading with
+    #     a real nasab/kunya name whose tail is matn or provenance — carrying no
+    #     _ISNAD_BOUNDARY verb, so step 3c never truncated it — is recovered to the
+    #     leading name rather than dropped whole or kept matn-polluted:
+    #     "ابو هريره فذهب رسول الله وانتم تنتثلونها" → "ابو هريره" (kept-whole →
+    #     cleaned); "ابن عباس …" / "ابو القاسم …" leading a matn quote (dropped by
+    #     the gate above → recovered). Purely a RECOVERY: it only replaces a drop or
+    #     a matn-polluted whole span with a cleaner name, never turns a survivor into
+    #     a drop. The recovered head must carry a nasab connector (so a bare matn
+    #     head — "دعوني", "سريه تغزو" — is not resurrected), and it re-gates through
+    #     the full cleaner. It does NOT loosen #423's all-residue provenance scoping:
+    #     a substantive-but-matn residual with no nasab lead ("كمن زار رسول الله") is
+    #     left KEPT, exactly as #423 requires.
+    #     The recovery is aggressive on the DROP path (matn — the span would be
+    #     deleted anyway, so any recovered name is a strict gain) and conservative on
+    #     the KEPT-WHOLE path (verb_only — truncate only at a genuine narrative verb,
+    #     so a bio apposition mentioning the Prophet nominally is left whole).
+    recovered = _recover_leading_name(tokens, verb_only=not matn)
+    if recovered is not None:
+        return recovered
+    if matn:
         return None
 
     # 11. Degenerate-result floor (da#311). A recovery that boils down to a single
@@ -1864,6 +2136,13 @@ def cleaner_removed_content(name_normalized: str | None, cleaned: str | None) ->
     is a homonymy question this function cannot answer — it needs biographical
     disambiguation, not a token diff.
 
+    The finer *gloss-tail vs name-cut* split this boolean deliberately withholds is
+    carried by :func:`is_recoverable_gloss_tail` (da#397): it recognises the
+    tail-after-a-complete-name class (a complete nasab that lost only a teacher-key
+    isnad tail) as the recoverable-pending-disambiguation subset. This predicate stays
+    the coarse affix/removal line; that one adds the sub-classification — and neither
+    decides identity, which still needs biographical disambiguation.
+
     Comparing against :func:`asserted_name_tokens` — rather than a re-tokenization of
     the raw input — is what draws the affix/removal line; a re-tokenization sees the
     entry number, the connective and the honorific as "content removed" and refuses a
@@ -1872,6 +2151,105 @@ def cleaner_removed_content(name_normalized: str | None, cleaned: str | None) ->
     if not name_normalized or not cleaned:
         return False
     return tuple(cleaned.split()) != asserted_name_tokens(name_normalized)
+
+
+# --- Gloss-tail vs name-cut discrimination (da#397) -----------------------------
+# Isnad TRANSMISSION connectors that open a "teacher key" — a rijāl compiler's
+# "<narrator> عن <teacher>" / "<narrator> حدثنا <student>" chain fragment appended
+# AFTER a complete name to disambiguate a narrator known through one chain. A removed
+# tail opening on one of these is a GLOSS about how the narrator transmitted, not
+# alternative name material. Deliberately a SUBSET of _ISNAD_BOUNDARY: it holds the
+# transmission verbs + عن and EXCLUDES the dispute/speech openers (قيل / قال / يقال /
+# وقيل — "it is said" / "he said"), which introduce a DISPUTED or alternative identity
+# and must not read as a mere gloss, and the relative-pronoun / temporal boundaries.
+_TEACHER_KEY_OPENERS = frozenset(
+    {
+        "عن",  # "from" — the canonical teacher key
+        "عنه",  # "from him"
+        "حدثنا",
+        "حدثني",
+        "حدث",
+        "حدثت",
+        "حدثاه",
+        "اخبرنا",
+        "اخبرني",
+        "انبانا",
+        "سمعت",
+        "سمع",
+        "روت",  # "she narrated" (روى sibling)
+    }
+)
+
+# Explicit disputed-identity markers (da#397). Even when a removed tail opens on a
+# teacher key AND the residue is a complete nasab, a tail carrying one of these grades
+# the SUBJECT unidentified/disputed — the ``محمد بن شرحبيل … وقيل اسمه عمرو مجهول`` case
+# — so the residue is NOT a safely-discriminating name. Checked against the removed
+# tail only, keeping the graded-مجهول / ``وقيل اسمه`` case conservative (class B /
+# refused). ``يعرف`` catches the ``لا يعرف`` ("not known") tail; the residue itself is
+# never inspected for these (a real name never carries them).
+_DISPUTED_IDENTITY_MARKERS = frozenset({"مجهول", "يعرف", "وقيل", "قيل", "يقال"})
+
+# Patronymic nasab connectors (da#397). A "complete nasab" residue must carry an
+# ``ibn`` link — narrower than :data:`_NASAB_CONNECTORS` (which also spares kunya
+# ``ابو``/``ابي`` and tribal ``بنو``): da#397's discriminating-name test is a
+# lineage ``<ism> بن <father> …``, not a bare kunya.
+_PATRONYMIC_CONNECTORS = frozenset({"بن", "ابن"})
+
+
+def is_recoverable_gloss_tail(name_normalized: str | None, cleaned: str | None) -> bool:
+    """True when a truncation is a class-A *gloss-tail* cut (da#397).
+
+    Discriminates da#397's two categorically different truncations, which
+    :func:`cleaner_removed_content` alone conflates:
+
+    * **Class A — gloss-tail (this returns True):** the removed tail opens on an isnad
+      TRANSMISSION connector (``عن`` / ``حدثنا`` / … — a teacher key, not name
+      material) AND the residue is a *complete nasab* (``>= 3`` tokens carrying a
+      patronymic ``بن``/``ابن``) AND the removed tail carries no disputed-identity
+      marker. The residue IS the discriminating name the source asserted
+      (``اسحاق بن مره عن انس`` → ``اسحاق بن مره``), so it is the
+      RECOVERABLE-pending-disambiguation subset.
+    * **Class B — name-cut (this returns False):** a bare ism/kunya residue
+      (``عبيده``, ``ابو نهشل``), a non-teacher-key cut (``… يقال`` / ``… الذي``), or a
+      tail/span carrying a disputed-identity marker (``مجهول`` / ``وقيل`` — the
+      ``محمد بن شرحبيل … مجهول`` homonym). Refusing these stays correct.
+
+    IMPORTANT — this does NOT decide the merge. Recovering class A onto an attested
+    narrator is NOT provably safe: :func:`~src.parse.identity.make_canonical_id` folds
+    Arabic inflection but NOT homonymy, and a complete nasab can still collide with a
+    homonym — measured, 45 of 240 class-A accept-target name-keys carry conflicting
+    jarḥ grades (one key graded both *thiqa* and *kadhdhab* = provably >1 person; da#397
+    PR#441 / da#423). So :func:`~src.resolve.bio_promote.promote_bios_to_canonical`
+    still REFUSES class A; this predicate only *quantifies* the recoverable subset
+    (splitting the refusal counter, da#398 scope-1) and is the precondition for a
+    future disambiguation-gated recovery. Same coarseness caveat as
+    :func:`cleaner_removed_content`: a token diff cannot answer the homonymy question.
+
+    Returns ``False`` for a non-truncation (nothing was cut) and for class B.
+    """
+    if not cleaned or not cleaner_removed_content(name_normalized, cleaned):
+        return False
+    asserted = asserted_name_tokens(name_normalized)
+    residue = tuple(cleaned.split())
+    # The removed material must be a TRAILING cut — residue is a strict prefix of the
+    # asserted tokens. When it is not (a colon-prose cut, or any unexpected shape) the
+    # removed-tail opener cannot be identified, so classify conservatively as name-cut.
+    if len(residue) >= len(asserted) or asserted[: len(residue)] != residue:
+        return False
+    removed_tail = asserted[len(residue) :]
+    # (a) tail opens on a teacher-key / transmission connector (not a dispute/speech
+    #     opener, not a relative pronoun / temporal boundary).
+    if removed_tail[0] not in _TEACHER_KEY_OPENERS:
+        return False
+    # (b) no disputed-identity marker anywhere in the removed tail — the graded-مجهول /
+    #     ``وقيل اسمه`` case stays conservative (class B).
+    if any(t in _DISPUTED_IDENTITY_MARKERS for t in removed_tail):
+        return False
+    # (c) residue is a COMPLETE nasab: >= 3 tokens carrying a patronymic connector. A
+    #     bare ism/kunya residue may not merge regardless of tail (da#397).
+    if len(residue) < 3:
+        return False
+    return any(t in _PATRONYMIC_CONNECTORS for t in residue)
 
 
 def clean_narrator_name_display(name_ar: str | None) -> str | None:

@@ -54,7 +54,7 @@ from src.utils.neo4j_client import Neo4jClient
 
 logger = get_logger(__name__)
 
-__all__ = ["load_all_nodes", "LoadResult"]
+__all__ = ["load_all_nodes", "build_loaded_hadith_ids", "LoadResult"]
 
 
 @dataclass(frozen=True)
@@ -181,6 +181,80 @@ def _build_curated_identity_index(files: list[Path]) -> set[str]:
             if identity is not None:
                 index.add(identity)
     return index
+
+
+# Drop-reason codes for the single hadith keep-decision (da#373). ``_load_hadiths``
+# uses them to count each drop under its own cause; ``build_loaded_hadith_ids``
+# ignores the reason and keeps only the id.
+_KEEP = "keep"
+_DROP_INVALID_SID = "invalid_source_id"
+_DROP_NONCANONICAL = "noncanonical"
+_DROP_CROSS_EDITION = "cross_edition_dedup"
+_DROP_MALFORMED = "malformed"
+
+# Columns the loaded-id set needs: the identity columns plus the source_id that
+# becomes the Hadith node id.
+_LOADED_ID_COLUMNS = ["source_id", *_IDENTITY_COLUMNS]
+
+
+def _hadith_load_outcome(
+    row: dict[str, Any], curated_identities: set[str]
+) -> tuple[str | None, str]:
+    """(node_id, reason) for a staging hadith row — THE single keep-decision (da#373).
+
+    ``node_id`` is the ``hdt:`` Hadith.id when ``reason == _KEEP``, else ``None``;
+    ``reason`` is one of the ``_KEEP`` / ``_DROP_*`` codes. This is the one place
+    the kept set is decided, shared by two callers so they can never disagree —
+    which is the whole da#373 defect: the node loader dropped a cross-edition
+    duplicate the edge loader could not see and re-orphaned its chain.
+
+    Applies, in order, exactly the gates ``_load_hadiths`` applies: a blank /
+    non-str ``source_id``; the per-source/collection composition gate (da#191);
+    the cross-edition matn-identity dedup for a dedup-source row whose tradition a
+    curated edition already occupies (da#220); and id well-formedness.
+
+    **Total** — a malformed id yields ``(None, _DROP_MALFORMED)`` rather than
+    raising: membership is all the edge gate needs, and ``_load_hadiths`` keeps its
+    own strict re-check for the da#355 abort path, so this never decides strictness.
+    """
+    sid = row.get("source_id")
+    if not sid or not isinstance(sid, str):
+        return None, _DROP_INVALID_SID
+    source_corpus = _val(row, "source_corpus", "")
+    if not is_canonical_hadith(source_corpus, _val(row, "collection_name", "")):
+        return None, _DROP_NONCANONICAL
+    if is_cross_edition_dedup_source(source_corpus):
+        identity = canonical_matn_identity(_effective_matn_ar(row), _val(row, "matn_en"))
+        if identity is not None and identity in curated_identities:
+            return None, _DROP_CROSS_EDITION
+    try:
+        return hadith_node_id(sid), _KEEP
+    except DoubledCorpusPrefixError:
+        return None, _DROP_MALFORMED
+
+
+def build_loaded_hadith_ids(files: list[Path]) -> set[str]:
+    """Set of ``Hadith.id`` node ids :func:`_load_hadiths` loads from *files* (da#373).
+
+    Replays the node loader's keep-decision (:func:`_hadith_load_outcome`) over
+    every ``hadiths_*.parquet`` — composition gate + cross-edition matn dedup + id
+    well-formedness — and returns the ``hdt:`` ids that survive. The chain-edge
+    loader consults THIS set instead of re-deriving a gate from the id string
+    (``is_canonical_hadith_id``), which can see the composition decision but NOT
+    the cross-edition matn dedup — a source_id carries no matn. Reading the SAME
+    files through the SAME decision is what keeps the node loader and edge loader
+    from disagreeing about the kept set; that disagreement's size is exactly the
+    cross-edition dedup, and it re-orphans ~196k dangling chains the moment the
+    matn key is repaired.
+    """
+    curated_identities = _build_curated_identity_index(files)
+    loaded: set[str] = set()
+    for fp in files:
+        for row in _read_parquet_columns(fp, _LOADED_ID_COLUMNS):
+            node_id, _reason = _hadith_load_outcome(row, curated_identities)
+            if node_id is not None:
+                loaded.add(node_id)
+    return loaded
 
 
 def _narrator_name_en(row: dict[str, Any]) -> str:
@@ -386,52 +460,54 @@ def _load_hadiths(
         rows = _read_parquet_rows(fp)
         batch: list[dict[str, Any]] = []
         for i, row in enumerate(rows):
-            sid = row.get("source_id")
-            if not sid or not isinstance(sid, str):
-                all_errors.append(f"{fp.name} row {i}: invalid source_id={sid!r}")
+            # ONE keep-decision, shared with build_loaded_hadith_ids so the edge
+            # loader can never disagree about the kept set (da#373). It applies the
+            # same gates in the same order — composition (da#191), cross-edition
+            # matn dedup (da#220), id well-formedness — and reports which fired so
+            # each drop is still counted under its own cause.
+            hid, reason = _hadith_load_outcome(row, curated_identities)
+            if reason == _DROP_INVALID_SID:
+                all_errors.append(f"{fp.name} row {i}: invalid source_id={row.get('source_id')!r}")
                 total_skipped += 1
                 total_invalid_sid += 1
                 continue
-            source_corpus = _val(row, "source_corpus", "")
-            # Canonical corpus composition (da#191): skip Hadith whose
-            # (source_corpus, collection) duplicates the chosen canonical edition
-            # — halimbahae/fawaz non-unique books, the mis Sahih Muslim matn copy.
-            # One enforcement point so a fresh run_all (the production path) yields
-            # the deduped graph without manual surgery.
-            if not is_canonical_hadith(source_corpus, _val(row, "collection_name", "")):
+            if reason == _DROP_NONCANONICAL:
+                # (source_corpus, collection) duplicates the chosen canonical
+                # edition — halimbahae/fawaz non-unique books, the mis Sahih Muslim
+                # matn copy — so no Hadith node loads for it (da#191).
                 total_skipped += 1
                 continue
-            # Fall back to the raw full text when a source supplies no separated
-            # matn: halimbahae / open_hadith / bihar populate ``full_text_ar``
-            # only (they do not split isnad from matn). The loader persists
-            # matn_ar — not full_text_ar — so without this the Hadith node lands
-            # textless on the graph (da#190).
-            matn_ar = _effective_matn_ar(row)
-            # Cross-edition canonical-identity dedup (da#220): drop a dedup-source
-            # hadith whose normalized matn already exists from a curated edition —
-            # curated wins (richer metadata). Curated rows and dedup-source rows
-            # with no curated twin fall straight through.
-            if is_cross_edition_dedup_source(source_corpus):
-                identity = canonical_matn_identity(matn_ar, _val(row, "matn_en"))
-                if identity is not None and identity in curated_identities:
-                    total_skipped += 1
-                    total_deduped += 1
-                    continue
-            # Quarantine, never abort (da#355). ``strict`` governs missing *files*,
-            # so it cannot be relied on to make a malformed row fatal-or-not; the
-            # production path (``cli._cmd_load``) passes strict=False. A single bad
-            # id must not kill a multi-hour, non-atomic load — the batches already
-            # committed would stay in Neo4j. Mirrors the null-``source_id`` handling
-            # five lines up: record it, count it, keep going.
-            try:
-                hid = hadith_node_id(sid)
-            except DoubledCorpusPrefixError as exc:
-                if strict:
-                    raise
-                all_errors.append(f"{fp.name} row {i}: {exc}")
+            if reason == _DROP_CROSS_EDITION:
+                # da#220: a dedup-source (sanadset) hadith whose normalized matn
+                # already exists from a curated edition — curated wins (richer
+                # metadata). This is the drop the da#373 matn-key repair makes live.
+                total_skipped += 1
+                total_deduped += 1
+                continue
+            if reason == _DROP_MALFORMED:
+                # Quarantine, never abort (da#355) — but strict still makes a
+                # malformed id fatal. Re-mint so the original DoubledCorpusPrefixError
+                # propagates unchanged under strict, and is recorded VERBATIM under
+                # non-strict (the production ``_cmd_load`` path): the quarantine must
+                # still say WHY — its message carries the ``doubled leading corpus``
+                # marker — or da#355's "stop guessing, start recording" contract
+                # silently degrades to a bare "malformed" tag (the exact diagnostic
+                # loss #373 is about).
+                try:
+                    hadith_node_id(row["source_id"])
+                except DoubledCorpusPrefixError as exc:
+                    if strict:
+                        raise
+                    all_errors.append(f"{fp.name} row {i}: {exc}")
                 total_skipped += 1
                 total_malformed += 1
                 continue
+            # KEEP. Fall back to the raw full text when a source supplies no
+            # separated matn: halimbahae / open_hadith / bihar populate
+            # ``full_text_ar`` only (they do not split isnad from matn). The loader
+            # persists matn_ar — not full_text_ar — so without this the Hadith node
+            # lands textless on the graph (da#190).
+            matn_ar = _effective_matn_ar(row)
             batch.append(
                 {
                     "id": hid,

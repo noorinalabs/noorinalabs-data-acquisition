@@ -203,6 +203,34 @@ def test_cap_change_across_resume_discards_checkpoint(
     assert metrics.merged_records == 0, "cap change must discard the checkpoint (cold re-cluster)"
 
 
+def test_blocking_selection_strategy_is_in_the_fingerprint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The da#295 selection marker (`_BLOCKING_TOKEN_SELECTION`) must be hashed.
+
+    The strategy decides WHICH tokens a >cap record contributes → it changes the
+    `blocks` list membership just like the caps do, and the skip-set is positional
+    block indices. So a resume across a strategy change must not match the
+    fingerprint. Assert the marker's value flows into the stored fingerprint:
+    two cold checkpoints that differ ONLY in the marker get different fingerprints
+    (this fails if the marker is dropped from the `hash_strings` call).
+    """
+    monkeypatch.setattr(fuzzy_cluster, "_CLUSTER_CHECKPOINT_SCORED_INTERVAL", 1)
+
+    def _fingerprint_at(strategy: str, name: str) -> str:
+        staging, canonical = _setup(tmp_path, name)
+        monkeypatch.setattr(fuzzy_cluster, "_BLOCKING_TOKEN_SELECTION", strategy)
+        with pytest.raises(StopAfterReached):
+            fuzzy_cluster.cluster_canonical_narrators(canonical, staging_dir=staging, stop_after=1)
+        ckpt = _checkpoint.load_checkpoint(_checkpoint.checkpoint_dir(staging, "cluster"))
+        assert ckpt is not None
+        return str(ckpt["fingerprint"])
+
+    fp_a = _fingerprint_at("name-first-idf-v1", "strat_a")
+    fp_b = _fingerprint_at("alphabetical-legacy", "strat_b")
+    assert fp_a != fp_b, "changing the selection strategy must change the resume fingerprint"
+
+
 def test_no_resume_ignores_checkpoint(tmp_path: Path) -> None:
     staging, canonical = _setup(tmp_path, "noresume")
     _checkpoint.save_checkpoint(

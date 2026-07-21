@@ -10,8 +10,10 @@ import pytest
 
 from src.parse.narrator_extraction import IsnadSegmentationError, extract_narrator_mentions
 from src.parse.schemas import NARRATOR_MENTION_SCHEMA
+from src.resolve import ner
 from src.resolve.ner import (
     UnroutedCorpusError,
+    _CleanRate,
     _extract_from_hadiths,
     _load_phase1_mentions,
     run,
@@ -116,7 +118,12 @@ class TestLoadPhase1Mentions:
         assert rows[0]["name_raw"] == "Thawban"  # DISPLAY field cleaned (the CR gap)
         assert rows[0]["name_normalized"] == "Thawban"  # clustering key cleaned
 
-    def test_falls_back_to_english_name(self, tmp_path: Path) -> None:
+    def test_falls_back_to_english_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # da#298: the Latin fallback is DROPPED by default for lk; this test exercises
+        # the fallback-cleaning mechanics, which now only run under the "keep" policy.
+        monkeypatch.setattr(ner, "_LATIN_FALLBACK_POLICY", "keep")
         mentions = [
             {
                 "mention_id": "m-3",
@@ -133,6 +140,210 @@ class TestLoadPhase1Mentions:
         rows = _load_phase1_mentions(tmp_path, "lk", "narrator_mentions_lk.parquet")
         assert rows[0]["name_raw"] == "Malik"
         assert rows[0]["name_normalized"] == "Malik"
+
+
+# ---------------------------------------------------------------------------
+# da#298 — cross-script Latin-fallback policy in _load_phase1_mentions.
+# The lk English-isnad path mints Latin-keyed nodes (empty name_ar + Latin
+# name_en) that fork from their Arabic identity. `_LATIN_FALLBACK_POLICY`
+# defaults to "drop" (OWNER-DECIDED) — those unrecoverable Latin duplicates are
+# dropped and audited to `lk_latin_dropped_mentions.csv`; "keep" is the escape
+# hatch that preserves them.
+# ---------------------------------------------------------------------------
+class TestLatinFallbackPolicy:
+    ALI_AR = "علي"  # علي
+    LATIN_NAME = "Mughirah ibn Shu'bah"
+
+    def _mixed_lk_file(self, path: Path) -> None:
+        """One Arabic mention (chain 0) + one Latin-only mention (chain 1), like lk."""
+        mentions = [
+            {
+                "mention_id": "ar-1",
+                "source_hadith_id": "h-1",
+                "source_corpus": "lk",
+                "position_in_chain": 0,
+                "chain_index": 0,
+                "name_ar": self.ALI_AR,
+                "name_en": None,
+                "name_ar_normalized": self.ALI_AR,
+                "transmission_method": None,
+            },
+            {
+                "mention_id": "lk:h-1:en:0",
+                "source_hadith_id": "h-1",
+                "source_corpus": "lk",
+                "position_in_chain": 0,
+                "chain_index": 1,
+                "name_ar": None,
+                "name_en": self.LATIN_NAME,
+                "name_ar_normalized": None,
+                "transmission_method": None,
+            },
+        ]
+        _write_narrator_mentions_parquet(path, mentions)
+
+    def test_default_policy_is_drop(self, tmp_path: Path) -> None:
+        """Owner-decided default: the Latin-only mention is dropped, Arabic survives.
+
+        Mutation check: revert the default to "keep" (or remove the gate) and both
+        rows load (len == 2) — this asserts the default sheds the Latin node.
+        """
+        assert ner._LATIN_FALLBACK_POLICY == "drop", "owner-decided default is drop"
+        self._mixed_lk_file(tmp_path / "narrator_mentions_lk.parquet")
+        rows = _load_phase1_mentions(tmp_path, "lk", "narrator_mentions_lk.parquet")
+        assert len(rows) == 1
+        assert rows[0]["name_normalized"] == self.ALI_AR
+
+    def test_keep_policy_loads_both(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The "keep" escape hatch preserves the pre-da#298 behaviour (no data loss)."""
+        monkeypatch.setattr(ner, "_LATIN_FALLBACK_POLICY", "keep")
+        self._mixed_lk_file(tmp_path / "narrator_mentions_lk.parquet")
+        rows = _load_phase1_mentions(tmp_path, "lk", "narrator_mentions_lk.parquet")
+        assert len(rows) == 2
+        assert {r["name_normalized"] for r in rows} == {self.ALI_AR, self.LATIN_NAME}
+
+    def test_drop_records_audit_row(self, tmp_path: Path) -> None:
+        """The drop populates the audit accumulator with source id, name_en, hadith id."""
+        self._mixed_lk_file(tmp_path / "narrator_mentions_lk.parquet")
+        captured: list[dict[str, str | None]] = []
+        rows = _load_phase1_mentions(
+            tmp_path, "lk", "narrator_mentions_lk.parquet", latin_dropped=captured
+        )
+        assert len(rows) == 1  # Latin dropped
+        assert captured == [
+            {
+                "mention_id": "lk:h-1:en:0",  # SOURCE id, not the run-minted uuid
+                "name_en": self.LATIN_NAME,
+                "source_hadith_id": "h-1",
+            }
+        ]
+
+    def test_keep_policy_records_no_audit_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A "keep" run drops nothing, so the audit accumulator stays empty."""
+        monkeypatch.setattr(ner, "_LATIN_FALLBACK_POLICY", "keep")
+        self._mixed_lk_file(tmp_path / "narrator_mentions_lk.parquet")
+        captured: list[dict[str, str | None]] = []
+        _load_phase1_mentions(
+            tmp_path, "lk", "narrator_mentions_lk.parquet", latin_dropped=captured
+        )
+        assert captured == []
+
+    def test_drop_scoped_to_lk_leaves_other_sources(self, tmp_path: Path) -> None:
+        """The drop is scoped to _LATIN_FALLBACK_CORPORA (lk). A Latin-only mention
+        from another Phase-1 source (sanadset) is NOT dropped, even under the default
+        drop policy — its Latin duplicates were never investigated (da#298 lk-only).
+
+        Mutation check: remove the `corpus in _LATIN_FALLBACK_CORPORA` guard and this
+        sanadset mention is dropped (len == 0).
+        """
+        assert ner._LATIN_FALLBACK_POLICY == "drop"
+        mentions = [
+            {
+                "mention_id": "sset-1",
+                "source_hadith_id": "h-9",
+                "source_corpus": "sanadset",
+                "position_in_chain": 0,
+                "chain_index": 0,
+                "name_ar": None,
+                "name_en": "Some Romanized Name",
+                "name_ar_normalized": None,
+                "transmission_method": None,
+            },
+        ]
+        path = tmp_path / "narrator_mentions_sanadset.parquet"
+        _write_narrator_mentions_parquet(path, mentions)
+        captured: list[dict[str, str | None]] = []
+        rows = _load_phase1_mentions(
+            tmp_path, "sanadset", "narrator_mentions_sanadset.parquet", latin_dropped=captured
+        )
+        assert len(rows) == 1, "sanadset Latin-only mention must be kept (out of da#298 scope)"
+        assert captured == []
+
+    def test_drop_policy_never_drops_a_row_with_arabic(self, tmp_path: Path) -> None:
+        """A mention carrying name_ar is never dropped, even if name_en is also set.
+
+        Guards against over-dropping: the gate keys on *empty name_ar + non-Arabic
+        fallback*, not merely on the presence of a Latin name_en.
+        """
+        mentions = [
+            {
+                "mention_id": "ar-2",
+                "source_hadith_id": "h-2",
+                "source_corpus": "lk",
+                "position_in_chain": 0,
+                "chain_index": 0,
+                "name_ar": self.ALI_AR,
+                "name_en": "Ali",  # bilingual row — Arabic present, must stay
+                "name_ar_normalized": self.ALI_AR,
+                "transmission_method": None,
+            },
+        ]
+        _write_narrator_mentions_parquet(tmp_path / "narrator_mentions_lk.parquet", mentions)
+        captured: list[dict[str, str | None]] = []
+        rows = _load_phase1_mentions(
+            tmp_path, "lk", "narrator_mentions_lk.parquet", latin_dropped=captured
+        )
+        assert len(rows) == 1
+        assert rows[0]["name_normalized"] == self.ALI_AR
+        assert captured == []  # nothing dropped → nothing audited
+
+    def test_drop_does_not_distort_clean_rate(self, tmp_path: Path) -> None:
+        """A Latin-fallback drop counts as cleaner-KEPT in the da#300 clean-rate.
+
+        The drop happens AFTER clean_narrator_name, so the clean-rate (a pure cleaner
+        metric) must still see the span as kept — kept=2 (one Arabic + one Latin the
+        cleaner kept then the policy dropped), dropped=0. Mutation check: reverting to
+        kept=len(rows) makes kept=1 here.
+        """
+        self._mixed_lk_file(tmp_path / "narrator_mentions_lk.parquet")
+        clean_stats: dict[str, _CleanRate] = {}
+        _load_phase1_mentions(
+            tmp_path, "lk", "narrator_mentions_lk.parquet", clean_stats=clean_stats
+        )
+        cr = clean_stats["lk"]
+        assert (cr.kept, cr.dropped) == (2, 0), "the Latin drop is a cleaner-kept span"
+
+    def test_run_writes_latin_dropped_csv_on_drop(self, tmp_path: Path) -> None:
+        """End-to-end: a default (drop) run writes the audit CSV with the dropped row."""
+        import csv
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        output = tmp_path / "output"
+        output.mkdir()
+        self._mixed_lk_file(staging / "narrator_mentions_lk.parquet")
+
+        paths = run(staging, output)
+
+        csv_path = output / "lk_latin_dropped_mentions.csv"
+        assert csv_path.exists()
+        assert csv_path in paths
+        with open(csv_path, encoding="utf-8") as f:
+            audit = list(csv.DictReader(f))
+        assert audit == [
+            {"mention_id": "lk:h-1:en:0", "name_en": self.LATIN_NAME, "source_hadith_id": "h-1"}
+        ]
+
+    def test_keep_run_writes_no_latin_dropped_csv(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A "keep" run drops nothing → no audit CSV, and both mentions are resolved."""
+        import pyarrow.parquet as pq_
+
+        monkeypatch.setattr(ner, "_LATIN_FALLBACK_POLICY", "keep")
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        output = tmp_path / "output"
+        output.mkdir()
+        self._mixed_lk_file(staging / "narrator_mentions_lk.parquet")
+
+        run(staging, output)
+
+        assert not (output / "lk_latin_dropped_mentions.csv").exists()
+        resolved = pq_.read_table(output / "narrator_mentions_resolved.parquet").to_pylist()
+        assert {r["name_normalized"] for r in resolved} == {self.ALI_AR, self.LATIN_NAME}
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +605,115 @@ class TestOutputSchema:
 
         paths = run(staging, output)
         assert paths == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: per-source NER clean-rate metric (da#300)
+# ---------------------------------------------------------------------------
+class TestCleanRateDataclass:
+    """da#300 — the _CleanRate accumulator: kept / dropped / considered / rate."""
+
+    def test_rate_and_considered(self) -> None:
+        cr = _CleanRate(kept=84, dropped=16)
+        assert cr.considered == 100
+        assert cr.clean_rate == pytest.approx(0.84)
+
+    def test_all_kept_is_one(self) -> None:
+        assert _CleanRate(kept=5, dropped=0).clean_rate == pytest.approx(1.0)
+
+    def test_all_dropped_is_zero(self) -> None:
+        assert _CleanRate(kept=0, dropped=5).clean_rate == pytest.approx(0.0)
+
+    def test_nothing_considered_is_zero_not_division_error(self) -> None:
+        cr = _CleanRate()
+        assert cr.considered == 0
+        assert cr.clean_rate == 0.0
+
+
+class TestCleanRateMetric:
+    """da#300 — the per-source clean-rate is recorded and persisted, never gated."""
+
+    # An isnad that segments into one real name (kept) + one Prophet reference the
+    # cleaner drops (dropped) → clean_rate 0.5 for that source.
+    _MIXED_ISNAD = "حدثنا محمد بن يعقوب عن النبي صلى الله عليه وسلم"
+
+    def _thaqalayn_hadith(self, source_id: str, isnad: str) -> dict:
+        return {
+            "source_id": source_id,
+            "source_corpus": "thaqalayn",
+            "collection_name": "al-kafi",
+            "isnad_raw_ar": isnad,
+            "isnad_raw_en": None,
+            "full_text_ar": None,
+            "full_text_en": None,
+            "matn_ar": "text",
+            "matn_en": None,
+            "grade": None,
+            "sect": "shia",
+            "book_number": 1,
+            "chapter_number": 1,
+            "hadith_number": 1,
+            "chapter_name_ar": None,
+            "chapter_name_en": None,
+        }
+
+    def test_extractor_records_kept_and_dropped(self, tmp_path: Path) -> None:
+        write_hadiths(
+            tmp_path / "hadiths_thaqalayn.parquet",
+            [self._thaqalayn_hadith("th-cr", self._MIXED_ISNAD)],
+        )
+        clean_stats: dict[str, _CleanRate] = {}
+        rows = _extract_from_hadiths(tmp_path, "thaqalayn", "ar", clean_stats=clean_stats)
+
+        assert len(rows) == 1  # only محمد بن يعقوب survived
+        cr = clean_stats["thaqalayn"]
+        assert (cr.kept, cr.dropped, cr.considered) == (1, 1, 2)
+        assert cr.clean_rate == pytest.approx(0.5)
+
+    def test_all_null_isnad_source_not_recorded(self, tmp_path: Path) -> None:
+        """A source that considered zero spans (all null isnad) has no clean-rate —
+        it must NOT create a misleading 0/0 entry (guards the no-output contract)."""
+        write_hadiths(
+            tmp_path / "hadiths_thaqalayn.parquet",
+            [self._thaqalayn_hadith("th-null", None)],
+        )
+        clean_stats: dict[str, _CleanRate] = {}
+        rows = _extract_from_hadiths(tmp_path, "thaqalayn", "ar", clean_stats=clean_stats)
+        assert rows == []
+        assert clean_stats == {}
+
+    def test_omitting_clean_stats_leaves_behaviour_unchanged(self, tmp_path: Path) -> None:
+        """The accumulator is opt-in — the legacy call signature still works."""
+        write_hadiths(
+            tmp_path / "hadiths_thaqalayn.parquet",
+            [self._thaqalayn_hadith("th-cr2", self._MIXED_ISNAD)],
+        )
+        rows = _extract_from_hadiths(tmp_path, "thaqalayn", "ar")
+        assert len(rows) == 1
+
+    def test_run_writes_clean_rate_csv(self, tmp_path: Path) -> None:
+        import csv
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        output = tmp_path / "output"
+        output.mkdir()
+        write_hadiths(
+            staging / "hadiths_thaqalayn.parquet",
+            [self._thaqalayn_hadith("th-cr3", self._MIXED_ISNAD)],
+        )
+
+        paths = run(staging, output)
+
+        csv_path = output / "ner_clean_rate.csv"
+        assert csv_path.exists()
+        assert csv_path in paths
+        with open(csv_path, encoding="utf-8") as f:
+            by_source = {row["source_corpus"]: row for row in csv.DictReader(f)}
+        assert by_source["thaqalayn"]["kept"] == "1"
+        assert by_source["thaqalayn"]["dropped"] == "1"
+        assert by_source["thaqalayn"]["considered"] == "2"
+        assert float(by_source["thaqalayn"]["clean_rate"]) == pytest.approx(0.5)
 
 
 # ---------------------------------------------------------------------------

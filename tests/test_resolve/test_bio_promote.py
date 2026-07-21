@@ -15,6 +15,7 @@ from src.parse.name_quality import (
     asserted_name_tokens,
     clean_narrator_name,
     cleaner_removed_content,
+    is_recoverable_gloss_tail,
 )
 from src.parse.schemas import NARRATOR_ALIAS_SCHEMA, NARRATOR_BIO_SCHEMA
 from src.resolve import MissingInputError
@@ -446,6 +447,125 @@ def test_bio_promote_applies_name_quality_filter(tmp_path: Path) -> None:
     assert clean_name in names
 
 
+def test_bio_only_display_name_ar_strips_benediction(tmp_path: Path) -> None:
+    """da#301: on the BIO-ONLY new-node path the DISPLAY name_ar is benediction-free.
+
+    name_ar_normalized + make_canonical_id already used the cleaned form, but the
+    display name_ar kept the raw eulogy — visible in the node label of a bio-only
+    narrator (the loader keys node.name on name_ar first). The voweled surface is
+    preserved; identity (canonical_id, name_ar_normalized) is unchanged.
+    """
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+
+    # A voweled bio name with a benediction suffix, minted BIO-ONLY (no attested
+    # mention node pre-exists this run, so it takes the new-node branch).
+    raw_display = "أَبُو هُرَيْرَة رضي الله عنه"
+    clean_display = "أَبُو هُرَيْرَة"
+    _write_bios(
+        staging,
+        "kaggle",
+        [
+            {
+                "bio_id": "kaggle:99",
+                "source": "kaggle_narrators",
+                "name_ar": raw_display,
+                "name_ar_normalized": normalize_arabic(raw_display),
+            }
+        ],
+    )
+
+    rows = pq.read_table(promote_bios_to_canonical(staging, out_dir)).to_pylist()
+    cid = make_canonical_id(normalize_arabic("ابو هريره"))
+    rec = next(r for r in rows if r["canonical_id"] == cid)
+
+    # DISPLAY name_ar: benediction stripped, vowels preserved (not the raw eulogy).
+    assert rec["name_ar"] == clean_display
+    assert "رضي الله عنه" not in rec["name_ar"]
+    # Identity/matching unchanged — normalized form is still the cleaned bare name.
+    assert rec["name_ar_normalized"] == normalize_arabic("ابو هريره")
+
+
+def test_bio_only_display_never_empty_when_name_ar_is_honorific_only(tmp_path: Path) -> None:
+    """da#471 gap 1: honorific-only name_ar + a distinct real name_ar_normalized.
+
+    clean_narrator_name_display(name_ar) is None (all-eulogy), and the graph loader
+    stores name_ar VERBATIM (None -> "") — it does NOT coalesce the stored display
+    to name_ar_normalized. Without the guard the bio-only node would get an EMPTY
+    label (worse than the pre-da#301 raw eulogy). The display must fall back to the
+    real (cleaned) name so the label is never empty when a real name exists.
+    """
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+
+    real_name = "انس بن مالك"
+    _write_bios(
+        staging,
+        "kaggle",
+        [
+            {
+                "bio_id": "kaggle:100",
+                "source": "kaggle_narrators",
+                # name_ar is PURE honorific (cleans to None), but the normalized
+                # field carries a real name — the divergence the guard must survive.
+                "name_ar": "رضي الله عنه",
+                "name_ar_normalized": normalize_arabic(real_name),
+            }
+        ],
+    )
+
+    rows = pq.read_table(promote_bios_to_canonical(staging, out_dir)).to_pylist()
+    rec = next(
+        r for r in rows if r["canonical_id"] == make_canonical_id(normalize_arabic(real_name))
+    )
+
+    # Never empty / None — falls back to the cleaned real name, consistent with id.
+    assert rec["name_ar"]
+    assert rec["name_ar"] == normalize_arabic(real_name)
+    assert rec["name_ar_normalized"] == normalize_arabic(real_name)
+
+
+def test_bio_only_display_dual_benediction_not_garbled(tmp_path: Path) -> None:
+    """da#471 gap 2: the dual-pronoun benediction "رضي الله عنهما" no longer leaves
+    a dangling fragment in the DISPLAY name (previously "عبد الله بن عمر ا").
+
+    Root-fixed by adding the dual form to the honorific set; the display stays
+    benediction-free and normalizes back to the canonical name (no stray token).
+    """
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+
+    raw = "عَبْدُ اللَّهِ بْنُ عُمَر رضي الله عنهما"
+    _write_bios(
+        staging,
+        "kaggle",
+        [
+            {
+                "bio_id": "kaggle:101",
+                "source": "kaggle_narrators",
+                "name_ar": raw,
+                "name_ar_normalized": normalize_arabic(raw),
+            }
+        ],
+    )
+
+    rows = pq.read_table(promote_bios_to_canonical(staging, out_dir)).to_pylist()
+    clean_norm = normalize_arabic("عبد الله بن عمر")
+    rec = next(r for r in rows if r["canonical_id"] == make_canonical_id(clean_norm))
+
+    # Benediction gone AND no dangling stray token — the display normalizes exactly
+    # to the canonical name (a "… ا" residue would fail this).
+    assert "رضي الله" not in rec["name_ar"]
+    assert normalize_arabic(rec["name_ar"]) == clean_norm
+    assert rec["name_ar_normalized"] == clean_norm
+
+
 # Verbatim `full_name` values from the acquired Itqan buckets — NOT synthetic. A
 # fabricated prose row would not exercise the truncation, and the guard could not go
 # red (feedback_fixture_makes_guard_assertion_inert). Provenance:
@@ -647,7 +767,10 @@ def test_entry_number_prefix_is_not_a_truncation(tmp_path: Path) -> None:
     """
     normalized = normalize_arabic(_ITQAN_25339_ENTRY_NUMBER)
     cleaned = clean_narrator_name(normalized)
-    assert cleaned == _ITQAN_25339_NAME, f"fixture no longer strips the entry number: {cleaned!r}"
+    # normalized comparison: da#427 folds alif-maqsura ى→ي (موسى→موسي)
+    assert cleaned == normalize_arabic(_ITQAN_25339_NAME), (
+        f"fixture no longer strips the entry number: {cleaned!r}"
+    )
     assert not cleaner_removed_content(normalized, cleaned)
 
     staging = tmp_path / "staging"
@@ -1296,3 +1419,199 @@ def test_truncated_residue_onto_zero_mention_node_is_counted(
     complete = next(kw for event, kw in events if event == "bio_promote_complete")
     assert complete["truncated_residue_onto_unattested"] == 1
     assert complete["truncated_residue_minted"] == 0
+
+
+# da#397 — the gloss-tail (class A) vs name-cut (class B) discrimination. Class A is a
+# COMPLETE nasab (>= 3 tokens, carries بن/ابن) that lost only a teacher-key isnad tail
+# (the removed suffix opens on عن / حدثنا / …); class B is a bare ism/kunya residue, a
+# non-teacher-key cut (يقال / الذي), or a tail carrying a disputed-identity marker
+# (مجهول / وقيل — the homonym case). The predicate quantifies the recoverable subset;
+# it does NOT flip the guard, which still refuses BOTH classes (see the integration
+# tests below). Fixtures are the issue's own verbatim rows where cited.
+_GLOSS_TAIL_CLASS_A = [
+    # da#397's headline example: residue is the full nasab, only `عن انس` cut.
+    ("اسحاق بن مره عن انس", "اسحاق بن مره", "da#397 headline — teacher-key عن tail"),
+    # A longer nasab that lost a `عن <teacher>` tail.
+    ("عبد الله بن يوسف بن عيسى عن مالك", "عبد الله بن يوسف بن عيسى", "5-token nasab + عن tail"),
+]
+_GLOSS_TAIL_CLASS_B = [
+    # da#397's homonym example: teacher-key عن tail AND full nasab residue, but the tail
+    # grades the subject مجهول / وقيل اسمه — a disputed identity, so still class B.
+    (
+        "محمد بن شرحبيل عن قيس بن سعد وقيل اسمه عمرو مجهول من الثالثه ق",
+        "محمد بن شرحبيل",
+        "da#397 homonym — dispute marker مجهول/وقيل in the tail",
+    ),
+    # Bare kunya residue (2 tokens, no بن): may not merge regardless of the عن tail.
+    ("أبو نهشل ، عن أبي وائل", "ابو نهشل", "bare kunya residue (2 tokens)"),
+    # Bare ism residue (the da#379 عبيده class): a name-cut, not a gloss-tail.
+    (_ITQAN_60592_PROSE, "عبيده", "bare ism residue (da#379 عبيده)"),
+    # Non-teacher-key cut: the tail opens on يقال ("it is said"), a dispute/speech opener.
+    ("عبد الله بن محمد العدوي يقال", "عبد الله بن محمد العدوي", "non-teacher-key cut (يقال)"),
+    # A عن tail but the residue is a kunya+nisba with NO patronymic بن — not a nasab.
+    ("ابو محمد بصري عن محمد بن علي", "ابو محمد بصري", "عن tail but residue carries no بن"),
+]
+
+
+@pytest.mark.parametrize(("raw", "expected_cleaned", "why"), _GLOSS_TAIL_CLASS_A)
+def test_gloss_tail_class_a_is_recognised(raw: str, expected_cleaned: str, why: str) -> None:
+    """da#397 class A: a complete nasab that lost only a teacher-key isnad tail."""
+    normalized = normalize_arabic(raw)
+    cleaned = clean_narrator_name(normalized)
+    # normalized comparison: da#427 folds alif-maqsura ى→ي (e.g. عيسى→عيسي)
+    assert cleaned == normalize_arabic(expected_cleaned), (
+        f"fixture no longer truncates as expected ({why}): {cleaned!r}"
+    )
+    assert cleaner_removed_content(normalized, cleaned), why
+    assert is_recoverable_gloss_tail(normalized, cleaned), (
+        f"class-A gloss-tail not recognised ({why})"
+    )
+
+
+@pytest.mark.parametrize(("raw", "expected_cleaned", "why"), _GLOSS_TAIL_CLASS_B)
+def test_name_cut_class_b_is_not_a_gloss_tail(raw: str, expected_cleaned: str, why: str) -> None:
+    """da#397 class B: a name-cut / disputed-identity / non-nasab residue is NOT recoverable."""
+    normalized = normalize_arabic(raw)
+    cleaned = clean_narrator_name(normalized)
+    # normalized comparison: da#427 folds alif-maqsura ى→ي (e.g. عيسى→عيسي)
+    assert cleaned == normalize_arabic(expected_cleaned), (
+        f"fixture no longer truncates as expected ({why}): {cleaned!r}"
+    )
+    assert cleaner_removed_content(normalized, cleaned), why
+    assert not is_recoverable_gloss_tail(normalized, cleaned), (
+        f"class-B row read as gloss-tail ({why})"
+    )
+
+
+def test_non_truncation_is_never_a_gloss_tail() -> None:
+    """A span the cleaner only NORMALIZED (no cut) is not a gloss-tail — nothing was removed.
+
+    The dual of the class-A/B split: `is_recoverable_gloss_tail` must return False whenever
+    `cleaner_removed_content` is False, so an affix-only unwrap (a bracketed entry number, a
+    trailing honorific) can never be miscounted as a recoverable refusal.
+    """
+    for raw in ("( 4875 ) عبد الله بن موسى", "مالك بن انس رضي الله عنه", "سعيد بن سماك"):
+        normalized = normalize_arabic(raw)
+        cleaned = clean_narrator_name(normalized)
+        assert cleaned is not None, raw
+        assert not cleaner_removed_content(normalized, cleaned), raw
+        assert not is_recoverable_gloss_tail(normalized, cleaned), raw
+
+
+# Verbatim from da#397 (residue `اسحاق بن مره`, attested target mention_count = 18).
+_ITQAN_GLOSS_TAIL = "اسحاق بن مره عن انس"
+
+
+def test_gloss_tail_row_is_still_refused_and_counted_class_a(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """da#397: a class-A gloss-tail row targeting an attested narrator is STILL REFUSED.
+
+    This is the invariant-preservation assertion — the discrimination QUANTIFIES the
+    recoverable subset, it does NOT flip the guard. Recovering class A is not provably
+    safe (make_canonical_id folds inflection but not homonymy; 45/240 class-A accept-
+    targets carry conflicting jarḥ grades, da#423), so the merge stays refused and the
+    backfill never fires. The refusal is attributed to `skipped_truncated_merge_gloss_tail`
+    and surfaced by the deferred-recall info line (da#398 scope-1).
+    """
+    from src.resolve import bio_promote as bp
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+
+    normalized = normalize_arabic(_ITQAN_GLOSS_TAIL)
+    assert clean_narrator_name(normalized) == "اسحاق بن مره"
+    assert is_recoverable_gloss_tail(normalized, clean_narrator_name(normalized))
+
+    attested_id = _write_attested_narrator(out_dir, "اسحاق بن مره", mentions=18)
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:397a",
+                "source": "itqan",
+                "name_ar": _ITQAN_GLOSS_TAIL,
+                "name_ar_normalized": normalized,
+                "trustworthiness": "daif",
+                "death_year_ah": 150,
+                "generation": "tabi_tabiin",
+            }
+        ],
+    )
+
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(bp.logger, "info", lambda event, **kw: events.append((event, kw)))
+    monkeypatch.setattr(bp.logger, "warning", lambda event, **kw: events.append((event, kw)))
+
+    rows = pq.read_table(bp.promote_bios_to_canonical(staging, out_dir)).to_pylist()  # type: ignore[arg-type]
+
+    # The merge is STILL refused — no behavioral flip.
+    attested = next(r for r in rows if r["canonical_id"] == attested_id)
+    assert attested["source_ids"] == ["sanadset:1"], "gloss-tail row was merged — guard flipped!"
+    assert attested["trustworthiness"] is None, "backfill fired — guard flipped!"
+    assert attested["death_year_ah"] is None
+    assert attested["generation"] is None
+    assert len(rows) == 1
+    assert attested["mention_count"] == 18
+
+    # And the refusal is attributed to the gloss-tail (class A) bucket + surfaced.
+    complete = next(kw for event, kw in events if event == "bio_promote_complete")
+    assert complete["skipped_truncated_merge"] == 1
+    assert complete["skipped_truncated_merge_gloss_tail"] == 1
+    assert complete["skipped_truncated_merge_name_cut"] == 0
+    assert any(
+        event == "bio_promote_gloss_tail_refusals_deferred" and kw.get("gloss_tail") == 1
+        for event, kw in events
+    ), events
+
+
+def test_name_cut_row_is_refused_and_counted_class_b(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """da#397: a class-B name-cut row (bare ism) targeting an attested narrator is counted name_cut.
+
+    The dual of the gloss-tail integration test: the same refusal, but attributed to the
+    `_name_cut` bucket (NOT `_gloss_tail`), and the deferred-recall info line does NOT fire
+    when there is no recoverable subset.
+    """
+    from src.resolve import bio_promote as bp
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+
+    assert not is_recoverable_gloss_tail(
+        normalize_arabic(_ITQAN_60592_PROSE),
+        clean_narrator_name(normalize_arabic(_ITQAN_60592_PROSE)),
+    )
+    _write_attested_narrator(out_dir, "عبيده", mentions=1695)
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:60592",
+                "source": "itqan",
+                "name_ar": _ITQAN_60592_PROSE,
+                "name_ar_normalized": normalize_arabic(_ITQAN_60592_PROSE),
+                "trustworthiness": "thiqa",
+            }
+        ],
+    )
+
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(bp.logger, "info", lambda event, **kw: events.append((event, kw)))
+    monkeypatch.setattr(bp.logger, "warning", lambda event, **kw: events.append((event, kw)))
+
+    assert bp.promote_bios_to_canonical(staging, out_dir) is not None
+    complete = next(kw for event, kw in events if event == "bio_promote_complete")
+    assert complete["skipped_truncated_merge"] == 1
+    assert complete["skipped_truncated_merge_name_cut"] == 1
+    assert complete["skipped_truncated_merge_gloss_tail"] == 0
+    assert not any(event == "bio_promote_gloss_tail_refusals_deferred" for event, kw in events), (
+        "deferred-recall line fired with no gloss-tail refusals"
+    )

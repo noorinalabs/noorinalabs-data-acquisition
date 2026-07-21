@@ -206,3 +206,44 @@ class TestCanonicalMatnIdentity:
         with_en_a = canonical_matn_identity(self._MATN_PLAIN, "gloss one")
         with_en_b = canonical_matn_identity(self._MATN_PLAIN, "a different gloss")
         assert with_en_a == with_en_b
+
+
+class TestCanonicalMatnIdentityPunctuation:
+    """da#373 — punctuation is stripped before hashing, so two editions that differ
+    only by commas / dashes / quotes converge to ONE identity.
+
+    This is what makes the cross-edition gate actually fire: with the raw
+    ``normalize_arabic`` output (punctuation kept) it dropped 3 rows of 853,218,
+    silently admitting the duplicates it was built to remove.
+    """
+
+    _PLAIN = "انما الاعمال بالنيات"
+    _PUNCTUATED = "«انما»، الاعمال — بالنيات."
+
+    def test_arabic_punctuation_variants_collapse(self) -> None:
+        plain = canonical_matn_identity(self._PLAIN, None)
+        punct = canonical_matn_identity(self._PUNCTUATED, None)
+        assert plain is not None
+        assert plain == punct
+
+    def test_english_punctuation_stripped(self) -> None:
+        plain = canonical_matn_identity(None, "actions are by intentions")
+        punct = canonical_matn_identity(None, "Actions, are by intentions!")
+        assert plain is not None
+        assert plain == punct
+
+    def test_distinct_matn_still_distinct_after_strip(self) -> None:
+        # Stripping punctuation must not collapse genuinely different traditions.
+        a = canonical_matn_identity("انما الاعمال بالنيات", None)
+        b = canonical_matn_identity("لا ضرر ولا ضرار", None)
+        assert a is not None and b is not None
+        assert a != b
+
+    def test_non_letter_run_becomes_a_space_not_a_join(self) -> None:
+        # A non-letter char between two words becomes a SPACE, so it never fuses
+        # them into one token (which would corrupt the min-token gate). "متن3متن"
+        # keys the same as "متن متن", not as a single fused token.
+        fused = canonical_matn_identity("انما3الاعمال بالنيات", None)
+        spaced = canonical_matn_identity("انما الاعمال بالنيات", None)
+        assert fused is not None
+        assert fused == spaced

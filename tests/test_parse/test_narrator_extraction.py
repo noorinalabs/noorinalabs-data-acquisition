@@ -243,7 +243,8 @@ class TestDa154NameBoundary:
     def test_arabic_laqab_stays_joined(self) -> None:
         # Multi-token name with a laqab (al-Ansari) stays a single span.
         spans = extract_narrator_mentions("حدثنا يحيى بن سعيد الأنصاري", "ar")
-        assert spans[0].name == "يحيى بن سعيد الانصاري"
+        # compared in normalized space: da#427 folds alif-maqsura ى→ي (يحيى→يحيي)
+        assert spans[0].name == normalize_arabic("يحيى بن سعيد الانصاري")
 
 
 class TestDa244TrailingTransmissionMarker:

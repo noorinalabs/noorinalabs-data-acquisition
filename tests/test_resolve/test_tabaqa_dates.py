@@ -20,10 +20,15 @@ from src.models.enums import DatePrecision, NarratorGeneration
 from src.resolve.schemas import NARRATORS_CANONICAL_SCHEMA
 from src.resolve.tabaqa_dates import (
     _GENERATION_DEATH_WINDOW_AH,
+    DEATH_PLAUSIBILITY_MARGIN_AH,
+    NARRATOR_DEATH_MAX_AH,
+    NARRATOR_DEATH_MIN_AH,
     TabaqaEstimate,
     apply_tabaqa_fallback,
+    clamp_death_ah,
     estimate_death_window,
     generation_from_value,
+    is_plausible_narrator_death_ah,
 )
 from src.utils.hijri import ah_year_to_ce_range
 
@@ -92,6 +97,60 @@ def test_estimate_unknown_generation_yields_none() -> None:
 def test_estimate_dataclass_default_precision() -> None:
     est = TabaqaEstimate(150, 100, 200, 700, 800)
     assert est.precision is DatePrecision.TABAQA_ESTIMATE
+
+
+# --------------------------------------------------------------------------- #
+# da#446 — isnad-narrator death-year plausibility envelope + clamp
+# --------------------------------------------------------------------------- #
+def test_plausibility_envelope_derives_from_generation_windows() -> None:
+    # The envelope is DERIVED from _GENERATION_DEATH_WINDOW_AH so the two cannot drift:
+    # floor = the Prophet's death (min generation low, no downward margin); ceiling =
+    # the last window's high + margin.
+    assert NARRATOR_DEATH_MIN_AH == min(lo for lo, _ in _GENERATION_DEATH_WINDOW_AH.values())
+    assert NARRATOR_DEATH_MIN_AH == 11
+    assert NARRATOR_DEATH_MAX_AH == (
+        max(hi for _, hi in _GENERATION_DEATH_WINDOW_AH.values()) + DEATH_PLAUSIBILITY_MARGIN_AH
+    )
+    assert NARRATOR_DEATH_MAX_AH == 450
+
+
+def test_plausible_absolute_envelope_no_generation() -> None:
+    # In-envelope attested deaths pass; the boundaries are inclusive.
+    assert is_plausible_narrator_death_ah(11) is True
+    assert is_plausible_narrator_death_ah(256) is True
+    assert is_plausible_narrator_death_ah(450) is True
+    # The da#446 pollution — late collectors/commentators d. ~700–780 AH, and the
+    # observed prod max of 859 AH — is impossible for an isnad narrator.
+    for polluted in (451, 754, 780, 805, 859):
+        assert is_plausible_narrator_death_ah(polluted) is False
+    # Sub-11 (before the Prophet's death) and negative axis artifacts are impossible.
+    for early in (-44, 0, 10):
+        assert is_plausible_narrator_death_ah(early) is False
+
+
+def test_plausible_generation_aware_tightening() -> None:
+    # A KNOWN generation tightens to its own window ± margin: a Companion (11–110)
+    # dated 300 AH sits inside the loose [11, 450] envelope but is impossible for a
+    # sahabi, so the generation-aware check rejects it.
+    assert is_plausible_narrator_death_ah(300, NarratorGeneration.SAHABI) is False
+    # …while a death just past the rounded window edge, within the margin, is kept
+    # (110 + 50 = 160) — the margin protects genuine boundary narrators.
+    assert is_plausible_narrator_death_ah(160, NarratorGeneration.SAHABI) is True
+    assert is_plausible_narrator_death_ah(161, NarratorGeneration.SAHABI) is False
+    # A genuine LATER narrator (280–400) at 390 stays plausible; an UNKNOWN generation
+    # falls back to the absolute envelope only.
+    assert is_plausible_narrator_death_ah(390, NarratorGeneration.LATER) is True
+    assert is_plausible_narrator_death_ah(300, NarratorGeneration.UNKNOWN) is True
+
+
+def test_clamp_death_ah_bounds_axis_estimates() -> None:
+    # The −44 / 805 AH the issue reports clamp back into the envelope; an in-range
+    # value is returned unchanged.
+    assert clamp_death_ah(-44) == NARRATOR_DEATH_MIN_AH == 11
+    assert clamp_death_ah(-36) == 11  # student-of-Companion boundary underflow
+    assert clamp_death_ah(805) == NARRATOR_DEATH_MAX_AH == 450
+    assert clamp_death_ah(497) == 450  # student-of-latest-plausible boundary overflow
+    assert clamp_death_ah(256) == 256
 
 
 # --------------------------------------------------------------------------- #
