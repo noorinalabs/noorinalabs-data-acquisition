@@ -11,6 +11,7 @@ from src.utils.arabic import (
     extract_transmission_phrases,
     is_arabic,
     normalize_alif,
+    normalize_alif_maqsura,
     normalize_arabic,
     normalize_hamza,
     normalize_taa_marbuta,
@@ -532,3 +533,59 @@ class TestContainsTransmissionMarker:
 
     def test_empty(self) -> None:
         assert contains_transmission_marker("") is False
+
+
+class TestAlifMaqsuraFold:
+    """da#427 — normalize_arabic folds alif maqṣūra ى (U+0649) to yāʾ ي (U+064A).
+
+    Alif maqṣūra is the dotless final yāʾ. Corpora spell final yāʾ inconsistently, so
+    a name or particle ending ``ى`` never collapses onto its ``ي``-spelled twin
+    without the fold — the ~13 ``الذى``/``التى``/``والذى`` matn pronouns never reach
+    the ``الذي``/``التي`` boundary set, and ``يحيى``/``يحيي`` mint two canonical ids.
+    """
+
+    @pytest.mark.parametrize(
+        "raw,folded",
+        [
+            ("الذى", "الذي"),  # relative pronoun — the issue's ~13-row target
+            ("التى", "التي"),
+            ("والذى", "والذي"),
+            ("يحيى", "يحيي"),  # very frequent narrator
+            ("موسى", "موسي"),
+            ("عيسى", "عيسي"),
+            ("المثنى", "المثني"),
+            ("حتى", "حتي"),
+            ("على", "علي"),  # the documented collision: preposition -> the name ʿAlī
+        ],
+    )
+    def test_maqsura_folds_to_yaa(self, raw: str, folded: str) -> None:
+        assert normalize_alif_maqsura(raw) == folded
+        assert normalize_arabic(raw) == folded
+
+    def test_fold_is_idempotent(self) -> None:
+        for w in ("يحيى", "الذى", "على", "موسى", "صلى الله عليه وسلم"):
+            once = normalize_arabic(w)
+            assert normalize_arabic(once) == once
+            assert "ى" not in once  # no U+0649 survives
+
+    def test_pure_yaa_input_is_a_fixed_point(self) -> None:
+        # a name already spelled with ي is untouched (يحيي stays يحيي)
+        assert normalize_alif_maqsura("يحيي بن معين") == "يحيي بن معين"
+
+    def test_composes_with_da299_urdu_yeh_fold(self) -> None:
+        """The da#427 Arabic-maqsura fold and the da#299 Urdu-yeh fold converge.
+
+        An Urdu-script taṣliya (Farsi yeh ی, U+06CC) and an Arabic-script taṣliya
+        (alif maqṣūra ى, U+0649) both normalize to the SAME regular-yeh ي form — the
+        two folds touch different SOURCE codepoints with the same ي target and are
+        order-independent (neither produces the other's input).
+        """
+        urdu = normalize_arabic("صلی الله علیه وسلم")  # Farsi yeh U+06CC
+        arabic = normalize_arabic("صلى الله عليه وسلم")  # alif maqṣūra U+0649
+        assert urdu == arabic
+        assert "ى" not in urdu and "ی" not in urdu  # no maqṣūra, no Farsi yeh survive
+
+    def test_variant_spellings_share_a_canonical_surface(self) -> None:
+        """يحيى (maqṣūra) and يحيي (yaa) — one narrator — now normalize identically."""
+        assert normalize_arabic("يحيى بن معين") == normalize_arabic("يحيي بن معين")
+        assert normalize_arabic("ابو موسى") == normalize_arabic("ابو موسي")

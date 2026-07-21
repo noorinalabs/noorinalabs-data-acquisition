@@ -42,6 +42,9 @@ _HAMZA_VARIANTS_RE: re.Pattern[str] = re.compile(r"[\u0624\u0626]")
 # Taa marbuta: ة (U+0629)
 _TAA_MARBUTA_RE: re.Pattern[str] = re.compile(r"\u0629")
 
+# Alif maqsura: U+0649 (the dotless final yaa), folded to yaa U+064A (da#427)
+_ALIF_MAQSURA_RE: re.Pattern[str] = re.compile(r"\u0649")
+
 # Tatweel / kashida: ـ (U+0640)
 _TATWEEL_RE: re.Pattern[str] = re.compile(r"\u0640")
 
@@ -239,6 +242,35 @@ def normalize_taa_marbuta(text: str) -> str:
     return _TAA_MARBUTA_RE.sub("\u0647", text)
 
 
+def normalize_alif_maqsura(text: str) -> str:
+    """Normalize alif maqsura U+0649 to yaa U+064A (da#427).
+
+    Alif maqsura is the dotless final yaa -- orthographically the SAME letter as
+    yaa, written U+0649 only in word-final position (yahya, musa, al-ladhi, ala).
+    Corpora spell it inconsistently, so a name or particle ending in it never
+    collapses onto its yaa-spelled twin without this fold -- the ~13 al-ladhi /
+    al-lati / wa-l-ladhi matn pronouns never reach the al-ladhi / al-lati boundary
+    set, and yahya (maqsura) / yahyi (yaa) mint two canonical ids for one narrator.
+
+    The fold is a single codepoint substitution U+0649 -> U+064A. It is
+    homographic-safe on names -- no real ism / nisba folds onto a particle or
+    boundary token (asserted set-level in tests/test_parse/test_name_quality.py) --
+    with ONE documented collision it does NOT resolve in this layer: the preposition
+    ``\u0639\u0644\u0649`` ("on / upon") folds to ``\u0639\u0644\u064a``, the name Ali. That
+    collision is handled downstream (``\u0639\u0644\u0649`` is removed from
+    ``name_quality._MATN_PARTICLES`` so a bare ``\u0639\u0644\u064a`` narrator is never dropped as a
+    matn particle); it is called out here because a caller keying identity on the
+    surface must know the two are no longer distinguishable after normalization.
+
+    Composes with the da#299 Urdu-yeh fold (``normalize_urdu``: U+06CC / U+06D2 /
+    U+06D3 -> U+064A): distinct SOURCE codepoints, same yaa target, and neither
+    produces the other's input, so the two are order-independent -- an Urdu-script
+    ``\u0635\u0644\u06cc`` and an Arabic ``\u0635\u0644\u0649`` both converge on the same
+    ``\u0635\u0644\u064a``. Idempotent (U+0649 is fully replaced, and U+064A is a fixed point).
+    """
+    return _ALIF_MAQSURA_RE.sub("\u064a", text)
+
+
 def normalize_urdu(text: str) -> str:
     """Fold Urdu/Persian letter variants to their Arabic equivalents (da#299).
 
@@ -287,6 +319,7 @@ def normalize_arabic(text: str) -> str:
     4. Normalize alif variants
     5. Normalize hamza variants
     6. Normalize taa marbuta
+    6b. Normalize alif maqṣūra ى -> yāʾ ي (da#427)
     7. Strip tatweel (kashida)
     8. Collapse whitespace
 
@@ -302,6 +335,7 @@ def normalize_arabic(text: str) -> str:
     text = normalize_alif(text)
     text = normalize_hamza(text)
     text = normalize_taa_marbuta(text)
+    text = normalize_alif_maqsura(text)
     text = _TATWEEL_RE.sub("", text)
     text = clean_whitespace(text)
     return text

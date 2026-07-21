@@ -647,7 +647,9 @@ class TestMatnSentenceGate:
     def test_truncated_matn_tail_punct_does_not_drop_name(
         self, polluted: str, expected: str
     ) -> None:
-        assert clean_narrator_name(normalize_arabic(polluted)) == expected
+        # `expected` is compared in normalized space so a name carrying alif-maqsura
+        # ("يحيى القطان") matches the ى→ي-folded cleaner output ("يحيي القطان") — da#427.
+        assert clean_narrator_name(normalize_arabic(polluted)) == normalize_arabic(expected)
 
     # --- PRECISION (Kavitha #2): connector-less real names (nasab == 0) — mononyms
     # and nisba/laqab-only forms — are NOT spared by the nasab guard, so they must
@@ -1137,8 +1139,10 @@ class TestMatnSentenceVerseGate:
             "وكان ذلك في يوم من الايام على عهد النبي",
             # function-word-dense matn, no verb opener
             "هذا هو الذي كان على ذلك",
-            # bare/short function-word fragments (proclitic folded)
-            "على",
+            # bare/short function-word fragments (proclitic folded). NB "على" was
+            # removed from this drop set by da#427: it now folds to "علي" (the name
+            # ʿAlī) and is deliberately kept, not dropped — see
+            # TestAlifMaqsuraFold::test_ali_preposition_collision_keeps_the_name.
             "فلو",
             "ما",
         ],
@@ -1652,3 +1656,134 @@ class TestCleanerRemovedContentContract:
             assert cleaned is not None, raw
             assert cleaner_removed_content(normalized, cleaned), raw
             assert len(cleaned.split()) < len(asserted_name_tokens(normalized)), raw
+
+
+class TestAlifMaqsuraFold:
+    """da#427 — normalize_arabic folds alif maqṣūra ى→ي; the name-quality sets follow.
+
+    The ~13 ``الذى``/``التى``/``والذى`` matn relative pronouns now normalize to the
+    ``الذي``/``التي`` boundary set and are scrubbed. The fold is homographic-safe on
+    names — no ism/nisba lands on a particle or boundary token — with ONE collision
+    the fold does not resolve in normalization (``على`` "on" → ``علي``, the name ʿAlī),
+    handled here by REMOVING ``على`` from _MATN_PARTICLES so a bare ``علي`` narrator is
+    never dropped. That trade is a recall loss in the safe direction (leaves residue
+    in; never deletes a name).
+    """
+
+    # === TARGET: the matn relative pronouns now reach the boundary set ===
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("فلان الذى قال كذا", "فلان"),  # truncated at the الذى boundary
+            ("حميد التى فيها", "حميد"),
+        ],
+    )
+    def test_matn_relative_pronoun_truncates_at_boundary(self, raw: str, expected: str) -> None:
+        assert clean_narrator_name(normalize_arabic(raw)) == normalize_arabic(expected)
+
+    @pytest.mark.parametrize("bare", ["الذى", "التى", "والذى"])
+    def test_bare_relative_pronoun_dropped(self, bare: str) -> None:
+        # a span that is ONLY the (now-folded) boundary pronoun leaves no name → drop
+        assert clean_narrator_name(normalize_arabic(bare)) is None
+
+    # === COLLISION: على -> علي (ʿAlī). The name MUST survive; the preposition is
+    # no longer detectable as a matn particle (documented recall loss). ===
+    @pytest.mark.parametrize("ali", ["على", "علي", "علي بن ابي طالب", "ابو الحسن علي"])
+    def test_ali_preposition_collision_keeps_the_name(self, ali: str) -> None:
+        assert clean_narrator_name(normalize_arabic(ali)) is not None
+
+    def test_ali_not_dropped_as_bare_particle(self) -> None:
+        # bare "على" (folds to علي) must NOT drop as an all-particle fragment (2c) —
+        # that would delete ʿAlī, one of the most-attested transmitters.
+        assert clean_narrator_name(normalize_arabic("على")) == normalize_arabic("علي")
+
+    # === Real alif-maqsura names survive and fold consistently ===
+    @pytest.mark.parametrize(
+        "name",
+        ["يحيى", "يحيى بن معين", "موسى بن جعفر", "عيسى", "ابو موسى الاشعري", "المثنى بن سعيد"],
+    )
+    def test_maqsura_names_preserved(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) == normalize_arabic(name)
+
+    # === SET-LEVEL INVARIANT (#423 shape): no name/nisba folds onto a droppable
+    # token. This is the load-bearing safety proof — if a future edit adds a
+    # maqsura-final name-shape to a droppable set, or restores على to the particle
+    # set, this fails. ===
+    def test_no_name_folds_onto_a_droppable_token(self) -> None:
+        from src.parse.name_quality import (
+            _APPOSITION_CONNECTORS,
+            _ISNAD_BOUNDARY,
+            _MATN_DENSITY,
+            _MATN_OPENERS,
+            _MATN_PARTICLES,
+            _NASAB_CONNECTORS,
+        )
+
+        # common alif-maqsura-final isms / nisbas (folded to their ي forms)
+        folded_names = {
+            normalize_arabic(n)
+            for n in (
+                "يحيى",
+                "موسى",
+                "عيسى",
+                "المثنى",
+                "مصطفى",
+                "مرتضى",
+                "كسرى",
+                "ليلى",
+                "سلمى",
+                "بشرى",
+                "يعلى",
+                "على",  # the preposition that folds onto the name علي
+            )
+        }
+        droppable = (
+            _MATN_PARTICLES
+            | _ISNAD_BOUNDARY
+            | _MATN_OPENERS
+            | _MATN_DENSITY
+            | _APPOSITION_CONNECTORS
+            | _NASAB_CONNECTORS
+        )
+        assert folded_names.isdisjoint(droppable), folded_names & droppable
+
+    def test_ali_specifically_not_in_matn_particles(self) -> None:
+        """The على→علي collision pin (mirrors the أم/ام homograph pin)."""
+        from src.parse.name_quality import _MATN_PARTICLES
+
+        assert normalize_arabic("علي") not in _MATN_PARTICLES
+        assert normalize_arabic("على") not in _MATN_PARTICLES
+
+    def test_no_droppable_set_member_carries_alif_maqsura(self) -> None:
+        """Completeness: every ى in a droppable set was converted to ي (da#427)."""
+        from src.parse.name_quality import (
+            _APPOSITION_CONNECTORS,
+            _ISNAD_BOUNDARY,
+            _ISNAD_FORMULA_FRAGMENTS,
+            _MATN_DENSITY,
+            _MATN_OPENERS,
+            _MATN_PARTICLES,
+        )
+
+        for s in (
+            _MATN_PARTICLES,
+            _ISNAD_BOUNDARY,
+            _MATN_OPENERS,
+            _MATN_DENSITY,
+            _APPOSITION_CONNECTORS,
+            _ISNAD_FORMULA_FRAGMENTS,
+        ):
+            assert all("ى" not in tok for tok in s), [t for t in s if "ى" in t]
+
+    def test_apposition_particle_homograph_invariant_still_holds(self) -> None:
+        """After مولى→مولي the أم/ام pin (da#423) is unchanged — still the sole overlap."""
+        from src.parse.name_quality import _APPOSITION_CONNECTORS, _MATN_PARTICLES
+
+        assert _APPOSITION_CONNECTORS & _MATN_PARTICLES == frozenset({"ام"})
+
+    # === Composition with the da#299 Urdu-yeh fold: an Urdu-script and an
+    # Arabic-script benediction both strip to the same recovered name ===
+    def test_composes_with_da299_benediction_strip(self) -> None:
+        urdu = clean_narrator_name(normalize_arabic("ابو هريره صلی الله علیه وسلم"))
+        arabic = clean_narrator_name(normalize_arabic("ابو هريره صلى الله عليه وسلم"))
+        assert urdu == arabic == normalize_arabic("ابو هريره")
