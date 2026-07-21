@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from src.parse.identity import make_canonical_id
 from src.parse.name_quality import (
     clean_narrator_name,
     clean_narrator_name_display,
@@ -11,7 +12,7 @@ from src.parse.name_quality import (
     split_compound_narrators,
     strip_markup,
 )
-from src.utils.arabic import normalize_arabic
+from src.utils.arabic import extract_arabic_span, normalize_arabic
 
 
 class TestIsMubhamRelational:
@@ -401,6 +402,66 @@ class TestBenedictionAndProphetReference:
         assert clean_narrator_name(normalize_arabic("انس بن مالك صلى الله عليه واله")) == (
             "انس بن مالك"
         )
+
+
+class TestUrduAndLatinResidue:
+    """da#299 — Urdu-script + Latin benediction/title residue in kaggle rijāl bios.
+
+    The kaggle bios store a mixed Latin + Urdu-script + Arabic blob. The Arabic
+    span is pulled out (:func:`extract_arabic_span`), Urdu letterforms fold to
+    Arabic (in :func:`normalize_arabic`), and the benediction — whether the Urdu
+    yeh-form or the Arabic maksura-form — is stripped, so an Urdu-script name
+    reaches the SAME benediction-free canonical form as its Arabic twin.
+    """
+
+    def _canonical(self, blob: str) -> str | None:
+        cleaned = clean_narrator_name(normalize_arabic(extract_arabic_span(blob)))
+        return make_canonical_id(cleaned) if cleaned else None
+
+    def test_urdu_blob_folds_to_arabic_twin_canonical(self) -> None:
+        urdu_blob = "Prophet Muhammad(saw) ( محمد صلی اللہ علیہ وسلم ( رضي الله عنه"
+        arabic_twin = "محمد صلى الله عليه وسلم رضي الله عنه"
+        assert self._canonical(urdu_blob) == self._canonical(arabic_twin)
+
+    def test_urdu_blob_reduces_to_the_bare_name(self) -> None:
+        urdu_blob = "Prophet Muhammad(saw) ( محمد صلی اللہ علیہ وسلم ( رضي الله عنه"
+        assert clean_narrator_name(normalize_arabic(extract_arabic_span(urdu_blob))) == "محمد"
+
+    def test_urdu_folded_tasliya_is_stripped(self) -> None:
+        # the Urdu benediction folds to the yeh-spelled "صلي …" form, which the
+        # da#299 honorific entries strip (mirrors the da#308 رضى/رضي pair).
+        name = "محمد بن یعقوب صلی اللہ علیہ وسلم"
+        assert clean_narrator_name(normalize_arabic(name)) == "محمد بن يعقوب"
+
+    # --- Latin / English benediction abbreviations stripped (parenthesized only) ---
+    @pytest.mark.parametrize(
+        ("polluted", "expected"),
+        [
+            ("Prophet Muhammad(saw)", "Muhammad"),
+            ("Abu Hurayra (r.a.)", "Abu Hurayra"),
+            ("Ali (as)", "Ali"),
+            ("Bilal (pbuh)", "Bilal"),
+            ("Hazrat Bilal", "Bilal"),
+            ("Sayyidina Umar", "Umar"),
+        ],
+    )
+    def test_latin_benediction_and_title_stripped(self, polluted: str, expected: str) -> None:
+        assert clean_narrator_name(normalize_arabic(polluted)) == expected
+
+    # --- PRECISION: a bare (non-parenthesized) benediction substring inside a real
+    #     romanized name is NOT stripped; real names pass through untouched ---
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "Anas",
+            "Malik",
+            "Al-Zuhri",
+            "Asma",  # leading "as" substring, no parens → untouched
+            "Rabia",  # leading "ra" substring, no parens → untouched
+        ],
+    )
+    def test_precision_real_romanized_names_kept(self, name: str) -> None:
+        assert clean_narrator_name(normalize_arabic(name)) == name
 
 
 class TestMatnSentenceGate:
