@@ -115,6 +115,16 @@ _CLUSTER_RATIO_THRESHOLD = 90.0
 # are not the same person). One source rounding a death year by a year is fine.
 _DEATH_YEAR_TOLERANCE = 2
 
+# Discounted band for a death year tagged ``uncorroborated`` (da#380). A weak
+# Stage-2 fuzzy bio match persists its year on the record but marks it
+# ``uncorroborated`` because it "may not steer the ... identities" of other
+# narrators (disambiguate.py, da#356). An OCR-corrupt uncorroborated year off by
+# a handful of AH years must therefore NOT veto a merge at the tight
+# ``_DEATH_YEAR_TOLERANCE``; only a gross, generations-apart spread still blocks.
+# Mirrors ``narrator_unify._gross_death_spread``'s da#431 sanity band (=50) so the
+# resolve stage weighs an uncorroborated year the same way everywhere.
+_UNCORROBORATED_DEATH_SPREAD = 50
+
 # Minimum number of *shared* significant (non-connector) name tokens required to
 # merge. token_set_ratio scores a bare given name as a perfect (100) subset of
 # every fuller name carrying it (``محمد`` ⊂ ``محمد بن اسماعيل البخاري``), and a
@@ -394,11 +404,27 @@ def _name_match(keys_a: list[str], keys_b: list[str], *, threshold: float) -> bo
 
 
 def _death_years_conflict(a: dict[str, Any], b: dict[str, Any]) -> bool:
-    """True when both carry a death year that disagree beyond the tolerance."""
+    """True when both carry a death year that disagree beyond the tolerance.
+
+    da#380 — the veto is provenance-weighted. Two *trusted* years (``corroborated``
+    or untagged ``None``) conflict at the tight :data:`_DEATH_YEAR_TOLERANCE`, as
+    before. But when EITHER year is tagged ``uncorroborated`` — a weak Stage-2 fuzzy
+    bio year that disambiguate persists yet excludes from steering identity
+    (da#356) — a small disagreement (e.g. an OCR-corrupt year off by a few) must NOT
+    veto a real merge; only a gross, generations-apart spread beyond
+    :data:`_UNCORROBORATED_DEATH_SPREAD` still blocks. This keeps corroborated-year
+    precision intact while stopping an uncorroborated year from vetoing at full
+    authority. Mirrors ``narrator_unify``'s corroborated-vs-gross-spread split.
+    """
     da, db = a.get("death_year_ah"), b.get("death_year_ah")
-    if isinstance(da, int) and isinstance(db, int):
-        return abs(da - db) > _DEATH_YEAR_TOLERANCE
-    return False
+    if not (isinstance(da, int) and isinstance(db, int)):
+        return False
+    uncorroborated = (
+        a.get("death_year_provenance") == "uncorroborated"
+        or b.get("death_year_provenance") == "uncorroborated"
+    )
+    tolerance = _UNCORROBORATED_DEATH_SPREAD if uncorroborated else _DEATH_YEAR_TOLERANCE
+    return abs(da - db) > tolerance
 
 
 def _genders_conflict(a: dict[str, Any], b: dict[str, Any]) -> bool:
