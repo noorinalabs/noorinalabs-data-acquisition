@@ -1821,3 +1821,90 @@ class TestRecoveryIsNoWorseThanMain:
     )
     def test_regression_survivor_still_survives(self, survivor: str) -> None:
         assert clean_narrator_name(normalize_arabic(survivor)) is not None
+
+
+class TestFaNarrativeIsmPrecision:
+    """da#424 review (Oyunbileg, PR #474) — a ف-initial ISM is not a ف-narrative verb.
+
+    ``_is_fa_narrative`` accepts any ف-initial ≥4-char token whose stem is not a
+    nasab connector / particle, so real narrator names built on a ف-initial ism
+    (``فراس`` Firās, ``فديك`` Fudayk, ``فوزي`` Fawzī, ``فتحي`` Fatḥī, …) tripped the
+    ف-narrative boundary. The original corroboration scanned the WHOLE remainder with
+    ``any()``, so a far-downstream bio preposition (``… القرشي في المدينه``) made a
+    ف-ism read as a narrative verb and SEVERED the nasab chain into a dangling
+    ``X بن`` fragment — a real, identifiable narrator quietly reduced to a fragment.
+    It didn't register as a deletion (NEWLY-DELETED stayed 0), which is why a
+    metric-only review missed it; it took reading the Arabic and constructing
+    adversarial isnad shapes.
+
+    Two locality guards fix it (:func:`_is_fa_narrative_boundary`): a ف-token
+    immediately after a kunya / nasab connector (``ابو``/``بن``/…) is that name's
+    ism, never a verb; and the corroborating matn signal must appear BEFORE any
+    intervening nasab connector. These are Oyunbileg's five repro shapes.
+    """
+
+    # A ف-initial ism followed by BIO content (nisba + preposition) must NEVER be
+    # severed — the ف-ism token itself must survive into the cleaned name, and the
+    # result must never be a dangling ``X بن`` fragment.
+    @pytest.mark.parametrize(
+        "row,fa_ism",
+        [
+            ("عبد الله بن فراس بن مالك القرشي في المدينه", "فراس"),
+            ("محمد بن فديك الديلي في الكوفه على قوله", "فديك"),
+            ("احمد بن فوزي الدمشقي في سنه مءتين", "فوزي"),
+            ("علي بن فتحي البصري عند اهل الحديث", "فتحي"),
+            ("ابو فراس الحمداني في الشام على الثغر", "فراس"),
+        ],
+    )
+    def test_fa_initial_ism_not_severed_by_downstream_bio(self, row: str, fa_ism: str) -> None:
+        cleaned = clean_narrator_name(normalize_arabic(row))
+        assert cleaned is not None, f"real narrator dropped entirely: {row}"
+        toks = cleaned.split()
+        # the ف-ism must survive — it is part of the name, not a matn verb that was cut
+        assert normalize_arabic(fa_ism) in toks, f"ف-ism severed from the name: {cleaned!r}"
+        # and the result must never be a dangling ``X بن`` truncation
+        assert toks[-1] not in ("بن", "ابن"), f"severed to a nasab fragment: {cleaned!r}"
+
+    # A ف-token right after a kunya / nasab connector is the ism (``ابو فراس``,
+    # ``بن فراس``) and must not truncate even when a matn signal follows.
+    @pytest.mark.parametrize(
+        "row,expected",
+        [
+            ("ابو فراس", "ابو فراس"),
+            ("عبد الله بن فراس", "عبد الله بن فراس"),
+            ("محمد بن فديك", "محمد بن فديك"),
+        ],
+    )
+    def test_fa_ism_after_connector_is_kept(self, row: str, expected: str) -> None:
+        assert clean_narrator_name(normalize_arabic(row)) == normalize_arabic(expected)
+
+    # LOCALITY guard specifically: a ف-ism preceded by a NON-connector ism (so the
+    # preceding-connector guard cannot help) but immediately followed by ``بن`` —
+    # the corroboration scan hits ``بن`` before any matn signal and refuses to cut.
+    # The span-wide ``any()`` bug would sever this NASAB-bearing head (dropping the
+    # ف-ism and its lineage), so this isolates the locality fix.
+    @pytest.mark.parametrize(
+        "row,fa_ism",
+        [
+            ("محمد بن سعيد فراس بن مالك في المدينه", "فراس"),
+            ("احمد بن عمر فديك بن زيد الكوفي على قوله", "فديك"),
+        ],
+    )
+    def test_fa_ism_before_nasab_connector_is_not_cut(self, row: str, fa_ism: str) -> None:
+        cleaned = clean_narrator_name(normalize_arabic(row))
+        assert cleaned is not None and normalize_arabic(fa_ism) in cleaned.split()
+
+    # The genuine ف-narrative verb (matn object LOCAL, before any nasab connector)
+    # still truncates — the fix narrows the rule, it does not disable it.
+    def test_genuine_fa_narrative_still_truncates(self) -> None:
+        assert clean_narrator_name(
+            normalize_arabic("ابو هريره فذهب رسول الله وانتم تنتثلونها")
+        ) == normalize_arabic("ابو هريره")
+
+    # A bare matn head opening with a ف-narrative verb (no nasab lead) still drops —
+    # the locality fix must not resurrect it.
+    def test_fa_narrative_matn_head_without_nasab_still_drops(self) -> None:
+        assert (
+            clean_narrator_name(normalize_arabic("فذهب رسول الله وانتم تنتثلونها الى المدينه"))
+            is None
+        )

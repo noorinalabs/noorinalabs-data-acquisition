@@ -1564,10 +1564,11 @@ def _is_fa_narrative(token: str) -> bool:
     """True when *token* is a ``ف``-proclitic narrative-continuation verb (da#424).
 
     The ``ف`` ("so / then") narrative proclitic on a ≥3-letter verb stem opens a
-    matn clause (``فذهب`` "so he went", ``فقام`` "so he stood"). Deliberately NOT
-    self-sufficient: the caller only treats it as a boundary when a matn signal
-    ALSO follows later in the span, so a real ``ف``-initial ism (``فراس``, ``فيروز``)
-    with no matn after it is never cut. A ``ف``-proclitic on a *particle* (``فلو``,
+    matn clause (``فذهب`` "so he went", ``فقام`` "so he stood"). Shape-only and
+    deliberately NOT self-sufficient: a ``ف``-initial ism (``فراس``, ``فيروز``,
+    ``فديك``) has the same shape, so :func:`_is_fa_narrative_boundary` adds the two
+    locality guards that tell a verb from an ism (preceding kunya / nasab connector,
+    and LOCAL matn corroboration). A ``ف``-proclitic on a *particle* (``فلو``,
     ``فما``) is excluded here — it is already a :func:`_is_matn_particle` signal —
     and a ``ف``-stem that is itself a nasab connector is excluded so nothing name-
     bearing is mistaken for a verb.
@@ -1600,21 +1601,58 @@ def _is_matn_verb(token: str) -> bool:
     return token in _MATN_OPENERS or folded in _MATN_OPENERS
 
 
-def _has_matn_signal(tokens: list[str]) -> bool:
-    """True when *tokens* contains any matn signal — a Prophet reference or a
-    :func:`_is_name_matn_signal` token (da#424). The corroboration check that gates
-    the ``ف``-narrative boundary."""
-    return any(
-        _prophet_ref_len(tokens, i) > 0 or _is_name_matn_signal(t) for i, t in enumerate(tokens)
-    )
+def _fa_narrative_corroborated(rest: list[str]) -> bool:
+    """True when a matn signal LOCALLY corroborates a ``ف``-narrative verb (da#424).
+
+    *rest* is the token slice immediately AFTER a candidate ``ف``-token. A genuine
+    narrative verb puts its matn object right after it (``فذهب رسول الله`` "so he
+    went TO the Messenger", ``فقال له`` "so he said TO him"), so the corroborating
+    signal must appear BEFORE any intervening nasab connector. A real ``ف``-initial
+    ism inside a lineage (``… بن فراس بن مالك …``) is followed by ``بن`` — a nasab
+    connector — which stops the scan and refuses corroboration, so the ism is not
+    mistaken for a verb.
+
+    This replaced an ``any()`` over the WHOLE remainder (Oyunbileg, PR #474 review):
+    that span-wide scan let a far-downstream bio preposition (``… القرشي في
+    المدينه``) corroborate a ``ف``-initial ism, severing the nasab chain into a
+    dangling ``X بن`` fragment — the exact delete-a-real-narrator harm da#424 exists
+    to prevent, invisible to a NEWLY-DELETED=0 metric because the base kept the span
+    WHOLE. Locality (signal before any nasab connector) is the fix.
+    """
+    for j, tok in enumerate(rest):
+        if tok in _NASAB_CONNECTORS:
+            return False
+        if _prophet_ref_len(rest, j) > 0 or _is_name_matn_signal(tok):
+            return True
+    return False
+
+
+def _is_fa_narrative_boundary(tokens: list[str], i: int) -> bool:
+    """True when ``tokens[i]`` is a ``ف``-narrative verb that ENDS the name (da#424).
+
+    Three conditions, all required — the ``ف``-narrative rule's precision guards:
+
+    1. ``tokens[i]`` looks like a ``ف``-proclitic verb (:func:`_is_fa_narrative`).
+    2. It is NOT the ism of an immediately-preceding kunya / nasab connector: a
+       token right after ``ابو``/``ابي``/``ابا``/``بن``/``ابن`` is that name's ism,
+       never a verb (``ابو فراس`` = "Abū Firās", ``بن فراس`` = "ibn Firās"), so a
+       ``ف``-initial ism there must never truncate. (Oyunbileg, PR #474.)
+    3. A matn signal corroborates it LOCALLY (:func:`_fa_narrative_corroborated`) —
+       before any intervening nasab connector.
+    """
+    if not _is_fa_narrative(tokens[i]):
+        return False
+    if i > 0 and tokens[i - 1] in _NASAB_CONNECTORS:
+        return False
+    return _fa_narrative_corroborated(tokens[i + 1 :])
 
 
 def _leading_name_before_matn(tokens: list[str], verb_only: bool) -> list[str]:
     """The leading run of name tokens, cut at the first matn boundary (da#424).
 
     Scans left to right and stops at the first matn boundary. A ``ف``-narrative verb
-    (``فذهب`` "so he went") corroborated by a later matn signal always ends the name.
-    The rest of the boundary set depends on *verb_only*:
+    (``فذهب`` "so he went") that clears the :func:`_is_fa_narrative_boundary` locality
+    guards always ends the name. The rest of the boundary set depends on *verb_only*:
 
     * ``verb_only=True`` (the KEPT-WHOLE path — the span would otherwise SURVIVE):
       stop ONLY at a matn VERB (:func:`_is_matn_verb`). A bare Prophet reference,
@@ -1631,7 +1669,7 @@ def _leading_name_before_matn(tokens: list[str], verb_only: bool) -> list[str]:
     ``من رسول الله`` is cut at ``من`` (only on the drop path).
     """
     for i, tok in enumerate(tokens):
-        if _is_fa_narrative(tok) and _has_matn_signal(tokens[i + 1 :]):
+        if _is_fa_narrative_boundary(tokens, i):
             return tokens[:i]
         if verb_only:
             if _is_matn_verb(tok):
