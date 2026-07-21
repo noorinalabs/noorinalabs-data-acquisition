@@ -118,7 +118,12 @@ class TestLoadPhase1Mentions:
         assert rows[0]["name_raw"] == "Thawban"  # DISPLAY field cleaned (the CR gap)
         assert rows[0]["name_normalized"] == "Thawban"  # clustering key cleaned
 
-    def test_falls_back_to_english_name(self, tmp_path: Path) -> None:
+    def test_falls_back_to_english_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # da#298: the Latin fallback is DROPPED by default for lk; this test exercises
+        # the fallback-cleaning mechanics, which now only run under the "keep" policy.
+        monkeypatch.setattr(ner, "_LATIN_FALLBACK_POLICY", "keep")
         mentions = [
             {
                 "mention_id": "m-3",
@@ -141,10 +146,13 @@ class TestLoadPhase1Mentions:
 # da#298 — cross-script Latin-fallback policy in _load_phase1_mentions.
 # The lk English-isnad path mints Latin-keyed nodes (empty name_ar + Latin
 # name_en) that fork from their Arabic identity. `_LATIN_FALLBACK_POLICY`
-# defaults to "keep" (no data loss, status quo); "drop" sheds them.
+# defaults to "drop" (OWNER-DECIDED) — those unrecoverable Latin duplicates are
+# dropped and audited to `lk_latin_dropped_mentions.csv`; "keep" is the escape
+# hatch that preserves them.
 # ---------------------------------------------------------------------------
 class TestLatinFallbackPolicy:
     ALI_AR = "علي"  # علي
+    LATIN_NAME = "Mughirah ibn Shu'bah"
 
     def _mixed_lk_file(self, path: Path) -> None:
         """One Arabic mention (chain 0) + one Latin-only mention (chain 1), like lk."""
@@ -161,50 +169,104 @@ class TestLatinFallbackPolicy:
                 "transmission_method": None,
             },
             {
-                "mention_id": "en-1",
+                "mention_id": "lk:h-1:en:0",
                 "source_hadith_id": "h-1",
                 "source_corpus": "lk",
                 "position_in_chain": 0,
                 "chain_index": 1,
                 "name_ar": None,
-                "name_en": "Mughirah ibn Shu'bah",
+                "name_en": self.LATIN_NAME,
                 "name_ar_normalized": None,
                 "transmission_method": None,
             },
         ]
         _write_narrator_mentions_parquet(path, mentions)
 
-    def test_default_policy_keeps_latin_fallback(self, tmp_path: Path) -> None:
-        """Default "keep" is status quo: both the Arabic and the Latin node load."""
-        assert ner._LATIN_FALLBACK_POLICY == "keep", "the shipped default must be non-lossy"
-        self._mixed_lk_file(tmp_path / "narrator_mentions_lk.parquet")
-        rows = _load_phase1_mentions(tmp_path, "lk", "narrator_mentions_lk.parquet")
-        assert len(rows) == 2
-        assert {r["name_normalized"] for r in rows} == {self.ALI_AR, "Mughirah ibn Shu'bah"}
+    def test_default_policy_is_drop(self, tmp_path: Path) -> None:
+        """Owner-decided default: the Latin-only mention is dropped, Arabic survives.
 
-    def test_drop_policy_sheds_latin_fallback_keeps_arabic(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Under "drop": the Latin-only mention is skipped, the Arabic one survives.
-
-        Mutation check: without the da#298 gate both rows load (len == 2) — this
-        asserts the Latin row is gone and only the Arabic node remains.
+        Mutation check: revert the default to "keep" (or remove the gate) and both
+        rows load (len == 2) — this asserts the default sheds the Latin node.
         """
-        monkeypatch.setattr(ner, "_LATIN_FALLBACK_POLICY", "drop")
+        assert ner._LATIN_FALLBACK_POLICY == "drop", "owner-decided default is drop"
         self._mixed_lk_file(tmp_path / "narrator_mentions_lk.parquet")
         rows = _load_phase1_mentions(tmp_path, "lk", "narrator_mentions_lk.parquet")
         assert len(rows) == 1
         assert rows[0]["name_normalized"] == self.ALI_AR
 
-    def test_drop_policy_never_drops_a_row_with_arabic(
+    def test_keep_policy_loads_both(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The "keep" escape hatch preserves the pre-da#298 behaviour (no data loss)."""
+        monkeypatch.setattr(ner, "_LATIN_FALLBACK_POLICY", "keep")
+        self._mixed_lk_file(tmp_path / "narrator_mentions_lk.parquet")
+        rows = _load_phase1_mentions(tmp_path, "lk", "narrator_mentions_lk.parquet")
+        assert len(rows) == 2
+        assert {r["name_normalized"] for r in rows} == {self.ALI_AR, self.LATIN_NAME}
+
+    def test_drop_records_audit_row(self, tmp_path: Path) -> None:
+        """The drop populates the audit accumulator with source id, name_en, hadith id."""
+        self._mixed_lk_file(tmp_path / "narrator_mentions_lk.parquet")
+        captured: list[dict[str, str | None]] = []
+        rows = _load_phase1_mentions(
+            tmp_path, "lk", "narrator_mentions_lk.parquet", latin_dropped=captured
+        )
+        assert len(rows) == 1  # Latin dropped
+        assert captured == [
+            {
+                "mention_id": "lk:h-1:en:0",  # SOURCE id, not the run-minted uuid
+                "name_en": self.LATIN_NAME,
+                "source_hadith_id": "h-1",
+            }
+        ]
+
+    def test_keep_policy_records_no_audit_row(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """A "keep" run drops nothing, so the audit accumulator stays empty."""
+        monkeypatch.setattr(ner, "_LATIN_FALLBACK_POLICY", "keep")
+        self._mixed_lk_file(tmp_path / "narrator_mentions_lk.parquet")
+        captured: list[dict[str, str | None]] = []
+        _load_phase1_mentions(
+            tmp_path, "lk", "narrator_mentions_lk.parquet", latin_dropped=captured
+        )
+        assert captured == []
+
+    def test_drop_scoped_to_lk_leaves_other_sources(self, tmp_path: Path) -> None:
+        """The drop is scoped to _LATIN_FALLBACK_CORPORA (lk). A Latin-only mention
+        from another Phase-1 source (sanadset) is NOT dropped, even under the default
+        drop policy — its Latin duplicates were never investigated (da#298 lk-only).
+
+        Mutation check: remove the `corpus in _LATIN_FALLBACK_CORPORA` guard and this
+        sanadset mention is dropped (len == 0).
+        """
+        assert ner._LATIN_FALLBACK_POLICY == "drop"
+        mentions = [
+            {
+                "mention_id": "sset-1",
+                "source_hadith_id": "h-9",
+                "source_corpus": "sanadset",
+                "position_in_chain": 0,
+                "chain_index": 0,
+                "name_ar": None,
+                "name_en": "Some Romanized Name",
+                "name_ar_normalized": None,
+                "transmission_method": None,
+            },
+        ]
+        path = tmp_path / "narrator_mentions_sanadset.parquet"
+        _write_narrator_mentions_parquet(path, mentions)
+        captured: list[dict[str, str | None]] = []
+        rows = _load_phase1_mentions(
+            tmp_path, "sanadset", "narrator_mentions_sanadset.parquet", latin_dropped=captured
+        )
+        assert len(rows) == 1, "sanadset Latin-only mention must be kept (out of da#298 scope)"
+        assert captured == []
+
+    def test_drop_policy_never_drops_a_row_with_arabic(self, tmp_path: Path) -> None:
         """A mention carrying name_ar is never dropped, even if name_en is also set.
 
         Guards against over-dropping: the gate keys on *empty name_ar + non-Arabic
         fallback*, not merely on the presence of a Latin name_en.
         """
-        monkeypatch.setattr(ner, "_LATIN_FALLBACK_POLICY", "drop")
         mentions = [
             {
                 "mention_id": "ar-2",
@@ -219,9 +281,69 @@ class TestLatinFallbackPolicy:
             },
         ]
         _write_narrator_mentions_parquet(tmp_path / "narrator_mentions_lk.parquet", mentions)
-        rows = _load_phase1_mentions(tmp_path, "lk", "narrator_mentions_lk.parquet")
+        captured: list[dict[str, str | None]] = []
+        rows = _load_phase1_mentions(
+            tmp_path, "lk", "narrator_mentions_lk.parquet", latin_dropped=captured
+        )
         assert len(rows) == 1
         assert rows[0]["name_normalized"] == self.ALI_AR
+        assert captured == []  # nothing dropped → nothing audited
+
+    def test_drop_does_not_distort_clean_rate(self, tmp_path: Path) -> None:
+        """A Latin-fallback drop counts as cleaner-KEPT in the da#300 clean-rate.
+
+        The drop happens AFTER clean_narrator_name, so the clean-rate (a pure cleaner
+        metric) must still see the span as kept — kept=2 (one Arabic + one Latin the
+        cleaner kept then the policy dropped), dropped=0. Mutation check: reverting to
+        kept=len(rows) makes kept=1 here.
+        """
+        self._mixed_lk_file(tmp_path / "narrator_mentions_lk.parquet")
+        clean_stats: dict[str, _CleanRate] = {}
+        _load_phase1_mentions(
+            tmp_path, "lk", "narrator_mentions_lk.parquet", clean_stats=clean_stats
+        )
+        cr = clean_stats["lk"]
+        assert (cr.kept, cr.dropped) == (2, 0), "the Latin drop is a cleaner-kept span"
+
+    def test_run_writes_latin_dropped_csv_on_drop(self, tmp_path: Path) -> None:
+        """End-to-end: a default (drop) run writes the audit CSV with the dropped row."""
+        import csv
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        output = tmp_path / "output"
+        output.mkdir()
+        self._mixed_lk_file(staging / "narrator_mentions_lk.parquet")
+
+        paths = run(staging, output)
+
+        csv_path = output / "lk_latin_dropped_mentions.csv"
+        assert csv_path.exists()
+        assert csv_path in paths
+        with open(csv_path, encoding="utf-8") as f:
+            audit = list(csv.DictReader(f))
+        assert audit == [
+            {"mention_id": "lk:h-1:en:0", "name_en": self.LATIN_NAME, "source_hadith_id": "h-1"}
+        ]
+
+    def test_keep_run_writes_no_latin_dropped_csv(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A "keep" run drops nothing → no audit CSV, and both mentions are resolved."""
+        import pyarrow.parquet as pq_
+
+        monkeypatch.setattr(ner, "_LATIN_FALLBACK_POLICY", "keep")
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        output = tmp_path / "output"
+        output.mkdir()
+        self._mixed_lk_file(staging / "narrator_mentions_lk.parquet")
+
+        run(staging, output)
+
+        assert not (output / "lk_latin_dropped_mentions.csv").exists()
+        resolved = pq_.read_table(output / "narrator_mentions_resolved.parquet").to_pylist()
+        assert {r["name_normalized"] for r in resolved} == {self.ALI_AR, self.LATIN_NAME}
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 ---
 name: project_lk_latin_english_isnad_fork
-description: da#298 — lk's 42k empty-name_ar mentions are English-isnad romanized duplicates of the parallel Arabic chain; no per-mention Arabic recoverable (99.5% chain-length mismatch). Drop-vs-keep is an owner policy call; _LATIN_FALLBACK_POLICY defaults keep.
+description: da#298 — lk's 42k empty-name_ar mentions are English-isnad romanized duplicates of the parallel Arabic chain; no per-mention Arabic recoverable (99.5% chain-length mismatch). OWNER DECIDED DROP; _LATIN_FALLBACK_POLICY defaults drop + writes lk_latin_dropped_mentions.csv audit.
 metadata:
   type: project
 last_verified: 2026-07-20
@@ -16,6 +16,6 @@ last_verified: 2026-07-20
 - Raw lk CSV has **no structured Arabic narrator column** — only free-text `Arabic_Isnad` / `English_Isnad` (NER-extracted separately).
 - The English & Arabic isnads are **separate chains with independent positions** (da#282 — mixing them fabricates cross-language adjacencies). Empirically: of 33,469 hadiths with an English-isnad mention, **100% also have an Arabic-isnad mention**, but the two chains have **different lengths in 99.5%** of hadiths (English systematically shorter, delta −3 to −6). So a per-mention Arabic name is NOT recoverable by positional alignment; recovery would need cross-lingual NER alignment / transliteration — the lossy path the fawaz note in `ner.py` explicitly rejects.
 
-**Mechanism shipped (da#298):** `ner._LATIN_FALLBACK_POLICY` gate in `_load_phase1_mentions`. `"keep"` (default) = status quo, no data loss. `"drop"` = skip Latin-only cross-script fallbacks (empty `name_ar` + non-Arabic fallback via `is_arabic`). Dropping ~42k mostly-duplicative Latin edges is **owner-visible** → default stays `keep`; the drop decision was surfaced to the owner, not taken unilaterally.
+**Mechanism shipped (da#298):** `ner._LATIN_FALLBACK_POLICY` gate in `_load_phase1_mentions`. **Owner decided DROP** — `"drop"` is now the default: skip Latin-only cross-script fallbacks (empty `name_ar` + non-Arabic fallback via `is_arabic`) and write every dropped mention to `lk_latin_dropped_mentions.csv` (`_write_latin_dropped_csv`, run() Step 10, gated on non-empty — a `keep` run writes nothing) so the ~42k removals are inspectable/reversible. `"keep"` is the escape hatch (pre-da#298 behaviour). The Latin-drop counts as cleaner-KEPT in the da#300 clean-rate (it passes `clean_narrator_name` before the policy gate), so that metric stays a pure cleaner metric.
 
 Related: [[project_canonical_identity_invariant]] (id+name = f(mention)), da#286 fawaz→Arabic, da#282 en/ar chain separation.
