@@ -940,6 +940,21 @@ class TestCleanNarratorNameDisplay:
         polluted = "الشيخ الجليل أبو جعفر محمد بن علي بن الحسين بن بابويه"
         assert clean_narrator_name_display(polluted) == ("أبو جعفر محمد بن علي بن الحسين بن بابويه")
 
+    def test_dual_benediction_leaves_no_dangling_token(self) -> None:
+        # da#471: the dual-pronoun benediction "رضي الله عنهما" (after a PAIR of
+        # Companions) was only prefix-matched by "رضي الله عنه", leaving a dangling
+        # "ا"/"ما" fragment ("عبد الله بن عمر ا"). Now stripped whole — the display
+        # is the clean voweled name, and the normalized cleaner drops it too.
+        display = clean_narrator_name_display("عَبْدُ اللَّهِ بْنُ عُمَر رضي الله عنهما")
+        assert display == "عَبْدُ اللَّهِ بْنُ عُمَر"
+        assert clean_narrator_name(normalize_arabic("عبد الله بن عمر رضي الله عنهما")) == (
+            "عبد الله بن عمر"
+        )
+        # alif-maqsura spelling of the dual form is stripped the same way.
+        assert clean_narrator_name(normalize_arabic("عبد الله بن عمر رضى الله عنهما")) == (
+            "عبد الله بن عمر"
+        )
+
     @pytest.mark.parametrize("empty", [None, "", "   ", "<NAR>"])
     def test_empty_display_returns_none(self, empty: str | None) -> None:
         assert clean_narrator_name_display(empty) is None

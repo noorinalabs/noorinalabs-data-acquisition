@@ -30,6 +30,7 @@ from src.parse.base import safe_str
 from src.parse.identity import make_canonical_id
 from src.parse.name_quality import (
     clean_narrator_name,
+    clean_narrator_name_display,
     cleaner_removed_content,
     is_mubham_relational,
 )
@@ -351,9 +352,36 @@ def promote_bios_to_canonical(
                 # node after a truncation, not after an asserted name. Count it.
                 if truncated:
                     truncated_residue_minted += 1
+                # da#301: strip the benediction/eulogy from the DISPLAY name_ar on
+                # the new-node (bio-only) path. name_ar_normalized + make_canonical_id
+                # already use the cleaned form (`norm`), but the display `name_ar`
+                # kept the raw eulogy ("… رضي الله عنه"). That is harmless when the
+                # bio MERGES onto a clean mention-derived node (the else branch never
+                # overwrites its name_ar), but a BIO-ONLY narrator surfaces the
+                # benediction in its label (the loader keys node.name on name_ar
+                # first). clean_narrator_name_display strips it while preserving the
+                # voweled surface. Identity/matching are unchanged — cid + norm are
+                # as before; only the display label changes.
+                #
+                # da#471 (review of da#301): the display MUST be consistent with the
+                # identity AND never empty/garbled. The graph loader stores name_ar
+                # VERBATIM (``SET n.name_ar = row.name_ar``; a None becomes ""), and
+                # does NOT coalesce the stored display to name_ar_normalized (that
+                # coalesce is only in the search-name derivation) — so a None display
+                # would surface as an EMPTY node label, worse than the raw eulogy.
+                # Two ways the display can go wrong here: (a) name_ar is honorific-only
+                # and cleans to None while name_ar_normalized is a real name (the
+                # fields diverged upstream); (b) clean_narrator_name_display's
+                # alignment fallback emits a denatured/garbled surface. Guard BOTH:
+                # keep the voweled display only when it normalizes back to the
+                # canonical `norm`; otherwise fall back to `norm` (clean, never empty
+                # when a real name exists, always consistent with the id).
+                display_name_ar = clean_narrator_name_display(name_ar) if name_ar else None
+                if not display_name_ar or normalize_arabic(display_name_ar) != norm:
+                    display_name_ar = norm
                 canonical_map[cid] = {
                     "canonical_id": cid,
-                    "name_ar": name_ar,
+                    "name_ar": display_name_ar,
                     "name_en": safe_str(row.get("name_en")),
                     "name_ar_normalized": norm,
                     "aliases": [],
