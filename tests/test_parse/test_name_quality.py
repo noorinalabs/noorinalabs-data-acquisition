@@ -1865,6 +1865,26 @@ class TestFaNarrativeIsmPrecision:
         # and the result must never be a dangling ``X بن`` truncation
         assert toks[-1] not in ("بن", "ابن"), f"severed to a nasab fragment: {cleaned!r}"
 
+    # SURVIVOR PATH (Nikolaos, PR #474): a plain ف-initial NISBA / ethnonym
+    # (فارسي / فلسطيني / فرغاني) NOT preceded by a connector, followed only by a bare
+    # PREPOSITION (في …), must be kept WHOLE. A bare preposition is not narration
+    # evidence — it attaches to a noun as readily as a verb — so it must not
+    # corroborate a ف-narrative boundary. Clipping the nisba drops the disambiguator
+    # between two otherwise-identical nasab leads (a wrong-merge hazard). An
+    # ism-after-connector fixture alone does NOT cover this shape.
+    @pytest.mark.parametrize(
+        "row,nisba",
+        [
+            ("عبد الله بن عمر فلسطيني في القدس", "فلسطيني"),
+            ("عبد الله بن عمر فرغاني في بخارى", "فرغاني"),
+            ("عبد الرحمن بن عوف فارسي الاصل في المدينه", "فارسي"),
+        ],
+    )
+    def test_fa_nisba_before_bare_preposition_is_kept_whole(self, row: str, nisba: str) -> None:
+        cleaned = clean_narrator_name(normalize_arabic(row))
+        assert cleaned == normalize_arabic(row), f"nisba clipped on the survivor path: {cleaned!r}"
+        assert normalize_arabic(nisba) in cleaned.split()
+
     # A ف-token right after a kunya / nasab connector is the ism (``ابو فراس``,
     # ``بن فراس``) and must not truncate even when a matn signal follows.
     @pytest.mark.parametrize(

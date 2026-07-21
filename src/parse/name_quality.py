@@ -1602,27 +1602,30 @@ def _is_matn_verb(token: str) -> bool:
 
 
 def _fa_narrative_corroborated(rest: list[str]) -> bool:
-    """True when a matn signal LOCALLY corroborates a ``ف``-narrative verb (da#424).
+    """True when a NARRATION signal LOCALLY corroborates a ``ف``-narrative verb (da#424).
 
-    *rest* is the token slice immediately AFTER a candidate ``ف``-token. A genuine
-    narrative verb puts its matn object right after it (``فذهب رسول الله`` "so he
-    went TO the Messenger", ``فقال له`` "so he said TO him"), so the corroborating
-    signal must appear BEFORE any intervening nasab connector. A real ``ف``-initial
-    ism inside a lineage (``… بن فراس بن مالك …``) is followed by ``بن`` — a nasab
-    connector — which stops the scan and refuses corroboration, so the ism is not
-    mistaken for a verb.
+    *rest* is the token slice immediately AFTER a candidate ``ف``-token. Two guards:
 
-    This replaced an ``any()`` over the WHOLE remainder (Oyunbileg, PR #474 review):
-    that span-wide scan let a far-downstream bio preposition (``… القرشي في
-    المدينه``) corroborate a ``ف``-initial ism, severing the nasab chain into a
-    dangling ``X بن`` fragment — the exact delete-a-real-narrator harm da#424 exists
-    to prevent, invisible to a NEWLY-DELETED=0 metric because the base kept the span
-    WHOLE. Locality (signal before any nasab connector) is the fix.
+    * **Locality** — the corroborating signal must appear BEFORE any intervening
+      nasab connector. A ``ف``-initial ism inside a lineage (``… بن فراس بن مالك …``)
+      is followed by ``بن``, which stops the scan and refuses corroboration, so the
+      ism is not mistaken for a verb. (Oyunbileg, PR #474 review — replaced an
+      ``any()`` over the WHOLE remainder that severed such names into ``X بن``.)
+    * **Narration-only evidence** — the signal must be a genuine narration marker: a
+      Prophet reference, an "asked" verb, a matn opener, or a matn-density discourse
+      word (:func:`_is_matn_verb` + :data:`_MATN_DENSITY`). A bare PREPOSITION is
+      NOT accepted (Nikolaos, PR #474 review): ``في``/``على``/``الى`` attach to a
+      noun as readily as a verb, so a plain ``ف``-initial NISBA / ethnonym
+      (``فارسي``, ``فلسطيني``, ``فرغاني``) followed by ``… في المدينه`` was read as a
+      narrative verb and clipped — dropping the very nisba that disambiguates two
+      otherwise-identical nasab leads (``عبد الله بن عمر الفارسي`` vs ``… الفلسطيني``),
+      a wrong-cross-narrator-MERGE hazard. Requiring a narration marker still
+      corroborates the genuine ``فذهب رسول الله`` (via the Prophet reference).
     """
     for j, tok in enumerate(rest):
         if tok in _NASAB_CONNECTORS:
             return False
-        if _prophet_ref_len(rest, j) > 0 or _is_name_matn_signal(tok):
+        if _prophet_ref_len(rest, j) > 0 or _is_matn_verb(tok) or tok in _MATN_DENSITY:
             return True
     return False
 
