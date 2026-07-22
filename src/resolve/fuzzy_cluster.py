@@ -92,6 +92,7 @@ from src.resolve._checkpoint import (
     resolve_cadence,
     save_checkpoint,
 )
+from src.resolve._death_year_bands import DEATH_YEAR_TOLERANCE, GROSS_DEATH_SPREAD
 from src.resolve._run_record import write_canonical
 from src.resolve.attestation import derive_attestation
 from src.resolve.schemas import NARRATOR_MENTIONS_RESOLVED_SCHEMA, NARRATORS_CANONICAL_SCHEMA
@@ -114,7 +115,8 @@ _CLUSTER_RATIO_THRESHOLD = 90.0
 # When both records carry a death year, a disagreement beyond this many AH years
 # blocks the merge regardless of name score (two narrators a generation+ apart
 # are not the same person). One source rounding a death year by a year is fine.
-_DEATH_YEAR_TOLERANCE = 2
+# Shared with ``narrator_unify`` (da#464) — see ``_death_year_bands`` for why.
+_DEATH_YEAR_TOLERANCE = DEATH_YEAR_TOLERANCE
 
 # Discounted band for a death year tagged ``uncorroborated`` (da#380). A weak
 # Stage-2 fuzzy bio match persists its year on the record but marks it
@@ -122,9 +124,11 @@ _DEATH_YEAR_TOLERANCE = 2
 # narrators (disambiguate.py, da#356). An OCR-corrupt uncorroborated year off by
 # a handful of AH years must therefore NOT veto a merge at the tight
 # ``_DEATH_YEAR_TOLERANCE``; only a gross, generations-apart spread still blocks.
-# Mirrors ``narrator_unify._gross_death_spread``'s da#431 sanity band (=50) so the
-# resolve stage weighs an uncorroborated year the same way everywhere.
-_UNCORROBORATED_DEATH_SPREAD = 50
+# Imported from ``_death_year_bands`` (da#464) — the same value
+# ``narrator_unify._gross_death_spread``'s da#431 sanity band imports, so the
+# resolve stage weighs an uncorroborated year the same way everywhere by
+# construction, not by a comment promising two literals stay equal.
+_UNCORROBORATED_DEATH_SPREAD = GROSS_DEATH_SPREAD
 
 # Minimum number of *shared* significant (non-connector) name tokens required to
 # merge. token_set_ratio scores a bare given name as a perfect (100) subset of
