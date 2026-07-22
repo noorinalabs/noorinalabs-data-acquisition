@@ -29,6 +29,7 @@ from src.resolve.tabaqa_dates import (
     estimate_death_window,
     generation_from_value,
     is_plausible_narrator_death_ah,
+    plausible_attested_death_year,
 )
 from src.utils.hijri import ah_year_to_ce_range
 
@@ -151,6 +152,34 @@ def test_clamp_death_ah_bounds_axis_estimates() -> None:
     assert clamp_death_ah(805) == NARRATOR_DEATH_MAX_AH == 450
     assert clamp_death_ah(497) == 450  # student-of-latest-plausible boundary overflow
     assert clamp_death_ah(256) == 256
+
+
+# --------------------------------------------------------------------------- #
+# da#454 — plausible_attested_death_year, the stamp-time companion to the
+# da#446 output-side scrub: bio_promote/disambiguate call this so an implausible
+# attested year never enters narrators_canonical or the candidate pool.
+# --------------------------------------------------------------------------- #
+def test_plausible_attested_death_year_passes_through_valid_year() -> None:
+    assert plausible_attested_death_year(256) == 256
+    assert plausible_attested_death_year(160, "sahabi") == 160
+
+
+def test_plausible_attested_death_year_none_is_none() -> None:
+    # A bio with no attested death stays None — never fabricated.
+    assert plausible_attested_death_year(None) is None
+    assert plausible_attested_death_year(None, "sahabi") is None
+
+
+def test_plausible_attested_death_year_scrubs_absolute_envelope_violation() -> None:
+    assert plausible_attested_death_year(805) is None
+    assert plausible_attested_death_year(754, "unknown") is None
+
+
+def test_plausible_attested_death_year_scrubs_generation_mismatch() -> None:
+    # 300 AH sits inside the loose absolute envelope but is impossible for a
+    # Companion (sahabi) — matches is_plausible_narrator_death_ah's own gate.
+    assert plausible_attested_death_year(300, "sahabi") is None
+    assert plausible_attested_death_year(300, "later") == 300
 
 
 # --------------------------------------------------------------------------- #

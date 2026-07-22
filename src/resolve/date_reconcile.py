@@ -86,6 +86,7 @@ from src.parse.narrator_dates import (
 )
 from src.resolve._run_record import write_canonical
 from src.resolve.schemas import NARRATORS_CANONICAL_SCHEMA
+from src.resolve.tabaqa_dates import generation_from_value, is_plausible_narrator_death_ah
 from src.utils.arabic import normalize_arabic
 from src.utils.hijri import ah_year_to_ce_range
 from src.utils.logging import get_logger
@@ -510,10 +511,52 @@ def reconcile_canonical_dates(
         obs_slot = obs_by_cid.get(cid) if cid else None
         if obs_slot is not None:
             merged = reconcile_narrator(obs_slot["birth"], obs_slot["death"])
+            # da#454: a reconciled DEATH point outside the isnad-narrator plausibility
+            # envelope (the d. ~700-780 AH late-collector/commentator pollution welded
+            # onto an early node — see tabaqa_dates.is_plausible_narrator_death_ah) must
+            # never be written onto the canonical record. Reconciliation folds per-
+            # source OBSERVATIONS (agreement/conflict/noise-gap) but has no concept of
+            # "impossible for THIS narrator's generation" — a single uncontested corrupt
+            # source sails straight through as a "conflict-free" EXACT point. Scrub the
+            # WHOLE death dating (point + both bounds + precision), not just the point:
+            # leaving corrupt bounds/EXACT precision behind a null point would read as
+            # "dated" to tabaqa_dates' undated-check and skip the ṭabaqa fallback that
+            # runs next, stranding the narrator on a half-scrubbed, still-wrong dating.
+            death_point = merged.get("death_year_ah")
+            # Death columns the da#454 scrub cleared with EXPLICIT intent, so the
+            # back-fill-protection loop below honours the clear instead of swallowing
+            # it (empty on the normal path — populated only when the scrub fires).
+            scrub_cleared: set[str] = set()
+            if death_point is not None and not is_plausible_narrator_death_ah(
+                death_point, generation_from_value(rec.get("generation"))
+            ):
+                merged["death_year_ah"] = None
+                merged["death_year_ah_earliest"] = None
+                merged["death_year_ah_latest"] = None
+                merged["death_date_precision"] = DatePrecision.UNKNOWN.value
+                scrub_cleared = {
+                    "death_year_ah",
+                    "death_year_ah_earliest",
+                    "death_year_ah_latest",
+                }
             for key, value in merged.items():
                 # Never null out a point a prior producer back-filled (defensive —
-                # a contributing bio would itself have surfaced that point here).
-                if key.endswith("_year_ah") and value is None and rec.get(key) is not None:
+                # a contributing bio would itself have surfaced that point here) —
+                # UNLESS the da#454 scrub above cleared it with explicit intent. When
+                # the canonical record ALREADY holds a death point (a persisted
+                # pre-fix corrupt point on an idempotent `resolve --from-step
+                # reconcile` re-run, or a bio_promote-stamped point reconciliation
+                # recomputes as implausible from the fuller unscrubbed bio set), the
+                # guard would otherwise keep that point while its bounds + precision
+                # are nulled — the self-inconsistent half-scrub this scrub exists to
+                # prevent, which then reads as "dated" to tabaqa_dates' undated-check
+                # and skips the ṭabaqa fallback (da#454).
+                if (
+                    key.endswith("_year_ah")
+                    and value is None
+                    and rec.get(key) is not None
+                    and key not in scrub_cleared
+                ):
                     continue
                 rec[key] = value
             reconciled += 1
