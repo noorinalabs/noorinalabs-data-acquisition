@@ -1804,9 +1804,11 @@ class TestRecoveryIsNoWorseThanMain:
     only ever turns a drop or a polluted whole span into a cleaner name.
 
     The full-corpus, bidirectional, unweighted A/B (row-level, mention_count=0 slice
-    visible) is DATA-GATED — no raw corpus ships in the repo (``data/raw`` is empty)
-    — and is deferred to a re-run, per the issue. These fixtures are the verbatim
-    corpus rows the series accumulated, standing in for the deletion-direction sweep.
+    visible) ran against the ``curated.pre-rerun-928`` snapshot (da#477): NEWLY-DELETED
+    real narrators = 0, matching the fixtures below. See
+    ``docs/reports/alif-maqsura-fold-ab-da427.md`` for the full measurement (deletion,
+    recall, and re-key directions). These fixtures remain the fast, no-data-required
+    unit pins for the deletion direction the #423/#314 series accumulated.
     """
 
     @pytest.mark.parametrize(

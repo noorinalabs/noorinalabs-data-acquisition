@@ -166,3 +166,7 @@ tatweel
 gradings
 textless
 unsplit
+
+# --- da#427 alif-maqsura fold A/B report (docs/reports/alif-maqsura-fold-ab-da427.md) ---
+maqṣūra
+ʿAlī
