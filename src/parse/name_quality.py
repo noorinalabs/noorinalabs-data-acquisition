@@ -847,6 +847,13 @@ _MATN_OPENERS = frozenset(
 # SAFE direction (leaves residue in; never deletes a name), and the alternative
 # deletes ʿAlī. The set-level invariant test pins that no name (``علي`` included)
 # folds onto a member of this or any other droppable set.
+#
+# da#477 corpus A/B (curated.pre-rerun-928, see
+# docs/reports/alif-maqsura-fold-ab-da427.md): the feared recall loss did not
+# materialize on that snapshot — newly-kept junk = 0, so a carve-out that detects
+# ``على`` as a matn preposition while exempting a bare ``علي`` narrator span was
+# NOT built. This is corpus-gated, not closed: re-check against the next production
+# re-run before ruling the carve-out out permanently.
 _MATN_PARTICLES = frozenset(
     {
         # prepositions ("على" excluded — see header: folds onto the name علي)
