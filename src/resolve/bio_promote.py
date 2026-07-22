@@ -44,6 +44,7 @@ from src.resolve.sect_affiliation import (
     normalize_corpus,
     primary_corpus,
 )
+from src.resolve.tabaqa_dates import plausible_attested_death_year
 from src.utils.arabic import normalize_arabic
 from src.utils.logging import get_logger
 
@@ -52,10 +53,11 @@ logger = get_logger(__name__)
 __all__ = ["promote_bios_to_canonical"]
 
 # Scalar bio fields back-filled onto an existing canonical record when missing.
+# ``death_year_ah`` is handled separately (da#454, plausibility-bound at stamp
+# time) rather than through this generic pass-through.
 _BACKFILL_FIELDS = (
     "name_en",
     "birth_year_ah",
-    "death_year_ah",
     "generation",
     "gender",
     "trustworthiness",
@@ -308,6 +310,14 @@ def promote_bios_to_canonical(
 
             bio_id = safe_str(row.get("bio_id"))
             cid = make_canonical_id(norm)
+            # da#454: bound the bio's attested death year against the isnad-narrator
+            # plausibility envelope *before* it can be written anywhere — a raw
+            # death_year_ah outside the envelope (the d. ~700-780 AH late-collector
+            # pollution) becomes None rather than landing on a fresh node or
+            # back-filling an existing one.
+            death_year = plausible_attested_death_year(
+                row.get("death_year_ah"), row.get("generation")
+            )
 
             # When `cleaner_removed_content` is True the cleaner removed name-span
             # material beyond its affix normalizations. That covers TWO classes the
@@ -409,7 +419,7 @@ def promote_bios_to_canonical(
                     "name_ar_normalized": norm,
                     "aliases": [],
                     "birth_year_ah": row.get("birth_year_ah"),
-                    "death_year_ah": row.get("death_year_ah"),
+                    "death_year_ah": death_year,
                     "generation": safe_str(row.get("generation")),
                     "gender": safe_str(row.get("gender")),
                     "trustworthiness": safe_str(row.get("trustworthiness")),
@@ -441,6 +451,11 @@ def promote_bios_to_canonical(
                 for field_name in _BACKFILL_FIELDS:
                     if rec.get(field_name) in (None, "") and row.get(field_name) not in (None, ""):
                         rec[field_name] = row.get(field_name)
+                # death_year_ah backfills from the plausibility-bound value (da#454),
+                # never the raw row — an implausible attested year must not sneak
+                # onto an existing (even zero-mention) record either.
+                if rec.get("death_year_ah") in (None, "") and death_year is not None:
+                    rec["death_year_ah"] = death_year
             promoted += 1
             promoted_cids.add(cid)
 

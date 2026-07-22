@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from src.parse.identity import CANONICAL_NAMESPACE
+from src.parse.schemas import NARRATOR_BIO_SCHEMA
 from src.resolve.disambiguate import (
     Candidate,
     ChainContext,
@@ -19,6 +23,7 @@ from src.resolve.disambiguate import (
     _fuzzy_match,
     _fuzzy_match_blocked,
     _geographic_filter,
+    _load_candidates,
     _make_canonical_id,
     _temporal_filter,
     _upsert_canonical,
@@ -451,3 +456,49 @@ class TestUpsertAliasDeixisScrub:
         aliases = canonical_map[cid]["aliases"]
         assert aliases == ["عاءشه ابنه ابي بكر"]
         assert "خالته" not in aliases  # deixis dropped
+
+
+def _write_bio_row(staging: Path, **row: object) -> None:
+    """Write a single-row narrators_bio_*.parquet, schema defaults filled in."""
+    base = {f.name: None for f in NARRATOR_BIO_SCHEMA}
+    base.update(row)
+    arrays = {f.name: [base[f.name]] for f in NARRATOR_BIO_SCHEMA}
+    table = pa.table(arrays, schema=NARRATOR_BIO_SCHEMA)
+    pq.write_table(table, staging / "narrators_bio_itqan.parquet")
+
+
+class TestLoadCandidatesDeathYearScrub:
+    """da#454: an implausible attested death year must never enter the candidate
+    pool ``_load_candidates`` builds — it feeds ``_temporal_filter`` and
+    ``_bio_corroborated`` (and, via ``death_year_index``, narrator_split's
+    neighbour-death evidence), so a corrupt year here propagates into identity
+    decisions, not just display."""
+
+    def test_implausible_death_year_is_scrubbed(self, tmp_path: Path) -> None:
+        _write_bio_row(
+            tmp_path,
+            bio_id="itqan:454",
+            source="itqan",
+            name_ar="صحابي ملوث",
+            name_ar_normalized="صحابي ملوث",
+            death_year_ah=720,  # impossible for a Companion (sahabi)
+            generation="sahabi",
+        )
+        candidates = _load_candidates(tmp_path)
+        assert len(candidates) == 1
+        assert candidates[0].death_year_ah is None
+        assert candidates[0].generation == "sahabi"
+
+    def test_plausible_death_year_is_kept(self, tmp_path: Path) -> None:
+        _write_bio_row(
+            tmp_path,
+            bio_id="itqan:455",
+            source="itqan",
+            name_ar="تابعي حقيقي",
+            name_ar_normalized="تابعي حقيقي",
+            death_year_ah=150,
+            generation="tabii",
+        )
+        candidates = _load_candidates(tmp_path)
+        assert len(candidates) == 1
+        assert candidates[0].death_year_ah == 150

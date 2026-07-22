@@ -1615,3 +1615,104 @@ def test_name_cut_row_is_refused_and_counted_class_b(
     assert not any(event == "bio_promote_gloss_tail_refusals_deferred" for event, kw in events), (
         "deferred-recall line fired with no gloss-tail refusals"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Implausible attested death scrub at stamp time (da#454)
+# --------------------------------------------------------------------------- #
+def test_new_node_never_stamps_implausible_death_year(tmp_path: Path) -> None:
+    """da#454: a fresh bio-only node never gets an out-of-horizon death_year_ah.
+
+    A Companion (sahabi) whose bio attests d. 720 AH — the late-collector
+    pollution class (d. ~700-780 AH) welded onto an early node — must not be
+    written onto the freshly-minted canonical record at all.
+    """
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+    name = "صحابي ملوث"
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:454a",
+                "source": "itqan",
+                "name_ar": name,
+                "name_ar_normalized": normalize_arabic(name),
+                "death_year_ah": 720,
+                "generation": "sahabi",
+            }
+        ],
+    )
+
+    path = promote_bios_to_canonical(staging, out_dir)
+    assert path is not None
+    rec = pq.read_table(path).to_pylist()[0]
+    assert rec["death_year_ah"] is None
+    # The rest of the bio still promotes normally — only the implausible date is scrubbed.
+    assert rec["generation"] == "sahabi"
+
+
+def test_backfill_never_stamps_implausible_death_year(tmp_path: Path) -> None:
+    """da#454: the backfill path is bound-checked too, not just node creation."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+    name = "صحابي معروف"
+    norm = normalize_arabic(name)
+    attested_id = _write_attested_narrator(out_dir, norm, mentions=5)
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:454b",
+                "source": "itqan",
+                "name_ar": name,
+                "name_ar_normalized": norm,
+                "death_year_ah": 780,
+                "generation": "sahabi",
+                "trustworthiness": "thiqa",
+            }
+        ],
+    )
+
+    path = promote_bios_to_canonical(staging, out_dir)
+    assert path is not None
+    rec = next(r for r in pq.read_table(path).to_pylist() if r["canonical_id"] == attested_id)
+    assert rec["death_year_ah"] is None
+    # Unrelated backfilled fields are unaffected — only the implausible date is refused.
+    assert rec["trustworthiness"] == "thiqa"
+
+
+def test_plausible_death_year_still_backfills(tmp_path: Path) -> None:
+    """Regression: a generation-consistent attested death still back-fills as before."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    out_dir = tmp_path / "curated"
+    out_dir.mkdir()
+    name = "تابعي معروف"
+    norm = normalize_arabic(name)
+    attested_id = _write_attested_narrator(out_dir, norm, mentions=5)
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            {
+                "bio_id": "itqan:454c",
+                "source": "itqan",
+                "name_ar": name,
+                "name_ar_normalized": norm,
+                "death_year_ah": 160,
+                "generation": "tabii",
+            }
+        ],
+    )
+
+    path = promote_bios_to_canonical(staging, out_dir)
+    assert path is not None
+    rec = next(r for r in pq.read_table(path).to_pylist() if r["canonical_id"] == attested_id)
+    assert rec["death_year_ah"] == 160

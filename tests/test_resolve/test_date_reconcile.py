@@ -453,3 +453,161 @@ def test_stage_no_canonical_is_noop(tmp_path: Path) -> None:
     curated = tmp_path / "curated"
     curated.mkdir()
     assert reconcile_canonical_dates(staging, curated) is None
+
+
+# --------------------------------------------------------------------------- #
+# Implausible attested death scrub (da#454) — the input-side companion to
+# narrator_split's da#446 output-side gate: a single UNCONTESTED late-collector
+# attested death (no competing source, so reconciliation sees no "conflict") must
+# still not survive reconciliation when it is impossible for the narrator's own
+# generation.
+# --------------------------------------------------------------------------- #
+def test_stage_scrubs_implausible_attested_death_for_generation(tmp_path: Path) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    curated = tmp_path / "curated"
+    curated.mkdir()
+
+    # A Companion (sahabi, plausible window ~[11, 110] AH) whose single bio source
+    # attests a d. 720 AH death — the late-collector pollution class da#446/#454
+    # documents: a commentator's death mislabelled onto an early isnad node.
+    name = "صحابي وهمي"
+    norm = normalize_arabic(name)
+    cid = make_canonical_id(norm)
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            _bio_date_row(
+                bio_id="itqan:454a",
+                source="itqan",
+                name_ar=name,
+                name_ar_normalized=norm,
+                death_year_ah=720,
+                death_year_ah_earliest=720,
+                death_year_ah_latest=720,
+                death_date_precision="exact",
+            )
+        ],
+    )
+    _write_canonical(
+        curated,
+        [
+            {
+                "canonical_id": cid,
+                "name_ar": name,
+                "name_ar_normalized": norm,
+                "generation": "sahabi",
+                "source_corpus": "itqan",
+                "source_corpora": ["itqan"],
+                "mention_count": 0,
+            }
+        ],
+    )
+
+    out = reconcile_canonical_dates(staging, curated)
+    assert out is not None
+    rec = next(r for r in pq.read_table(out).to_pylist() if r["canonical_id"] == cid)
+
+    # The whole death dating is scrubbed back to undated — not just the point —
+    # so the ṭabaqa fallback (da#166) sees a genuinely undated narrator next.
+    assert rec["death_year_ah"] is None
+    assert rec["death_year_ah_earliest"] is None
+    assert rec["death_year_ah_latest"] is None
+    assert rec["death_date_precision"] == "unknown"
+
+
+def test_stage_scrubs_implausible_attested_death_absolute_envelope(tmp_path: Path) -> None:
+    """No/unknown generation still bounds against the absolute plausibility envelope."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    curated = tmp_path / "curated"
+    curated.mkdir()
+
+    name = "مجهول الطبقة"
+    norm = normalize_arabic(name)
+    cid = make_canonical_id(norm)
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            _bio_date_row(
+                bio_id="itqan:454b",
+                source="itqan",
+                name_ar=name,
+                name_ar_normalized=norm,
+                death_year_ah=805,
+                death_year_ah_earliest=805,
+                death_year_ah_latest=805,
+                death_date_precision="exact",
+            )
+        ],
+    )
+    _write_canonical(
+        curated,
+        [
+            {
+                "canonical_id": cid,
+                "name_ar": name,
+                "name_ar_normalized": norm,
+                # generation left unset — the absolute envelope still applies.
+                "source_corpus": "itqan",
+                "source_corpora": ["itqan"],
+                "mention_count": 0,
+            }
+        ],
+    )
+
+    out = reconcile_canonical_dates(staging, curated)
+    assert out is not None
+    rec = next(r for r in pq.read_table(out).to_pylist() if r["canonical_id"] == cid)
+    assert rec["death_year_ah"] is None
+    assert rec["death_date_precision"] == "unknown"
+
+
+def test_stage_keeps_plausible_attested_death_for_generation(tmp_path: Path) -> None:
+    """Regression: a plausible generation-consistent death is reconciled as before."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    curated = tmp_path / "curated"
+    curated.mkdir()
+
+    name = "تابعي حقيقي"
+    norm = normalize_arabic(name)
+    cid = make_canonical_id(norm)
+    _write_bios(
+        staging,
+        "itqan",
+        [
+            _bio_date_row(
+                bio_id="itqan:454c",
+                source="itqan",
+                name_ar=name,
+                name_ar_normalized=norm,
+                death_year_ah=110,
+                death_year_ah_earliest=110,
+                death_year_ah_latest=110,
+                death_date_precision="exact",
+            )
+        ],
+    )
+    _write_canonical(
+        curated,
+        [
+            {
+                "canonical_id": cid,
+                "name_ar": name,
+                "name_ar_normalized": norm,
+                "generation": "tabii",
+                "source_corpus": "itqan",
+                "source_corpora": ["itqan"],
+                "mention_count": 0,
+            }
+        ],
+    )
+
+    out = reconcile_canonical_dates(staging, curated)
+    assert out is not None
+    rec = next(r for r in pq.read_table(out).to_pylist() if r["canonical_id"] == cid)
+    assert rec["death_year_ah"] == 110
+    assert rec["death_date_precision"] == "exact"

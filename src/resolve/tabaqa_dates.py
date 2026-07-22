@@ -74,6 +74,7 @@ __all__ = [
     "estimate_death_window",
     "generation_from_value",
     "is_plausible_narrator_death_ah",
+    "plausible_attested_death_year",
 ]
 
 # Generation (ṭabaqa) → approximate Hijri (AH) death-year window.
@@ -159,6 +160,39 @@ def is_plausible_narrator_death_ah(
         if not (lo - DEATH_PLAUSIBILITY_MARGIN_AH <= year <= hi + DEATH_PLAUSIBILITY_MARGIN_AH):
             return False
     return True
+
+
+def plausible_attested_death_year(year: int | None, generation: object = None) -> int | None:
+    """Bound-check a source-attested death year at STAMP time (da#454).
+
+    ``year`` is a raw bio/candidate ``death_year_ah`` — not yet written onto a
+    canonical record or carried into the disambiguator's candidate pool.
+    ``generation`` is the accompanying raw ``generation`` value (a Parquet
+    string, possibly missing/out-of-domain), passed through
+    :func:`generation_from_value`.
+
+    Returns ``year`` unchanged when :func:`is_plausible_narrator_death_ah`
+    accepts it (or when ``year`` is ``None`` — a bio with no attested death);
+    otherwise ``None``.
+
+    da#446 added the *output*-side scrub — ``narrator_split._attested_death``
+    drops an implausible attested death from the neighbour-death evidence pool
+    right before it would poison a mention's ``neighbour_death ± MID_GAP``
+    estimate. da#454 is the *input*/source companion: the same late-collector
+    pollution (a d. ~700-780 AH commentator's death mislabelled onto an early
+    isnad node) should never be written onto ``narrators_canonical`` or a
+    disambiguation ``Candidate`` in the first place — every stamp site
+    (:mod:`~src.resolve.bio_promote`, :mod:`~src.resolve.disambiguate`) calls
+    this so a corrupt year cannot enter the pipeline upstream of the da#446
+    gate. Keeping ``narrator_split``'s own scrub in place is deliberate
+    defense-in-depth, not redundancy: a curated corpus produced before this fix
+    shipped can still carry pre-existing corrupt values.
+    """
+    if year is None:
+        return None
+    if not is_plausible_narrator_death_ah(year, generation_from_value(generation)):
+        return None
+    return year
 
 
 def clamp_death_ah(year: int) -> int:
