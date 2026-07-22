@@ -523,6 +523,10 @@ def reconcile_canonical_dates(
             # "dated" to tabaqa_dates' undated-check and skip the ṭabaqa fallback that
             # runs next, stranding the narrator on a half-scrubbed, still-wrong dating.
             death_point = merged.get("death_year_ah")
+            # Death columns the da#454 scrub cleared with EXPLICIT intent, so the
+            # back-fill-protection loop below honours the clear instead of swallowing
+            # it (empty on the normal path — populated only when the scrub fires).
+            scrub_cleared: set[str] = set()
             if death_point is not None and not is_plausible_narrator_death_ah(
                 death_point, generation_from_value(rec.get("generation"))
             ):
@@ -530,10 +534,29 @@ def reconcile_canonical_dates(
                 merged["death_year_ah_earliest"] = None
                 merged["death_year_ah_latest"] = None
                 merged["death_date_precision"] = DatePrecision.UNKNOWN.value
+                scrub_cleared = {
+                    "death_year_ah",
+                    "death_year_ah_earliest",
+                    "death_year_ah_latest",
+                }
             for key, value in merged.items():
                 # Never null out a point a prior producer back-filled (defensive —
-                # a contributing bio would itself have surfaced that point here).
-                if key.endswith("_year_ah") and value is None and rec.get(key) is not None:
+                # a contributing bio would itself have surfaced that point here) —
+                # UNLESS the da#454 scrub above cleared it with explicit intent. When
+                # the canonical record ALREADY holds a death point (a persisted
+                # pre-fix corrupt point on an idempotent `resolve --from-step
+                # reconcile` re-run, or a bio_promote-stamped point reconciliation
+                # recomputes as implausible from the fuller unscrubbed bio set), the
+                # guard would otherwise keep that point while its bounds + precision
+                # are nulled — the self-inconsistent half-scrub this scrub exists to
+                # prevent, which then reads as "dated" to tabaqa_dates' undated-check
+                # and skips the ṭabaqa fallback (da#454).
+                if (
+                    key.endswith("_year_ah")
+                    and value is None
+                    and rec.get(key) is not None
+                    and key not in scrub_cleared
+                ):
                     continue
                 rec[key] = value
             reconciled += 1
