@@ -51,6 +51,7 @@ from src.resolve.sect_affiliation import (
     normalize_corpus,
     primary_corpus,
 )
+from src.resolve.tabaqa_dates import plausible_attested_death_year
 from src.utils.arabic import canonical_surface
 from src.utils.logging import get_logger
 
@@ -473,6 +474,7 @@ def _load_candidates(staging_dir: Path) -> list[Candidate]:
             # key does, or Stage 1 can never exact-match across an inflection (and the
             # da#371 provenance drift leaves un-normalized bio keys nothing can match).
             name_ar_norm = canonical_surface(name_ar_norm) if name_ar_norm else None
+            generation = safe_str(table.column("generation")[i].as_py())
 
             candidates.append(
                 Candidate(
@@ -483,10 +485,16 @@ def _load_candidates(staging_dir: Path) -> list[Candidate]:
                     kunya=safe_str(table.column("kunya")[i].as_py()),
                     nisba=safe_str(table.column("nisba")[i].as_py()),
                     birth_year_ah=table.column("birth_year_ah")[i].as_py(),
-                    death_year_ah=table.column("death_year_ah")[i].as_py(),
+                    # da#454: an implausible attested death (the d. ~700-780 AH
+                    # late-collector pollution) must not enter the candidate pool —
+                    # it feeds _temporal_filter/_bio_corroborated below and, via
+                    # death_year_index, narrator_split's neighbour-death evidence.
+                    death_year_ah=plausible_attested_death_year(
+                        table.column("death_year_ah")[i].as_py(), generation
+                    ),
                     birth_location=safe_str(table.column("birth_location")[i].as_py()),
                     death_location=safe_str(table.column("death_location")[i].as_py()),
-                    generation=safe_str(table.column("generation")[i].as_py()),
+                    generation=generation,
                     gender=safe_str(table.column("gender")[i].as_py()),
                     trustworthiness=safe_str(table.column("trustworthiness")[i].as_py()),
                     external_id=safe_str(table.column("external_id")[i].as_py()),

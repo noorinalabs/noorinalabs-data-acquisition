@@ -65,9 +65,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import yaml
 
+from src.resolve._death_year_bands import DEATH_YEAR_TOLERANCE as _DEATH_YEAR_TOLERANCE
+from src.resolve._death_year_bands import GROSS_DEATH_SPREAD
 from src.resolve._run_record import write_canonical
 from src.resolve.fuzzy_cluster import (
-    _DEATH_YEAR_TOLERANCE,
     _genders_conflict,
     _merge_cluster,
     _remap_mention_canonical_ids,
@@ -90,7 +91,10 @@ _SEED_PATH = Path(__file__).with_name("narrator_unify.yaml")
 # but wide gaps (> this) mark a distinct namesake, not one person. Chosen so a genuine
 # generation-default noise gap (Anas: bare d.60 vs qualified d.91 = 31) passes while a
 # cross-generation namesake (bare Shaqīq d.200 vs Abū Wāʾil d.82 = 118) is refused.
-_UNIFY_MAX_DEATH_SPREAD = 50
+# Imported from ``_death_year_bands`` (da#464) — the same value
+# ``fuzzy_cluster._UNCORROBORATED_DEATH_SPREAD`` imports, so a retune of either
+# stage's band can no longer drift from the other.
+_UNIFY_MAX_DEATH_SPREAD = GROSS_DEATH_SPREAD
 
 __all__ = [
     "UnifyGroup",

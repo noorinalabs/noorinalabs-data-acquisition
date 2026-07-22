@@ -906,3 +906,93 @@ def test_split_adjacency_matches_loader_transmitted_to(tmp_path: Path) -> None:
 
     # The two notions of adjacency AGREE (the da#439 invariant).
     assert split_neighbours == loader_neighbours
+
+
+def test_split_adjacency_matches_loader_transmitted_to_multi_isnad(tmp_path: Path) -> None:
+    """da#453: extend the da#439 cross-function invariant across the multi-isnad
+    grouping boundary.
+
+    `test_split_adjacency_matches_loader_transmitted_to` proves splitter/loader
+    agreement by calling `_build_chain_pairs` directly on one chain's mentions — the
+    per-chain pairing unit. Production never calls it that way: `_load_transmitted_to`
+    first buckets mentions by the composite ``(hadith_id, chain_index)`` key
+    (``by_chain``, keyed via `_chain_index`) and calls `_build_chain_pairs` once PER
+    GROUP. The single-chain test can't reach that grouping step at all, so a defect
+    that flattened two isnads together before pairing would pass it and still corrupt
+    a multi-isnad hadith (da#411's failure class).
+
+    One ``hadith_id``, two ``chain_index`` chains, the candidate present in both —
+    mirrors `test_multi_isnad_no_cross_chain_neighbour` but cross-checks the
+    splitter against the loader's actual grouped-pairing path (built the same way
+    `_load_transmitted_to` builds it) instead of the splitter alone.
+    """
+    from src.graph.load_edges import _build_chain_pairs, _chain_index
+    from src.resolve.narrator_split import _build_chain_index, _collect_datable
+
+    cand = make_canonical_id(_ABU_ABDALLAH)
+    teacher_a = _anchor_row("nar:teacher_a", 100)
+    student_a = _anchor_row("nar:student_a", 180)
+    teacher_b = _anchor_row("nar:teacher_b", 250)
+    student_b = _anchor_row("nar:student_b", 320)
+    canonical = [
+        _canonical_row(cand, _ABU_ABDALLAH, 2),
+        teacher_a,
+        student_a,
+        teacher_b,
+        student_b,
+    ]
+    hid = "hdt:bukhari:9"
+    mention_rows = [
+        # Chain 0 — gappy (mirrors da#439): candidate at position 2, two dropped
+        # unresolved mentions opening a gap to each attested neighbour.
+        _mention_row("m-teacher-a", hid, 0, "nar:teacher_a", chain_index=0),
+        _mention_row("m-gap-a1", hid, 1, None, chain_index=0),
+        _mention_row("m-cand-0", hid, 2, cand, chain_index=0),
+        _mention_row("m-gap-a3", hid, 3, None, chain_index=0),
+        _mention_row("m-student-a", hid, 4, "nar:student_a", chain_index=0),
+        # Chain 1 — the SAME hadith's other isnad, contiguous. Position values (0/1/2)
+        # overlap with chain 0's, so a defect that paired the flattened mention list
+        # instead of grouping by (hadith_id, chain_index) first would collide the two
+        # isnads' positions.
+        _mention_row("m-teacher-b", hid, 0, "nar:teacher_b", chain_index=1),
+        _mention_row("m-cand-1", hid, 1, cand, chain_index=1),
+        _mention_row("m-student-b", hid, 2, "nar:student_b", chain_index=1),
+    ]
+    out = tmp_path / "curated"
+    _write(out, canonical, mention_rows)
+
+    # Loader side — group by the composite key exactly as `_load_transmitted_to`
+    # does (`by_chain.setdefault((hid, _chain_index(row)), []).append(row)`), THEN
+    # pair each group — never the flattened list.
+    by_chain: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for row in mention_rows:
+        by_chain.setdefault((row["hadith_id"], _chain_index(row)), []).append(row)
+    loader_neighbours_by_chain: dict[int, set[str]] = {}
+    for chain_idx in (0, 1):
+        chain_pairs = _build_chain_pairs(by_chain[(hid, chain_idx)])
+        loader_neighbours_by_chain[chain_idx] = {
+            p["to_id"] for p in chain_pairs if p["from_id"] == cand
+        } | {p["from_id"] for p in chain_pairs if p["to_id"] == cand}
+    assert loader_neighbours_by_chain[0] == {"nar:teacher_a", "nar:student_a"}
+    assert loader_neighbours_by_chain[1] == {"nar:teacher_b", "nar:student_b"}
+
+    # Splitter side: build the chain index over BOTH chains at once, as the real
+    # stage does (one parquet file, every chain_index mixed together).
+    attested_by_id = {
+        r["canonical_id"]: r["death_year_ah"] for r in (teacher_a, student_a, teacher_b, student_b)
+    }
+    name_by_id = {r["canonical_id"]: r["name_ar_normalized"] for r in canonical}
+    id_by_name = {v: k for k, v in name_by_id.items()}
+    chains, candidate_mentions = _build_chain_index(
+        out / "narrator_mentions_resolved.parquet", {cand}
+    )
+    datable = _collect_datable(candidate_mentions[cand], chains, attested_by_id, name_by_id)
+    by_mention = {d.mention_id: {id_by_name[n] for n in d.anchor_names} for d in datable}
+
+    # The da#439 invariant, extended across the grouping boundary: each of the
+    # candidate's two mentions draws its splitter neighbours from ONLY its own
+    # chain's grouped-loader neighbours — never the other isnad's.
+    assert by_mention["m-cand-0"] == loader_neighbours_by_chain[0]
+    assert by_mention["m-cand-1"] == loader_neighbours_by_chain[1]
+    assert not (by_mention["m-cand-0"] & loader_neighbours_by_chain[1])
+    assert not (by_mention["m-cand-1"] & loader_neighbours_by_chain[0])
