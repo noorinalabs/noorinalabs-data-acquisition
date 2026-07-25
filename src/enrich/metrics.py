@@ -192,7 +192,7 @@ def run_metrics(
         top5 = client.execute_read(
             "MATCH (n:Narrator)"
             " WHERE n.betweenness_centrality IS NOT NULL"
-            " RETURN n.id AS id, n.name_arabic AS name, n.betweenness_centrality AS bc"
+            " RETURN n.id AS id, n.name_en AS name, n.betweenness_centrality AS bc"
             " ORDER BY bc DESC LIMIT 5"
         )
         for row in top5:
