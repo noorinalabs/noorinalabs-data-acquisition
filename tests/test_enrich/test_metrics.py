@@ -181,3 +181,49 @@ class TestBetweennessSampling:
 
         call = _betweenness_call(mock_client)
         assert "samplingSize" not in call.args[0]
+
+
+def _leaderboard_query(client: MagicMock) -> str:
+    """Return the top-5 betweenness leaderboard read query string."""
+    calls = [
+        c
+        for c in client.execute_read.call_args_list
+        if "ORDER BY bc" in c.args[0] and "LIMIT 5" in c.args[0]
+    ]
+    assert len(calls) == 1, f"expected exactly one top-5 leaderboard query, got {len(calls)}"
+    return calls[0].args[0]
+
+
+class TestLeaderboardName:
+    """da#489 — top-5 leaderboard must project the always-populated name_en.
+
+    The Narrator loader writes n.name_en (guaranteed non-empty via the
+    transliteration fallback) and n.name_ar, but never n.name_arabic. Guard
+    against a future rename silently reintroducing blank leaderboard names.
+    """
+
+    def _gds_up(self, mock_client: MagicMock) -> None:
+        """Prime read side-effects so run_metrics reaches the top-5 query."""
+        mock_client.execute_read.side_effect = [
+            [{"version": "2.13.8"}],  # gds.version()
+            [{"exists": False}],  # gds.graph.exists
+            [{"cnt": 7}],  # count enriched
+            [{"id": "nar:1", "name": "Test", "bc": 0.9}],  # top-5
+        ]
+        mock_client.execute_write.return_value = [{"communityCount": 2, "nodePropertiesWritten": 7}]
+
+    def test_leaderboard_projects_name_en(self, mock_client: MagicMock) -> None:
+        self._gds_up(mock_client)
+
+        run_metrics(mock_client)
+
+        query = _leaderboard_query(mock_client)
+        assert "n.name_en AS name" in query
+
+    def test_leaderboard_never_references_name_arabic(self, mock_client: MagicMock) -> None:
+        self._gds_up(mock_client)
+
+        run_metrics(mock_client)
+
+        query = _leaderboard_query(mock_client)
+        assert "name_arabic" not in query
