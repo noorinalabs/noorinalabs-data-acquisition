@@ -7,6 +7,7 @@ Compiled regex patterns are defined at module level for performance.
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 
 __all__ = [
     "strip_diacritics",
@@ -16,6 +17,7 @@ __all__ = [
     "normalize_taa_marbuta",
     "normalize_urdu",
     "normalize_arabic",
+    "normalize_arabic_uncached",
     "clean_whitespace",
     "strip_to_letters",
     "is_arabic",
@@ -309,8 +311,8 @@ def strip_to_letters(text: str) -> str:
     return _MULTI_WS_RE.sub(" ", stripped).strip()
 
 
-def normalize_arabic(text: str) -> str:
-    """Full Arabic normalization pipeline.
+def normalize_arabic_uncached(text: str) -> str:
+    """Full Arabic normalization pipeline (uncached core of :func:`normalize_arabic`).
 
     Steps:
     1. Strip bidi / zero-width / format control marks
@@ -328,6 +330,13 @@ def normalize_arabic(text: str) -> str:
     Arabic twin — e.g. Urdu ``ہ`` -> Arabic ``ه`` is indistinguishable from a
     sourced ``ه`` downstream. It is a no-op on all-Arabic input (see
     :func:`normalize_urdu`), so no existing normalization result changes.
+
+    Prefer the memoized :func:`normalize_arabic` for bounded-vocabulary input
+    (narrator-name tokens, particle/marker sets, grade needles). Call THIS
+    uncached form for large, mostly-unique text such as full matn bodies (see
+    ``src/resolve/parallels.py``): caching those would retain every distinct
+    string for the process lifetime and risk OOM (da#495 review; memory-bounding
+    history da#337/#723).
     """
     text = strip_format_marks(text)
     text = strip_diacritics(text)
@@ -339,6 +348,20 @@ def normalize_arabic(text: str) -> str:
     text = _TATWEEL_RE.sub("", text)
     text = clean_whitespace(text)
     return text
+
+
+@lru_cache(maxsize=1 << 18)
+def normalize_arabic(text: str) -> str:
+    """Memoized :func:`normalize_arabic_uncached`.
+
+    da#495: name_quality re-normalizes the same small set of narrator-name
+    tokens on the order of millions of times per resolve, so the pipeline is
+    cached here. The bounded vocabulary keeps the cache small; see
+    :func:`normalize_arabic_uncached` for the pipeline steps and for when a
+    caller must bypass the cache (large, mostly-unique inputs such as full
+    matn bodies).
+    """
+    return normalize_arabic_uncached(text)
 
 
 def is_arabic(text: str) -> bool:
