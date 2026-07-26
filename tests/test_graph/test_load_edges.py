@@ -13,6 +13,7 @@ from src.graph.load_edges import (
     _APPEARS_IN_QUERY,
     EdgeLoadResult,
     _build_chain_pairs,
+    _load_graded_by,
     _load_studied_under,
     _studied_under_endpoint,
     load_all_edges,
@@ -1632,3 +1633,165 @@ class TestCrossEditionDedupVisibleToEdges:
         results = load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
         tt = next(r for r in results if r.edge_type == "TRANSMITTED_TO")
         assert tt.created == 1
+
+
+class TestEdgeLoadConformanceAttempted:
+    """da#490 — the conformance counter must key on ``attempted`` (valid endpoint
+    pairs submitted), not ``created``: an idempotent re-load onto a graph that
+    already carries every edge of a type correctly reports ``created == 0`` and
+    must NOT false-positive as a load failure."""
+
+    def test_idempotent_reload_is_not_flagged(self, staging_dir: Path, curated_dir: Path) -> None:
+        # A production-shaped APPEARS_IN batch whose endpoints already exist, and
+        # whose MERGE creates 0 *new* relationships (nodes_created_per_batch=0) —
+        # exactly the 07-25 cutover reload the issue reports (created=0,
+        # missing_endpoints=75,380 unrelated/unchanged from the prior run).
+        write_hadiths(staging_dir, [{"source_id": "sunnah:bukhari:1"}])
+        client = MockNeo4jClient(nodes_created_per_batch=0)
+        client.set_read_results([{"hadith_exists": True, "collection_exists": True}])
+
+        with structlog.testing.capture_logs() as logs:
+            results = load_all_edges(client, staging_dir, curated_dir, strict=False)
+
+        ai = next(r for r in results if r.edge_type == "APPEARS_IN")
+        assert ai.created == 0
+        assert ai.attempted == 1
+        conformance = [e for e in logs if e["event"] == "edge_load_conformance"]
+        if conformance:
+            assert "APPEARS_IN" not in conformance[0]["zero_count_edge_types"]
+
+    def test_genuine_zero_valid_endpoints_is_still_flagged(
+        self, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        # The da#160 case this counter exists to catch: a batch of candidates
+        # whose endpoints are ALL missing. attempted == 0 (nothing was ever
+        # submitted to the write query), so the flag must still fire.
+        write_hadiths(staging_dir, [{"source_id": "sunnah:bukhari:1"}])
+        client = MockNeo4jClient()
+        client.set_read_results([{"hadith_exists": False, "collection_exists": False}])
+
+        with structlog.testing.capture_logs() as logs:
+            results = load_all_edges(client, staging_dir, curated_dir, strict=False)
+
+        ai = next(r for r in results if r.edge_type == "APPEARS_IN")
+        assert ai.created == 0
+        assert ai.attempted == 0
+        conformance = next(e for e in logs if e["event"] == "edge_load_conformance")
+        assert "APPEARS_IN" in conformance["zero_count_edge_types"]
+
+    def test_edge_load_result_attempted_defaults_to_zero(self) -> None:
+        # Positional-4-arg construction (every pre-da#490 call site in this test
+        # file and in src) must still work unchanged.
+        r = EdgeLoadResult("NARRATED", 5, 1, 0)
+        assert r.attempted == 0
+
+
+class TestLoadGradedByCompositionGate:
+    """da#490 — GRADED_BY shares the da#373 canonical-hadith gate: a graded
+    hadith the node loader composed away (per-source/collection allowlist or
+    cross-edition matn dedup) has no Hadith node to attach to, and must be
+    counted as a deliberate drop, not an opaque ``missing_endpoints``."""
+
+    def test_composed_away_graded_hadith_is_dropped_not_missing(
+        self, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        # fawaz:bukhari is the standard composed-away fixture (da#333): fawaz's
+        # HADITH_COMPOSITION allowlist keeps only nawawi/dehlawi/qudsi, so its
+        # six-books editions (bukhari included) mint no Hadith node.
+        write_hadiths(
+            staging_dir,
+            [
+                {
+                    "source_id": "fawaz:bukhari:1",
+                    "source_corpus": "fawaz",
+                    "collection_name": "bukhari",
+                    "grade": "sahih",
+                }
+            ],
+        )
+        client = MockNeo4jClient()
+
+        results = load_all_edges(client, staging_dir, curated_dir, strict=False)
+
+        gb = next(r for r in results if r.edge_type == "GRADED_BY")
+        # Dropped at the source: no candidate built, so no endpoint check ever ran
+        # for it, and it is never counted as a "missing" (mysterious) endpoint.
+        assert gb.created == 0
+        assert gb.missing_endpoints == 0
+        assert gb.attempted == 0
+        assert not any("GRADED_BY" in str(q) and "MERGE" in str(q) for q, _ in client.calls)
+
+    def test_canonical_graded_hadith_loads(self, staging_dir: Path, curated_dir: Path) -> None:
+        write_hadiths(
+            staging_dir,
+            [{"source_id": "sunnah:bukhari:1", "grade": "sahih"}],
+        )
+        client = MockNeo4jClient()
+        client.set_read_results([{"hadith_exists": True, "grading_exists": True}])
+
+        results = load_all_edges(client, staging_dir, curated_dir, strict=False)
+
+        gb = next(r for r in results if r.edge_type == "GRADED_BY")
+        assert gb.created == 1
+        assert gb.attempted == 1
+        assert gb.missing_endpoints == 0
+
+    def test_missing_grading_only_is_distinguished_in_logs(
+        self, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        # da#490's diagnostic: the hadith side resolves but the grading side does
+        # not — this is the exact shape the issue's "likely grading_node_id !=
+        # loaded Grading.id" hypothesis predicts, now directly observable.
+        write_hadiths(
+            staging_dir,
+            [{"source_id": "sunnah:bukhari:1", "grade": "sahih"}],
+        )
+        client = MockNeo4jClient()
+        client.set_read_results([{"hadith_exists": True, "grading_exists": False}])
+
+        with structlog.testing.capture_logs() as logs:
+            results = load_all_edges(client, staging_dir, curated_dir, strict=False)
+
+        gb = next(r for r in results if r.edge_type == "GRADED_BY")
+        assert gb.created == 0
+        assert gb.missing_endpoints == 1
+        loaded_event = next(e for e in logs if e["event"] == "graded_by_loaded")
+        assert loaded_event["missing_grading_only"] == 1
+        assert loaded_event["missing_hadith_only"] == 0
+        assert loaded_event["missing_both"] == 0
+
+    def test_missing_hadith_only_is_distinguished_in_logs(
+        self, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        write_hadiths(
+            staging_dir,
+            [{"source_id": "sunnah:bukhari:1", "grade": "sahih"}],
+        )
+        client = MockNeo4jClient()
+        client.set_read_results([{"hadith_exists": False, "grading_exists": True}])
+
+        with structlog.testing.capture_logs() as logs:
+            load_all_edges(client, staging_dir, curated_dir, strict=False)
+
+        loaded_event = next(e for e in logs if e["event"] == "graded_by_loaded")
+        assert loaded_event["missing_hadith_only"] == 1
+        assert loaded_event["missing_grading_only"] == 0
+        assert loaded_event["missing_both"] == 0
+
+    def test_graded_by_idempotent_reload_reports_attempted(
+        self, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        # Mirrors TestEdgeLoadConformanceAttempted for GRADED_BY specifically:
+        # both endpoints resolve, but the MERGE creates 0 *new* relationships.
+        write_hadiths(
+            staging_dir,
+            [{"source_id": "sunnah:bukhari:1", "grade": "sahih"}],
+        )
+        client = MockNeo4jClient(nodes_created_per_batch=0)
+        client.set_read_results([{"hadith_exists": True, "grading_exists": True}])
+
+        result = _load_graded_by(client, staging_dir, strict=False)
+
+        assert result.created == 0
+        assert result.attempted == 1
+        assert result.missing_endpoints == 0

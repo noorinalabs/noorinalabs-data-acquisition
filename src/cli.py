@@ -388,8 +388,9 @@ def _cmd_load(
         )
     for er in summary.edge_results:
         print(
-            f"    {er.edge_type}: created={er.created} skipped={er.skipped}"
-            f" missing_endpoints={er.missing_endpoints} malformed_ids={er.malformed_ids}"
+            f"    {er.edge_type}: created={er.created} attempted={er.attempted}"
+            f" skipped={er.skipped} missing_endpoints={er.missing_endpoints}"
+            f" malformed_ids={er.malformed_ids}"
         )
 
     if summary.validation_results:

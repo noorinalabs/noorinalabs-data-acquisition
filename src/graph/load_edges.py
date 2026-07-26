@@ -48,6 +48,18 @@ class EdgeLoadResult:
     missing_endpoints: int
     # Edges refused because an endpoint id violates the id grammar (da#359).
     malformed_ids: int = 0
+    # da#490: edges whose BOTH endpoints resolved and were submitted to the
+    # write query, regardless of whether Neo4j actually created a new
+    # relationship for them (``created``) or the MERGE found it already present
+    # (an idempotent re-load). This is the field ``created == 0`` alone cannot
+    # distinguish: an edge type that loaded 650,983 edges last run and 0 THIS
+    # run because every one of them already exists (``attempted`` > 0,
+    # ``created`` == 0) is a correct idempotent no-op, not a load failure —
+    # unlike an edge type with ``attempted`` == 0, which never had a single
+    # valid endpoint pair to submit in the first place. See
+    # :func:`load_all_edges`'s conformance check, which keys on this rather
+    # than on ``created``.
+    attempted: int = 0
 
     @property
     def refused(self) -> int:
@@ -415,7 +427,14 @@ def _load_transmitted_to(
         total_pairs=len(all_pairs),
         dropped_noncanonical=dropped_noncanonical,
     )
-    return EdgeLoadResult("TRANSMITTED_TO", created, 0, missing, malformed_ids=malformed_ids)
+    return EdgeLoadResult(
+        "TRANSMITTED_TO",
+        created,
+        0,
+        missing,
+        malformed_ids=malformed_ids,
+        attempted=len(valid_batch),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -552,7 +571,9 @@ def _load_narrated(
         missing_endpoints=missing,
         dropped_noncanonical=dropped_noncanonical,
     )
-    return EdgeLoadResult("NARRATED", created, 0, missing, malformed_ids=malformed_ids)
+    return EdgeLoadResult(
+        "NARRATED", created, 0, missing, malformed_ids=malformed_ids, attempted=len(valid_batch)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -668,7 +689,14 @@ def _load_appears_in(
         else 0
     )
     logger.info("appears_in_loaded", created=created, skipped=skipped, missing_endpoints=missing)
-    return EdgeLoadResult("APPEARS_IN", created, skipped, missing, malformed_ids=malformed_ids)
+    return EdgeLoadResult(
+        "APPEARS_IN",
+        created,
+        skipped,
+        missing,
+        malformed_ids=malformed_ids,
+        attempted=len(valid_batch),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -730,6 +758,7 @@ def _load_parallel_of(
     missing = 0
     created = 0
     malformed_ids = 0
+    attempted = 0
     for rows in _iter_parquet_row_batches(path):
         batch: list[dict[str, Any]] = []
         for row in rows:
@@ -777,6 +806,7 @@ def _load_parallel_of(
                 missing += 1
 
         if valid_batch:
+            attempted += len(valid_batch)
             created += client.execute_write_batch(
                 _PARALLEL_OF_QUERY, valid_batch, batch_size=batch_size
             )
@@ -796,8 +826,12 @@ def _load_parallel_of(
 
     # Detected links that resolved to zero loaded edges is a silent-failure mode
     # (every endpoint missing — e.g. an id-scheme mismatch): warn, do not pass it
-    # by at INFO (da#160).
-    if created == 0:
+    # by at INFO (da#160). da#490: keyed on ``attempted`` (valid pairs actually
+    # submitted to the MERGE), not ``created`` — a re-load onto a graph that
+    # already carries every PARALLEL_OF edge is a correct idempotent no-op
+    # (attempted > 0, created == 0), not the da#160 silent-failure this warning
+    # exists to catch (attempted == 0: every pair's endpoints were missing).
+    if attempted == 0:
         logger.warning(
             "parallel_of_loaded_zero",
             candidates=candidates,
@@ -807,9 +841,15 @@ def _load_parallel_of(
         )
     else:
         logger.info(
-            "parallel_of_loaded", created=created, skipped=skipped, missing_endpoints=missing
+            "parallel_of_loaded",
+            created=created,
+            skipped=skipped,
+            missing_endpoints=missing,
+            attempted=attempted,
         )
-    return EdgeLoadResult("PARALLEL_OF", created, skipped, missing, malformed_ids=malformed_ids)
+    return EdgeLoadResult(
+        "PARALLEL_OF", created, skipped, missing, malformed_ids=malformed_ids, attempted=attempted
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -964,7 +1004,7 @@ def _load_studied_under(
         else 0
     )
     logger.info("studied_under_loaded", created=created, skipped=skipped, missing_endpoints=missing)
-    return EdgeLoadResult("STUDIED_UNDER", created, skipped, missing)
+    return EdgeLoadResult("STUDIED_UNDER", created, skipped, missing, attempted=len(valid_batch))
 
 
 # ---------------------------------------------------------------------------
@@ -995,11 +1035,24 @@ def _load_graded_by(
     *,
     strict: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    loaded_hadith_ids: set[str] | None = None,
 ) -> EdgeLoadResult:
     """Load GRADED_BY edges from hadith staging data.
 
     Gracefully skips if no hadiths with grades exist.
+
+    *loaded_hadith_ids* is the node loader's real kept set (da#373); when the
+    caller does not supply it, it is derived from *staging_dir*'s hadith files.
+    See :func:`_mention_hadith_survives`. da#490: a graded hadith the node
+    loader composed away (the per-source/collection allowlist or the
+    cross-edition matn dedup, ``src.parse.composition``) has no Hadith node to
+    attach to — routing through the same gate the chain edges (TRANSMITTED_TO /
+    NARRATED) already use turns that into an accounted-for ``dropped_composed``
+    drop instead of an opaque ``missing_endpoints`` count indistinguishable from
+    a genuine id mismatch.
     """
+    if loaded_hadith_ids is None:
+        loaded_hadith_ids = _staging_loaded_hadith_ids(staging_dir)
     files = _parquet_files(staging_dir, "hadiths_")
     if not files:
         logger.info("graded_by_skipped", reason="no_hadith_files")
@@ -1008,6 +1061,7 @@ def _load_graded_by(
     batch: list[dict[str, Any]] = []
     skipped = 0
     malformed_ids = 0
+    dropped_composed = 0
 
     for fp in files:
         rows = _read_parquet_rows(fp)
@@ -1028,32 +1082,70 @@ def _load_graded_by(
                 skipped += 1
                 malformed_ids += 1
                 continue
+            if not _mention_hadith_survives(sid, loaded_hadith_ids):
+                dropped_composed += 1
+                continue
             batch.append({"hadith_id": hid, "grading_id": gid})
 
     if malformed_ids:
         logger.warning("graded_by_malformed_ids_quarantined", rows=malformed_ids)
 
     if not batch:
-        logger.info("graded_by_no_edges")
+        logger.info("graded_by_no_edges", dropped_composed=dropped_composed)
         return EdgeLoadResult("GRADED_BY", 0, skipped, 0, malformed_ids=malformed_ids)
 
     # Check endpoints
     check_results = _chunked_read(client, _GRADED_BY_CHECK, batch, batch_size)
     valid_batch: list[dict[str, Any]] = []
     missing = 0
+    # da#490: hadith_node_id/grading_node_id are otherwise identical between this
+    # loader and the node loaders that mint each side, so a mismatch here is the
+    # only way to tell "graph never had this hadith" from "graph never had this
+    # grading" — the split that turns the issue's "likely grading_node_id !=
+    # loaded Grading.id" into a confirmed answer on the next reload, without a
+    # live Cypher session.
+    missing_hadith_only = 0
+    missing_grading_only = 0
+    missing_both = 0
     for item, check in zip(batch, check_results):
-        if check.get("hadith_exists") and check.get("grading_exists"):
+        hadith_exists = bool(check.get("hadith_exists"))
+        grading_exists = bool(check.get("grading_exists"))
+        if hadith_exists and grading_exists:
             valid_batch.append(item)
+            continue
+        missing += 1
+        if hadith_exists:
+            missing_grading_only += 1
+            logger.debug("graded_by_missing_grading", id=item["grading_id"])
+        elif grading_exists:
+            missing_hadith_only += 1
+            logger.debug("graded_by_missing_hadith", id=item["hadith_id"])
         else:
-            missing += 1
+            missing_both += 1
 
     created = (
         client.execute_write_batch(_GRADED_BY_QUERY, valid_batch, batch_size=batch_size)
         if valid_batch
         else 0
     )
-    logger.info("graded_by_loaded", created=created, skipped=skipped, missing_endpoints=missing)
-    return EdgeLoadResult("GRADED_BY", created, skipped, missing, malformed_ids=malformed_ids)
+    logger.info(
+        "graded_by_loaded",
+        created=created,
+        skipped=skipped,
+        missing_endpoints=missing,
+        missing_hadith_only=missing_hadith_only,
+        missing_grading_only=missing_grading_only,
+        missing_both=missing_both,
+        dropped_composed=dropped_composed,
+    )
+    return EdgeLoadResult(
+        "GRADED_BY",
+        created,
+        skipped,
+        missing,
+        malformed_ids=malformed_ids,
+        attempted=len(valid_batch),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1094,7 +1186,9 @@ def load_all_edges(
     # chain-edge loaders, so they gate on the same set the node loader loaded —
     # composition AND cross-edition matn dedup — instead of re-deriving a partial
     # gate from the id string. This is what stops a repaired matn key from
-    # re-orphaning ~196k dangling chains.
+    # re-orphaning ~196k dangling chains. GRADED_BY shares it too (da#490): a
+    # graded hadith the node loader composed away has no home for its grade
+    # either.
     loaded_hadith_ids = _staging_loaded_hadith_ids(staging_dir)
 
     results.append(
@@ -1120,7 +1214,15 @@ def load_all_edges(
     results.append(_load_appears_in(client, staging_dir, strict=strict, batch_size=batch_size))
     results.append(_load_parallel_of(client, staging_dir, strict=strict, batch_size=batch_size))
     results.append(_load_studied_under(client, staging_dir, batch_size=batch_size))
-    results.append(_load_graded_by(client, staging_dir, strict=strict, batch_size=batch_size))
+    results.append(
+        _load_graded_by(
+            client,
+            staging_dir,
+            strict=strict,
+            batch_size=batch_size,
+            loaded_hadith_ids=loaded_hadith_ids,
+        )
+    )
 
     total_created = sum(r.created for r in results)
     total_missing = sum(r.missing_endpoints for r in results)
@@ -1131,16 +1233,25 @@ def load_all_edges(
         edge_types=len(results),
     )
 
-    # Conformance counter: an edge type that loaded zero edges is a product-level
-    # red flag worth surfacing on its own — PARALLEL_OF=0 is exactly the da#160
-    # regression (/compare Browse Parallels permanently empty). Emit a WARNING per
-    # zero-count type so an empty load is never silent in the run logs.
-    zero_types = [r.edge_type for r in results if r.created == 0]
+    # Conformance counter: an edge type that never had a single valid endpoint
+    # pair to submit is a product-level red flag worth surfacing on its own —
+    # PARALLEL_OF=0 is exactly the da#160 regression (/compare Browse Parallels
+    # permanently empty). Emit a WARNING per zero-count type so an empty load is
+    # never silent in the run logs.
+    #
+    # da#490: keyed on ``attempted`` (edges whose both endpoints resolved),
+    # never on ``created`` alone. A re-load onto a graph that already carries
+    # every edge of a type MERGEs zero *new* relationships — ``created == 0``
+    # with ``attempted > 0`` — which is the correct idempotent outcome, not a
+    # load failure, and flagging it false-alarmed on every clean reload
+    # (APPEARS_IN, 07-25 cutover). ``attempted == 0`` is the genuine "0 valid
+    # endpoints" case da#160 exists to catch.
+    zero_types = [r.edge_type for r in results if r.attempted == 0]
     if zero_types:
         logger.warning(
             "edge_load_conformance",
             zero_count_edge_types=zero_types,
-            msg="edge type(s) loaded 0 edges",
+            msg="edge type(s) had zero valid endpoint pairs to load",
         )
 
     return results

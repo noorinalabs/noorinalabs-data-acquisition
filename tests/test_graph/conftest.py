@@ -21,7 +21,7 @@ from src.resolve.schemas import (
 class MockNeo4jClient:
     """Records calls instead of hitting a real Neo4j instance."""
 
-    def __init__(self, *, nodes_created_per_batch: int = 0) -> None:
+    def __init__(self, *, nodes_created_per_batch: int | None = None) -> None:
         self.calls: list[tuple[str, dict[str, Any] | list[dict[str, Any]]]] = []
         self.constraints_ensured = False
         self.fulltext_indexes_ensured = False
@@ -38,7 +38,13 @@ class MockNeo4jClient:
         self, query: str, batch: list[dict[str, Any]], batch_size: int = 1000
     ) -> int:
         self.calls.append((query, batch))
-        return self._nodes_created if self._nodes_created else len(batch)
+        # Unset (None) simulates "every row in the batch is newly created" — the
+        # default every pre-existing test relies on. An explicit override,
+        # INCLUDING 0 (da#490: an idempotent re-MERGE onto edges that already
+        # exist), must be honored as given rather than falling back to
+        # ``len(batch)`` — the pre-da#490 ``... if self._nodes_created else ...``
+        # truthy check could never express "0 created" because 0 is falsy.
+        return self._nodes_created if self._nodes_created is not None else len(batch)
 
     def execute_read(
         self,
