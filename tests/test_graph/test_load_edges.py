@@ -1632,3 +1632,227 @@ class TestCrossEditionDedupVisibleToEdges:
         results = load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
         tt = next(r for r in results if r.edge_type == "TRANSMITTED_TO")
         assert tt.created == 1
+
+
+class _IdempotentClient(MockNeo4jClient):
+    """A client whose writes report 0 newly-created relationships.
+
+    Simulates an idempotent re-load onto a graph that ALREADY carries the edges:
+    the re-MERGE matches existing relationships, so
+    ``summary.counters.relationships_created`` is 0 even though every endpoint
+    resolved. This is the exact da#490 Finding-A condition — ``created == 0`` for a
+    perfectly healthy edge type — which the default ``MockNeo4jClient`` (returns
+    ``len(batch)``) cannot reproduce.
+    """
+
+    def execute_write_batch(
+        self, query: str, batch: list[dict[str, object]], batch_size: int = 1000
+    ) -> int:
+        self.calls.append((query, batch))
+        return 0
+
+
+class TestGradedByCompositionGate:
+    """da#490 Finding B — GRADED_BY gated on the node loader's kept hadith set.
+
+    The 21,185 GRADED_BY endpoints that "never resolved" were never a Grading-id
+    mismatch: this loader and ``_load_gradings`` derive the grading id from ONE
+    ``grading_node_id(sid)`` on the SAME ``source_id``, so the Grading side cannot
+    disagree. They are ``fawaz`` six-books grades whose *Hadith* node the loader
+    drops as a non-canonical duplicate of the ``lk`` spine — a missing Hadith
+    endpoint. Gating them out (as the chain edges already gate the same hadiths)
+    keeps GRADED_BY resolving against the canonical grades and stops mislabelling a
+    deliberate composition drop as ``missing_endpoints``.
+    """
+
+    def test_fawaz_six_books_grade_dropped_not_missing(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        # The fawaz Hadith node is NOT loaded, so its endpoint check would fail. If
+        # the gate did not drop it first, it would be counted as a missing endpoint
+        # — this second read entry is what makes the missing_endpoints assertion
+        # bite (without the gate it would be 1, not 0).
+        mock_client.set_read_results(
+            [
+                {
+                    "hadith_id": "hdt:lk:bukhari:1",
+                    "grading_id": "grd:lk:bukhari:1",
+                    "hadith_exists": True,
+                    "grading_exists": True,
+                },
+                {
+                    "hadith_id": "hdt:fawaz:bukhari:1",
+                    "grading_id": "grd:fawaz:bukhari:1",
+                    "hadith_exists": False,
+                    "grading_exists": True,
+                },
+            ]
+        )
+        write_hadiths(
+            staging_dir,
+            [
+                {
+                    "source_id": "lk:bukhari:1",
+                    "source_corpus": "lk",
+                    "collection_name": "bukhari",
+                    "grade": "sahih",
+                },
+                {
+                    "source_id": "fawaz:bukhari:1",
+                    "source_corpus": "fawaz",
+                    "collection_name": "bukhari",
+                    "grade": "sahih",
+                },
+            ],
+        )
+        results = load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
+        gb = next(r for r in results if r.edge_type == "GRADED_BY")
+        # The canonical lk grade resolves; the dropped fawaz six-books grade is NOT
+        # counted as a missing endpoint (it never reaches the endpoint check).
+        assert gb.resolved == 1
+        assert gb.missing_endpoints == 0
+        # Only the canonical grade is written to GRADED_BY.
+        graded_writes = [
+            b
+            for q, b in mock_client.calls
+            if isinstance(b, list) and b and "grading_id" in b[0] and "GRADED_BY" in str(q)
+        ]
+        sent = {r["grading_id"] for b in graded_writes for r in b}
+        assert sent == {"grd:lk:bukhari:1"}
+
+    def test_fawaz_unique_collection_grade_kept(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        # fawaz's UNIQUE collections (nawawi/dehlawi/qudsi) DO load Hadith nodes, so
+        # a grade on one must survive the gate — only the six-books duplicates drop.
+        mock_client.set_read_results(
+            [
+                {
+                    "hadith_id": "hdt:fawaz:nawawi:5",
+                    "grading_id": "grd:fawaz:nawawi:5",
+                    "hadith_exists": True,
+                    "grading_exists": True,
+                }
+            ]
+        )
+        write_hadiths(
+            staging_dir,
+            [
+                {
+                    "source_id": "fawaz:nawawi:5",
+                    "source_corpus": "fawaz",
+                    "collection_name": "nawawi",
+                    "grade": "sahih",
+                }
+            ],
+        )
+        results = load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
+        gb = next(r for r in results if r.edge_type == "GRADED_BY")
+        assert gb.resolved == 1
+        assert gb.missing_endpoints == 0
+
+    def test_cross_edition_deduped_grade_dropped(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        # da#373 axis: the gate uses the node loader's REAL kept set, so a sanadset
+        # grade whose matn is deduped to a curated lk edition is dropped too — not
+        # just the id-grammar composition drops. lk keeps its grade and resolves.
+        shared_matn = "انما الاعمال بالنيات"
+        mock_client.set_read_results(
+            [
+                {
+                    "hadith_id": "hdt:lk:bukhari:1",
+                    "grading_id": "grd:lk:bukhari:1",
+                    "hadith_exists": True,
+                    "grading_exists": True,
+                }
+            ]
+        )
+        write_hadiths(
+            staging_dir,
+            [
+                {
+                    "source_id": "lk:bukhari:1",
+                    "source_corpus": "lk",
+                    "matn_ar": shared_matn,
+                    "grade": "sahih",
+                }
+            ],
+            suffix="lk",
+        )
+        write_hadiths(
+            staging_dir,
+            [
+                {
+                    "source_id": "sanadset:1:dup",
+                    "source_corpus": "sanadset",
+                    "matn_ar": shared_matn,
+                    "grade": "hasan",
+                }
+            ],
+            suffix="sanadset_dup",
+        )
+        results = load_all_edges(mock_client, staging_dir, curated_dir, strict=False)
+        gb = next(r for r in results if r.edge_type == "GRADED_BY")
+        assert gb.resolved == 1
+        assert gb.missing_endpoints == 0
+        graded_writes = [
+            b
+            for q, b in mock_client.calls
+            if isinstance(b, list) and b and "grading_id" in b[0] and "GRADED_BY" in str(q)
+        ]
+        sent = {r["grading_id"] for b in graded_writes for r in b}
+        assert "grd:sanadset:1:dup" not in sent
+
+
+class TestIdempotentReloadConformance:
+    """da#490 Finding A — ``created == 0`` on a re-load is idempotency, not a gap.
+
+    ``execute_write_batch`` returns only ``relationships_created``, so an
+    idempotent re-load onto a graph that already carries the edges reports
+    ``created == 0`` for a healthy edge type. The zero-count conformance check must
+    key on ``resolved`` (created + already-present), never on ``created`` alone,
+    or it false-flags every clean reload and pushes the loader to rc=5.
+    """
+
+    def _write_one_appears_in(self, staging_dir: Path) -> None:
+        write_hadiths(staging_dir, [{"source_id": "h-1", "collection_name": "bukhari"}])
+
+    def _resolving_read(self) -> list[dict[str, object]]:
+        return [
+            {
+                "hadith_id": "hdt:h-1",
+                "collection_id": "col:sunnah:bukhari",
+                "hadith_exists": True,
+                "collection_exists": True,
+            }
+        ]
+
+    def test_appears_in_reports_already_present(self, staging_dir: Path, curated_dir: Path) -> None:
+        client = _IdempotentClient()
+        client.set_read_results(self._resolving_read())
+        self._write_one_appears_in(staging_dir)
+        results = load_all_edges(client, staging_dir, curated_dir, strict=False)
+        ai = next(r for r in results if r.edge_type == "APPEARS_IN")
+        assert ai.created == 0
+        assert ai.already_present == 1
+        assert ai.resolved == 1
+
+    def test_idempotent_reload_not_flagged_by_conformance(
+        self, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        client = _IdempotentClient()
+        client.set_read_results(self._resolving_read())
+        self._write_one_appears_in(staging_dir)
+        with structlog.testing.capture_logs() as logs:
+            load_all_edges(client, staging_dir, curated_dir, strict=False)
+        conformance = [e for e in logs if e["event"] == "edge_load_conformance"]
+        # Other edge types have no input here and DO flag (genuinely empty); the
+        # point is APPEARS_IN — which resolved one already-present edge — must not.
+        assert conformance
+        assert "APPEARS_IN" not in conformance[0]["zero_count_edge_types"]
+
+    def test_resolved_property_counts_created_plus_present(self) -> None:
+        assert EdgeLoadResult("APPEARS_IN", 0, 0, 0, already_present=5).resolved == 5
+        # A genuine gap — nothing created, nothing already present — still reads 0.
+        assert EdgeLoadResult("GRADED_BY", 0, 0, 21185).resolved == 0
