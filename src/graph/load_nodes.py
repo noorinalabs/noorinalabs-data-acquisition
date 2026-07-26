@@ -793,9 +793,20 @@ def _load_gradings(
 ) -> LoadResult:
     """Load Grading nodes from hadith staging data.
 
-    Gradings are extracted from the ``grade`` column of hadiths_*.parquet.
-    Each hadith with a non-null grade produces a single Grading node
-    attributed to the collection compiler.
+    Gradings are extracted from the ``grade`` column of hadiths_*.parquet. Each
+    graded hadith that the node loader actually keeps produces a single Grading
+    node attributed to the collection compiler.
+
+    A grade is minted ONLY for a hadith whose keep-decision is ``_KEEP`` — the
+    SAME :func:`_hadith_load_outcome` gate :func:`_load_hadiths` applies (da#490).
+    A grade on a hadith the loader drops (a non-canonical edition — ``fawaz``'s
+    six-books, da#191/da#333 — or a cross-edition-deduped tradition, da#220) would
+    otherwise create an ORPHAN Grading node whose ``hadith_id`` points at a Hadith
+    that never loads: dead data, and the endpoint the ``GRADED_BY`` edge then fails
+    to resolve (the da#490 "0 of 21,185" gap). Declining it here mirrors da#191's
+    drop of non-canonical Collection nodes "so they don't outlive their Hadith",
+    and keeps the Grading node set in lock-step with the Hadith set the
+    ``GRADED_BY`` edge loader gates on.
     """
     files = _filter_parquet_files(_parquet_files(staging_dir, "hadiths_"), staging_dir, skip_files)
     if not files:
@@ -805,11 +816,16 @@ def _load_gradings(
         logger.warning("grading_files_missing", dir=str(staging_dir))
         return LoadResult("Grading", 0, 0, 0)
 
+    # Same cross-edition canonical-identity index the Hadith loader builds, so the
+    # keep-decision here is byte-for-byte the one _load_hadiths makes (da#490).
+    curated_identities = _build_curated_identity_index(files)
+
     batch: list[dict[str, Any]] = []
     errors: list[str] = []
     skipped = 0
     malformed = 0
     invalid_sid = 0
+    dropped_noncanonical = 0
 
     for fp in files:
         rows = _read_parquet_rows(fp)
@@ -817,27 +833,45 @@ def _load_gradings(
             grade = row.get("grade")
             if not grade:
                 continue
-            sid = row.get("source_id")
-            if not sid:
+            # ONE keep-decision, shared with _load_hadiths / build_loaded_hadith_ids
+            # so a Grading node exists iff its Hadith node does (da#490). Applies the
+            # same gates in the same order — invalid source_id, composition (da#191),
+            # cross-edition matn dedup (da#220), id well-formedness.
+            node_id, reason = _hadith_load_outcome(row, curated_identities)
+            if reason == _DROP_INVALID_SID:
                 errors.append(f"{fp.name} row {i}: grade present but no source_id")
                 skipped += 1
                 invalid_sid += 1
                 continue
-            # da#355: quarantine a malformed id, never abort the load.
-            try:
-                gid = grading_node_id(sid)
-                grading_hadith_id = hadith_node_id(sid)
-            except DoubledCorpusPrefixError as exc:
-                if strict:
-                    raise
-                errors.append(f"{fp.name} row {i}: {exc}")
+            if reason in (_DROP_NONCANONICAL, _DROP_CROSS_EDITION):
+                # A grade on a hadith the loader deliberately drops — no orphan
+                # Grading node (da#490). Counted as a deliberate skip, NOT a
+                # refusal, exactly like the Hadith loader's own drops.
+                skipped += 1
+                dropped_noncanonical += 1
+                continue
+            if reason == _DROP_MALFORMED:
+                # da#355: quarantine a malformed id, never abort the load — but
+                # strict still makes it fatal. Re-mint so the original
+                # DoubledCorpusPrefixError propagates unchanged under strict and is
+                # recorded verbatim under non-strict.
+                try:
+                    grading_node_id(row["source_id"])
+                except DoubledCorpusPrefixError as exc:
+                    if strict:
+                        raise
+                    errors.append(f"{fp.name} row {i}: {exc}")
                 skipped += 1
                 malformed += 1
                 continue
+            # KEEP. node_id is the hdt: Hadith node id; the grading's own id is the
+            # grd: sibling from the same bare source_id (so grading_node_id here and
+            # in the GRADED_BY edge loader can never disagree — da#490).
+            sid = row["source_id"]
             batch.append(
                 {
-                    "id": gid,
-                    "hadith_id": grading_hadith_id,
+                    "id": grading_node_id(sid),
+                    "hadith_id": node_id,
                     "scholar_name": _val(row, "collection_name", "unknown"),
                     "grade": grade,
                     # Normalized display grade (da#148): the raw ``grade`` may be
@@ -858,6 +892,7 @@ def _load_gradings(
         skipped=skipped,
         malformed_ids=malformed,
         invalid_source_ids=invalid_sid,
+        dropped_noncanonical=dropped_noncanonical,
     )
     return LoadResult(
         "Grading",

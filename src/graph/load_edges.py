@@ -48,6 +48,16 @@ class EdgeLoadResult:
     missing_endpoints: int
     # Edges refused because an endpoint id violates the id grammar (da#359).
     malformed_ids: int = 0
+    # Edges whose BOTH endpoints resolved but that MERGE did NOT newly create,
+    # because the relationship was already present from an earlier load (da#490).
+    # ``created`` counts only ``relationships_created`` (execute_write_batch ->
+    # ``summary.counters.relationships_created``), so an idempotent re-load onto a
+    # graph that already carries the edges returns ``created == 0`` for a perfectly
+    # healthy load. Tracking already-present separately lets the zero-count
+    # conformance check distinguish "0 created because already present" (benign)
+    # from "0 created because 0 endpoints resolved" (a genuine gap) — the da#490
+    # APPEARS_IN false-positive that pushed every clean reload to rc=5.
+    already_present: int = 0
 
     @property
     def refused(self) -> int:
@@ -59,6 +69,18 @@ class EdgeLoadResult:
         refusal upstream rather than a defect in the edge row itself.
         """
         return self.malformed_ids
+
+    @property
+    def resolved(self) -> int:
+        """Edges present in the graph after this load — newly created PLUS those an
+        earlier load already created (the re-MERGE matched, da#490).
+
+        This is the honest "did any edge actually land" signal the zero-count
+        conformance check keys on, so an idempotent re-load (``created == 0``,
+        ``already_present > 0``) is never mistaken for an empty load. ``created``
+        alone cannot answer that: it counts only *newly* created relationships.
+        """
+        return self.created + self.already_present
 
 
 # ---------------------------------------------------------------------------
@@ -408,14 +430,23 @@ def _load_transmitted_to(
         if valid_batch
         else 0
     )
+    already_present = len(valid_batch) - created
     logger.info(
         "transmitted_to_loaded",
         created=created,
+        already_present=already_present,
         missing_endpoints=missing,
         total_pairs=len(all_pairs),
         dropped_noncanonical=dropped_noncanonical,
     )
-    return EdgeLoadResult("TRANSMITTED_TO", created, 0, missing, malformed_ids=malformed_ids)
+    return EdgeLoadResult(
+        "TRANSMITTED_TO",
+        created,
+        0,
+        missing,
+        malformed_ids=malformed_ids,
+        already_present=already_present,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -546,13 +577,22 @@ def _load_narrated(
         if valid_batch
         else 0
     )
+    already_present = len(valid_batch) - created
     logger.info(
         "narrated_loaded",
         created=created,
+        already_present=already_present,
         missing_endpoints=missing,
         dropped_noncanonical=dropped_noncanonical,
     )
-    return EdgeLoadResult("NARRATED", created, 0, missing, malformed_ids=malformed_ids)
+    return EdgeLoadResult(
+        "NARRATED",
+        created,
+        0,
+        missing,
+        malformed_ids=malformed_ids,
+        already_present=already_present,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -667,8 +707,22 @@ def _load_appears_in(
         if valid_batch
         else 0
     )
-    logger.info("appears_in_loaded", created=created, skipped=skipped, missing_endpoints=missing)
-    return EdgeLoadResult("APPEARS_IN", created, skipped, missing, malformed_ids=malformed_ids)
+    already_present = len(valid_batch) - created
+    logger.info(
+        "appears_in_loaded",
+        created=created,
+        already_present=already_present,
+        skipped=skipped,
+        missing_endpoints=missing,
+    )
+    return EdgeLoadResult(
+        "APPEARS_IN",
+        created,
+        skipped,
+        missing,
+        malformed_ids=malformed_ids,
+        already_present=already_present,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -729,6 +783,7 @@ def _load_parallel_of(
     skipped = 0
     missing = 0
     created = 0
+    resolved = 0
     malformed_ids = 0
     for rows in _iter_parquet_row_batches(path):
         batch: list[dict[str, Any]] = []
@@ -777,9 +832,12 @@ def _load_parallel_of(
                 missing += 1
 
         if valid_batch:
+            resolved += len(valid_batch)
             created += client.execute_write_batch(
                 _PARALLEL_OF_QUERY, valid_batch, batch_size=batch_size
             )
+
+    already_present = resolved - created
 
     if malformed_ids:
         logger.warning("parallel_of_malformed_ids_quarantined", pairs=malformed_ids)
@@ -794,22 +852,36 @@ def _load_parallel_of(
         )
         return EdgeLoadResult("PARALLEL_OF", 0, skipped, 0, malformed_ids=malformed_ids)
 
-    # Detected links that resolved to zero loaded edges is a silent-failure mode
+    # Detected links that resolved to zero PRESENT edges is a silent-failure mode
     # (every endpoint missing — e.g. an id-scheme mismatch): warn, do not pass it
-    # by at INFO (da#160).
-    if created == 0:
+    # by at INFO (da#160). Key on ``resolved`` (created + already-present), not
+    # ``created`` alone: an idempotent re-load onto a graph that already carries
+    # the edges has ``created == 0`` yet is perfectly healthy, and flagging it here
+    # was the same false-positive as the da#490 edge_load_conformance one.
+    if resolved == 0:
         logger.warning(
             "parallel_of_loaded_zero",
             candidates=candidates,
             skipped=skipped,
             missing_endpoints=missing,
-            msg="parallel links present but 0 PARALLEL_OF edges loaded",
+            msg="parallel links present but 0 PARALLEL_OF edges resolved",
         )
     else:
         logger.info(
-            "parallel_of_loaded", created=created, skipped=skipped, missing_endpoints=missing
+            "parallel_of_loaded",
+            created=created,
+            already_present=already_present,
+            skipped=skipped,
+            missing_endpoints=missing,
         )
-    return EdgeLoadResult("PARALLEL_OF", created, skipped, missing, malformed_ids=malformed_ids)
+    return EdgeLoadResult(
+        "PARALLEL_OF",
+        created,
+        skipped,
+        missing,
+        malformed_ids=malformed_ids,
+        already_present=already_present,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -963,8 +1035,17 @@ def _load_studied_under(
         if valid_batch
         else 0
     )
-    logger.info("studied_under_loaded", created=created, skipped=skipped, missing_endpoints=missing)
-    return EdgeLoadResult("STUDIED_UNDER", created, skipped, missing)
+    already_present = len(valid_batch) - created
+    logger.info(
+        "studied_under_loaded",
+        created=created,
+        already_present=already_present,
+        skipped=skipped,
+        missing_endpoints=missing,
+    )
+    return EdgeLoadResult(
+        "STUDIED_UNDER", created, skipped, missing, already_present=already_present
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -995,8 +1076,29 @@ def _load_graded_by(
     *,
     strict: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    loaded_hadith_ids: set[str] | None = None,
 ) -> EdgeLoadResult:
-    """Load GRADED_BY edges from hadith staging data.
+    """Load GRADED_BY edges (Hadith -> Grading) from hadith staging data.
+
+    *loaded_hadith_ids* is the node loader's real kept set (da#373/da#490); when
+    the caller does not supply it, it is derived from *staging_dir*'s hadith files.
+    A grade whose Hadith the node loader did NOT keep — a non-canonical edition
+    (``fawaz``'s six-books, da#191/da#333) or a cross-edition-deduped tradition
+    (da#220) — is dropped here, mirroring how the chain edges drop the same
+    hadiths (:func:`_mention_hadith_survives`) and how :func:`_load_gradings` now
+    declines to mint an orphan Grading node for one.
+
+    This is the da#490 Finding-B fix, and it names the real root cause: the 21,185
+    ``GRADED_BY`` endpoints that "never resolved" were never a *Grading*-id-scheme
+    mismatch — this loader and the node loader (:func:`_load_gradings`) derive the
+    Grading id from ONE ``grading_node_id(sid)`` on the SAME ``source_id``, so the
+    Grading side cannot disagree — but a missing *Hadith* endpoint. All 21,185 are
+    ``fawaz`` six-books grades whose Hadith node ``_load_hadiths`` drops as a
+    non-canonical duplicate of the ``lk`` spine, so counting them as
+    ``missing_endpoints`` mislabelled a deliberate composition drop as a load
+    failure. Gating them out here (as ``dropped_noncanonical``, exactly like the
+    ~196k chain drops) leaves ``GRADED_BY`` resolving against the canonical ``lk``
+    grades and ``missing_endpoints`` reporting only genuine mismatches.
 
     Gracefully skips if no hadiths with grades exist.
     """
@@ -1005,9 +1107,13 @@ def _load_graded_by(
         logger.info("graded_by_skipped", reason="no_hadith_files")
         return EdgeLoadResult("GRADED_BY", 0, 0, 0)
 
+    if loaded_hadith_ids is None:
+        loaded_hadith_ids = _staging_loaded_hadith_ids(staging_dir)
+
     batch: list[dict[str, Any]] = []
     skipped = 0
     malformed_ids = 0
+    dropped_noncanonical = 0
 
     for fp in files:
         rows = _read_parquet_rows(fp)
@@ -1028,13 +1134,28 @@ def _load_graded_by(
                 skipped += 1
                 malformed_ids += 1
                 continue
+            # da#490: drop a grade whose Hadith the node loader did not keep, so a
+            # GRADED_BY edge is never attempted against a Hadith node that was
+            # deliberately dropped (fawaz six-books / cross-edition dedup). Gate on
+            # the node loader's real kept set — the SAME set the chain edges use —
+            # falling back to the id-grammar composition gate when it is
+            # unavailable (no staging hadith files; unreachable here since we
+            # returned early above, kept as defence-in-depth mirroring
+            # :func:`_mention_hadith_survives`).
+            if loaded_hadith_ids is not None:
+                survives = hid in loaded_hadith_ids
+            else:
+                survives = is_canonical_hadith_id(hid)
+            if not survives:
+                dropped_noncanonical += 1
+                continue
             batch.append({"hadith_id": hid, "grading_id": gid})
 
     if malformed_ids:
         logger.warning("graded_by_malformed_ids_quarantined", rows=malformed_ids)
 
     if not batch:
-        logger.info("graded_by_no_edges")
+        logger.info("graded_by_no_edges", dropped_noncanonical=dropped_noncanonical)
         return EdgeLoadResult("GRADED_BY", 0, skipped, 0, malformed_ids=malformed_ids)
 
     # Check endpoints
@@ -1052,8 +1173,23 @@ def _load_graded_by(
         if valid_batch
         else 0
     )
-    logger.info("graded_by_loaded", created=created, skipped=skipped, missing_endpoints=missing)
-    return EdgeLoadResult("GRADED_BY", created, skipped, missing, malformed_ids=malformed_ids)
+    already_present = len(valid_batch) - created
+    logger.info(
+        "graded_by_loaded",
+        created=created,
+        already_present=already_present,
+        skipped=skipped,
+        missing_endpoints=missing,
+        dropped_noncanonical=dropped_noncanonical,
+    )
+    return EdgeLoadResult(
+        "GRADED_BY",
+        created,
+        skipped,
+        missing,
+        malformed_ids=malformed_ids,
+        already_present=already_present,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1120,7 +1256,15 @@ def load_all_edges(
     results.append(_load_appears_in(client, staging_dir, strict=strict, batch_size=batch_size))
     results.append(_load_parallel_of(client, staging_dir, strict=strict, batch_size=batch_size))
     results.append(_load_studied_under(client, staging_dir, batch_size=batch_size))
-    results.append(_load_graded_by(client, staging_dir, strict=strict, batch_size=batch_size))
+    results.append(
+        _load_graded_by(
+            client,
+            staging_dir,
+            strict=strict,
+            batch_size=batch_size,
+            loaded_hadith_ids=loaded_hadith_ids,
+        )
+    )
 
     total_created = sum(r.created for r in results)
     total_missing = sum(r.missing_endpoints for r in results)
@@ -1131,16 +1275,25 @@ def load_all_edges(
         edge_types=len(results),
     )
 
-    # Conformance counter: an edge type that loaded zero edges is a product-level
+    # Conformance counter: an edge type that resolved ZERO edges is a product-level
     # red flag worth surfacing on its own — PARALLEL_OF=0 is exactly the da#160
     # regression (/compare Browse Parallels permanently empty). Emit a WARNING per
-    # zero-count type so an empty load is never silent in the run logs.
-    zero_types = [r.edge_type for r in results if r.created == 0]
+    # zero-resolve type so an empty load is never silent in the run logs.
+    #
+    # Key on ``resolved`` (created + already-present), NOT ``created`` alone
+    # (da#490): ``created`` counts only *newly* MERGE'd relationships, so an
+    # idempotent re-load onto a graph that already carries the edges reports
+    # ``created == 0`` for a perfectly healthy edge type — the APPEARS_IN /
+    # GRADED_BY false-positive that pushed every clean stg reload to rc=5. An edge
+    # type that resolved even one endpoint pair (``resolved > 0``) has NOT loaded
+    # zero edges; only ``resolved == 0`` — no endpoint pair present, whether newly
+    # or already — is the genuine gap this check exists to catch.
+    zero_types = [r.edge_type for r in results if r.resolved == 0]
     if zero_types:
         logger.warning(
             "edge_load_conformance",
             zero_count_edge_types=zero_types,
-            msg="edge type(s) loaded 0 edges",
+            msg="edge type(s) resolved 0 edges (none present after load)",
         )
 
     return results

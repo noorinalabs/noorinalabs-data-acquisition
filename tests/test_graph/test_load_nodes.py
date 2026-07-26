@@ -911,6 +911,77 @@ class TestLoadGradings:
         assert by_hadith["hdt:h-1"]["grade_normalized"] == "sahih"
         assert by_hadith["hdt:h-2"]["grade_normalized"] == "daif"
 
+    def _minted_grading_ids(self, mock_client: MockNeo4jClient) -> set[str]:
+        return {
+            r["id"]
+            for _query, batch in mock_client.calls
+            if isinstance(batch, list) and batch and str(batch[0].get("id", "")).startswith("grd:")
+            for r in batch
+        }
+
+    def test_noncanonical_grade_mints_no_orphan_grading_node(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """da#490: a grade on a hadith the loader drops mints no Grading node.
+
+        ``fawaz``'s six-books editions (e.g. ``fawaz:bukhari``) are non-canonical
+        duplicates of the ``lk`` spine and load no Hadith node, so a Grading node
+        for one would be an orphan whose GRADED_BY edge can never resolve — the
+        da#490 "0 of 21,185" gap. Only the kept (lk) grade produces a Grading node.
+        """
+        write_hadiths(
+            staging_dir,
+            [
+                {
+                    "source_id": "lk:bukhari:1",
+                    "source_corpus": "lk",
+                    "collection_name": "bukhari",
+                    "grade": "sahih",
+                },
+                {
+                    "source_id": "fawaz:bukhari:1",
+                    "source_corpus": "fawaz",
+                    "collection_name": "bukhari",
+                    "grade": "sahih",
+                },
+            ],
+        )
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        minted = self._minted_grading_ids(mock_client)
+        assert "grd:lk:bukhari:1" in minted
+        assert "grd:fawaz:bukhari:1" not in minted
+
+    def test_cross_edition_deduped_grade_mints_no_grading_node(
+        self, mock_client: MockNeo4jClient, staging_dir: Path, curated_dir: Path
+    ) -> None:
+        """da#490 + da#220: a grade on a cross-edition-deduped hadith mints none.
+
+        A ``sanadset`` hadith whose normalized matn matches a curated ``lk`` edition
+        is dropped at load (curated wins), so its grade must not become an orphan
+        Grading node either — the gate uses the node loader's REAL kept set, not the
+        id-grammar composition slice alone.
+        """
+        shared_matn = "انما الاعمال بالنيات"
+        write_hadiths(
+            staging_dir,
+            [{"source_id": "lk:bukhari:1", "source_corpus": "lk", "matn_ar": shared_matn}],
+            suffix="lk",
+        )
+        write_hadiths(
+            staging_dir,
+            [
+                {
+                    "source_id": "sanadset:1:dup",
+                    "source_corpus": "sanadset",
+                    "matn_ar": shared_matn,
+                    "grade": "hasan",
+                }
+            ],
+            suffix="sanadset_dup",
+        )
+        load_all_nodes(mock_client, staging_dir, curated_dir, strict=False)
+        assert "grd:sanadset:1:dup" not in self._minted_grading_ids(mock_client)
+
 
 class TestLoadHistoricalEvents:
     def test_valid_events(

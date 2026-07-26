@@ -387,8 +387,11 @@ def _cmd_load(
             f" invalid_source_ids={nr.invalid_source_ids})"
         )
     for er in summary.edge_results:
+        # already_present distinguishes an idempotent re-load (created=0,
+        # already_present>0 — benign) from a genuine empty load (da#490).
         print(
-            f"    {er.edge_type}: created={er.created} skipped={er.skipped}"
+            f"    {er.edge_type}: created={er.created} already_present={er.already_present}"
+            f" skipped={er.skipped}"
             f" missing_endpoints={er.missing_endpoints} malformed_ids={er.malformed_ids}"
         )
 
