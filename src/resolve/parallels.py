@@ -23,8 +23,9 @@ contract are unchanged.
 Matching signal
 ---------------
 Token-set Jaccard over the normalized matn — Arabic via
-:func:`src.utils.arabic.normalize_arabic` when an Arabic matn is present, else the
-English matn lowercased. Scores are tiered into :class:`VariantType` by the same
+:func:`src.utils.arabic.normalize_arabic_uncached` (the uncached core; matn bodies
+are large and mostly unique) when an Arabic matn is present, else the English matn
+lowercased. Scores are tiered into :class:`VariantType` by the same
 thresholds ``dedup.py`` uses. ``cross_sect`` is read from the hadith ``sect``
 column (authoritative), not inferred from the corpus name.
 
@@ -71,7 +72,7 @@ from src.resolve._provenance import (
     write_parallel_links,
 )
 from src.resolve.schemas import PARALLEL_LINKS_SCHEMA
-from src.utils.arabic import is_arabic, normalize_arabic
+from src.utils.arabic import is_arabic, normalize_arabic_uncached
 from src.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -128,12 +129,17 @@ def _classify_pair(score: float) -> VariantType:
 def _tokenize(matn_ar: str | None, matn_en: str | None) -> frozenset[str]:
     """Normalized token set for a hadith matn.
 
-    Prefers the Arabic matn (normalized via ``normalize_arabic``); falls back to
-    the English matn lowercased. Returns an empty set when neither is usable, in
-    which case the hadith is excluded from pairing.
+    Prefers the Arabic matn (normalized via ``normalize_arabic_uncached``); falls
+    back to the English matn lowercased. Returns an empty set when neither is
+    usable, in which case the hadith is excluded from pairing.
     """
     if matn_ar and is_arabic(matn_ar):
-        normalized = normalize_arabic(matn_ar)
+        # Full matn bodies are large and mostly unique, so the lru_cache on
+        # normalize_arabic (da#495) is the wrong shape here — this full-corpus
+        # scan would otherwise retain every distinct hadith text for the process
+        # lifetime and risk OOM (memory-bounding history da#337/#723). Use the
+        # uncached core: compute-and-discard.
+        normalized = normalize_arabic_uncached(matn_ar)
     elif matn_en and matn_en.strip():
         normalized = matn_en.lower()
     else:
