@@ -263,10 +263,7 @@ class TestFailureInjection:
         broken.send.side_effect = RuntimeError("broker down")
         ok = emit_raw_new(
             source="lk_corpus",
-            b2_key="raw/lk_corpus/2026-04-21/a.csv",
-            content_type="text/csv",
-            size_bytes=1,
-            checksum_sha256="a" * 64,
+            b2_path="raw/lk_corpus/2026-04-21/a.csv",
             producer=broken,
         )
         assert ok is False
