@@ -7,6 +7,7 @@ Compiled regex patterns are defined at module level for performance.
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 
 __all__ = [
     "strip_diacritics",
@@ -309,6 +310,7 @@ def strip_to_letters(text: str) -> str:
     return _MULTI_WS_RE.sub(" ", stripped).strip()
 
 
+@lru_cache(maxsize=1 << 18)
 def normalize_arabic(text: str) -> str:
     """Full Arabic normalization pipeline.
 
