@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 from src.messaging.kafka_producer import (
-    RAW_NEW_MESSAGE_SCHEMA,
-    RawNewMessage,
+    PIPELINE_MESSAGE_SCHEMA,
+    PipelineMessage,
     emit_raw_new,
     emit_raw_new_for_manifest,
+    serialize_message,
 )
 
 __all__ = [
-    "RAW_NEW_MESSAGE_SCHEMA",
-    "RawNewMessage",
+    "PIPELINE_MESSAGE_SCHEMA",
+    "PipelineMessage",
     "emit_raw_new",
     "emit_raw_new_for_manifest",
+    "serialize_message",
 ]

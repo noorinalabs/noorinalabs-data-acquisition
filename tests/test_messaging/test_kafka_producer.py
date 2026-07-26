@@ -1,24 +1,34 @@
-"""Tests for the ``pipeline.raw.landed`` Kafka producer wrapper."""
+"""Tests for the ``pipeline.raw.landed`` Kafka producer wrapper.
+
+The producer emits the pipeline *pointer* contract (da#492) — a faithful
+mirror of the consumer's ``PipelineMessage`` in
+``noorinalabs-isnad-ingest-platform/workers/lib/message.py``. These tests
+pin the five-field wire shape (``batch_id, source, b2_path, timestamp,
+record_count``) and its ``extra="forbid"`` semantics so drift that would
+crash the consumer's dedup worker is caught here.
+"""
 
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from src.messaging.kafka_producer import (
     DEFAULT_TOPIC,
-    RawNewMessage,
-    _guess_content_type,
+    PIPELINE_MESSAGE_SCHEMA,
+    PipelineMessage,
     emit_raw_new,
     emit_raw_new_for_manifest,
-    sha256_of_file,
+    serialize_message,
 )
 
-_VALID_SHA = "a" * 64
+_CONTRACT_FIELDS = {"batch_id", "source", "b2_path", "timestamp", "record_count"}
 
 
 class _FakeFuture:
@@ -52,112 +62,122 @@ class _FakeProducer:
         self.closed = True
 
 
-class TestRawNewMessage:
-    def test_to_json_is_sorted_utf8(self) -> None:
-        msg = RawNewMessage(
-            source="sunnah_api",
-            b2_key="raw/sunnah_api/2026-04-21/c.json",
-            content_type="application/json",
-            size_bytes=42,
-            acquired_at="2026-04-21T00:00:00+00:00",
-            checksum_sha256=_VALID_SHA,
-        )
-        raw = msg.to_json()
+def _valid_kwargs(**overrides: Any) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "batch_id": "11111111-1111-4111-8111-111111111111",
+        "source": "sunnah_api",
+        "b2_path": "raw/sunnah_api/2026-04-21/c.json",
+        "timestamp": "2026-04-21T00:00:00+00:00",
+        "record_count": 0,
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+class TestPipelineMessageContract:
+    def test_serialize_emits_exactly_the_contract_fields(self) -> None:
+        msg = PipelineMessage(**_valid_kwargs(record_count=7))
+        decoded = json.loads(serialize_message(msg))
+        assert set(decoded.keys()) == _CONTRACT_FIELDS
+        assert decoded["batch_id"] == "11111111-1111-4111-8111-111111111111"
+        assert decoded["source"] == "sunnah_api"
+        assert decoded["b2_path"] == "raw/sunnah_api/2026-04-21/c.json"
+        assert decoded["record_count"] == 7
+        # timestamp round-trips to the same instant regardless of pydantic's
+        # exact ISO rendering (Z vs +00:00).
+        assert datetime.fromisoformat(decoded["timestamp"]) == datetime(2026, 4, 21, tzinfo=UTC)
+
+    def test_serialize_is_utf8_bytes(self) -> None:
+        raw = serialize_message(PipelineMessage(**_valid_kwargs()))
         assert isinstance(raw, bytes)
-        decoded = json.loads(raw)
-        assert decoded == {
-            "source": "sunnah_api",
-            "b2_key": "raw/sunnah_api/2026-04-21/c.json",
-            "content_type": "application/json",
-            "size_bytes": 42,
-            "acquired_at": "2026-04-21T00:00:00+00:00",
-            "checksum_sha256": _VALID_SHA,
-        }
-        # keys sorted
-        assert list(decoded.keys()) == sorted(decoded.keys())
+        raw.decode("utf-8")  # must not raise
+
+    def test_round_trips_through_reparse(self) -> None:
+        """serialize → parse identity — the property the consumer relies on."""
+        msg = PipelineMessage(**_valid_kwargs(record_count=42))
+        reparsed = PipelineMessage.model_validate(json.loads(serialize_message(msg)))
+        assert reparsed == msg
+
+    def test_extra_field_is_forbidden(self) -> None:
+        """extra='forbid' — the consumer rejects unknown keys; so must the mirror."""
+        with pytest.raises(ValidationError):
+            PipelineMessage(**_valid_kwargs(checksum_sha256="a" * 64))
+
+    def test_schema_constant_matches_model_fields(self) -> None:
+        assert set(PIPELINE_MESSAGE_SCHEMA) == _CONTRACT_FIELDS
+        assert set(PipelineMessage.model_fields) == _CONTRACT_FIELDS
 
 
-class TestRawNewMessageValidation:
-    def _base_kwargs(self, **overrides: Any) -> dict[str, Any]:
-        kwargs = {
-            "source": "sunnah_api",
-            "b2_key": "raw/sunnah_api/2026-04-21/c.json",
-            "content_type": "application/json",
-            "size_bytes": 1,
-            "acquired_at": "2026-04-21T00:00:00+00:00",
-            "checksum_sha256": _VALID_SHA,
-        }
-        kwargs.update(overrides)
-        return kwargs
-
+class TestPipelineMessageValidation:
     def test_valid_payload_constructs(self) -> None:
-        RawNewMessage(**self._base_kwargs())
+        PipelineMessage(**_valid_kwargs())
 
-    def test_negative_size_bytes_raises(self) -> None:
-        with pytest.raises(ValueError, match="size_bytes must be >= 0"):
-            RawNewMessage(**self._base_kwargs(size_bytes=-1))
+    def test_negative_record_count_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            PipelineMessage(**_valid_kwargs(record_count=-1))
 
-    def test_size_bytes_zero_is_allowed(self) -> None:
-        RawNewMessage(**self._base_kwargs(size_bytes=0))
+    def test_record_count_zero_is_allowed(self) -> None:
+        assert PipelineMessage(**_valid_kwargs(record_count=0)).record_count == 0
 
-    def test_non_iso_acquired_at_raises(self) -> None:
-        with pytest.raises(ValueError, match="acquired_at must be ISO-8601"):
-            RawNewMessage(**self._base_kwargs(acquired_at="yesterday"))
+    def test_non_iso_timestamp_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            PipelineMessage(**_valid_kwargs(timestamp="yesterday"))
 
-    def test_wrong_length_checksum_raises(self) -> None:
-        with pytest.raises(ValueError, match="checksum_sha256"):
-            RawNewMessage(**self._base_kwargs(checksum_sha256="deadbeef"))
+    def test_timestamp_default_is_utc_now(self) -> None:
+        kwargs = _valid_kwargs()
+        del kwargs["timestamp"]
+        before = datetime.now(UTC)
+        msg = PipelineMessage(**kwargs)
+        assert msg.timestamp.tzinfo is not None
+        assert before <= msg.timestamp <= datetime.now(UTC)
 
-    def test_uppercase_checksum_raises(self) -> None:
-        with pytest.raises(ValueError, match="checksum_sha256"):
-            RawNewMessage(**self._base_kwargs(checksum_sha256=("A" * 64)))
-
-    def test_empty_source_raises(self) -> None:
-        with pytest.raises(ValueError, match="source must be a non-empty string"):
-            RawNewMessage(**self._base_kwargs(source=""))
-
-    def test_empty_b2_key_raises(self) -> None:
-        with pytest.raises(ValueError, match="b2_key must be a non-empty string"):
-            RawNewMessage(**self._base_kwargs(b2_key=""))
+    def test_message_is_frozen(self) -> None:
+        msg = PipelineMessage(**_valid_kwargs())
+        with pytest.raises(ValidationError):
+            msg.source = "other"  # type: ignore[misc]
 
 
 class TestEmitRawNew:
-    def test_noop_when_bootstrap_unset(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    def test_noop_when_bootstrap_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("KAFKA_BOOTSTRAP_SERVERS", raising=False)
-        ok = emit_raw_new(
-            source="sunnah_api",
-            b2_key="raw/sunnah_api/2026-04-21/c.json",
-            content_type="application/json",
-            size_bytes=1,
-            checksum_sha256=_VALID_SHA,
-        )
+        ok = emit_raw_new(source="sunnah_api", b2_path="raw/sunnah_api/2026-04-21/c.json")
         assert ok is True
 
     def test_sends_to_configured_topic_with_injected_producer(self) -> None:
         fake = _FakeProducer()
         ok = emit_raw_new(
             source="sunnah_api",
-            b2_key="raw/sunnah_api/2026-04-21/c.json",
-            content_type="application/json",
-            size_bytes=10,
-            checksum_sha256=_VALID_SHA,
-            acquired_at="2026-04-21T12:00:00+00:00",
+            b2_path="raw/sunnah_api/2026-04-21/c.json",
+            record_count=10,
+            batch_id="22222222-2222-4222-8222-222222222222",
+            timestamp="2026-04-21T12:00:00+00:00",
             producer=fake,
         )
         assert ok is True
         assert len(fake.sent) == 1
         topic, value, key = fake.sent[0]
-        assert topic == DEFAULT_TOPIC
-        assert topic == "pipeline.raw.landed"
-        assert key == b"raw/sunnah_api/2026-04-21/c.json"
+        assert topic == DEFAULT_TOPIC == "pipeline.raw.landed"
+        assert key == b"raw/sunnah_api/2026-04-21/c.json"  # partition key is the object path
         payload = json.loads(value)
+        assert set(payload.keys()) == _CONTRACT_FIELDS  # no stray fields reach the wire
         assert payload["source"] == "sunnah_api"
-        assert payload["size_bytes"] == 10
-        assert payload["checksum_sha256"] == _VALID_SHA
-        assert payload["acquired_at"] == "2026-04-21T12:00:00+00:00"
+        assert payload["b2_path"] == "raw/sunnah_api/2026-04-21/c.json"
+        assert payload["batch_id"] == "22222222-2222-4222-8222-222222222222"
+        assert payload["record_count"] == 10
+        assert datetime.fromisoformat(payload["timestamp"]) == datetime(2026, 4, 21, 12, tzinfo=UTC)
+
+    def test_generates_batch_id_when_omitted(self) -> None:
+        fake = _FakeProducer()
+        emit_raw_new(source="lk_corpus", b2_path="raw/lk_corpus/2026-04-21/x.csv", producer=fake)
+        import uuid
+
+        batch_id = json.loads(fake.sent[0][1])["batch_id"]
+        assert uuid.UUID(batch_id)  # a parseable UUID was minted
+
+    def test_record_count_defaults_to_zero(self) -> None:
+        fake = _FakeProducer()
+        emit_raw_new(source="lk_corpus", b2_path="raw/lk_corpus/2026-04-21/x.csv", producer=fake)
+        assert json.loads(fake.sent[0][1])["record_count"] == 0
 
     def test_default_topic_matches_canonical_constant(self) -> None:
         from src.messaging.topics import PIPELINE_RAW_LANDED
@@ -167,24 +187,14 @@ class TestEmitRawNew:
     def test_custom_topic_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("KAFKA_RAW_LANDED_TOPIC", "alt.raw.landed")
         fake = _FakeProducer()
-        emit_raw_new(
-            source="lk_corpus",
-            b2_key="raw/lk_corpus/2026-04-21/x.csv",
-            content_type="text/csv",
-            size_bytes=1,
-            checksum_sha256=_VALID_SHA,
-            producer=fake,
-        )
+        emit_raw_new(source="lk_corpus", b2_path="raw/lk_corpus/2026-04-21/x.csv", producer=fake)
         assert fake.sent[0][0] == "alt.raw.landed"
 
     def test_returns_false_and_swallows_send_failure(self) -> None:
         fake = _FakeProducer(fail_on_send=True)
         ok = emit_raw_new(
             source="sunnah_api",
-            b2_key="raw/sunnah_api/2026-04-21/c.json",
-            content_type="application/json",
-            size_bytes=1,
-            checksum_sha256=_VALID_SHA,
+            b2_path="raw/sunnah_api/2026-04-21/c.json",
             producer=fake,
         )
         assert ok is False  # failure is surfaced, not raised
@@ -192,14 +202,7 @@ class TestEmitRawNew:
     def test_injected_producer_is_not_flushed_by_emit(self) -> None:
         """Caller owns flush/close for injected producers — fire-and-forget semantics."""
         fake = _FakeProducer()
-        emit_raw_new(
-            source="sunnah_api",
-            b2_key="raw/sunnah_api/2026-04-21/c.json",
-            content_type="application/json",
-            size_bytes=1,
-            checksum_sha256=_VALID_SHA,
-            producer=fake,
-        )
+        emit_raw_new(source="sunnah_api", b2_path="raw/sunnah_api/2026-04-21/c.json", producer=fake)
         assert fake.flushed is False
         assert fake.closed is False
 
@@ -207,13 +210,7 @@ class TestEmitRawNew:
         monkeypatch.setenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
         fake = _FakeProducer()
         with patch("src.messaging.kafka_producer._build_producer", return_value=fake) as build:
-            ok = emit_raw_new(
-                source="sunnah_api",
-                b2_key="raw/sunnah_api/2026-04-21/c.json",
-                content_type="application/json",
-                size_bytes=1,
-                checksum_sha256=_VALID_SHA,
-            )
+            ok = emit_raw_new(source="sunnah_api", b2_path="raw/sunnah_api/2026-04-21/c.json")
         assert ok is True
         assert build.call_count == 1
         assert fake.flushed is True
@@ -230,7 +227,7 @@ class TestEmitRawNewForManifest:
             out.append(p)
         return out
 
-    def test_emits_one_per_file_with_expected_b2_key(
+    def test_emits_one_per_file_with_expected_b2_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
@@ -251,8 +248,21 @@ class TestEmitRawNewForManifest:
             "raw/sunnah_api/2026-04-21/sub/b.csv",
         ]
         payload_a = json.loads(fake.sent[0][1])
-        assert payload_a["content_type"] == "application/json"
-        assert payload_a["size_bytes"] == len(b"content-a.json")
+        assert set(payload_a.keys()) == _CONTRACT_FIELDS
+        assert payload_a["b2_path"] == "raw/sunnah_api/2026-04-21/a.json"
+        assert payload_a["record_count"] == 0
+        assert datetime.fromisoformat(payload_a["timestamp"]) == datetime(2026, 4, 21, tzinfo=UTC)
+
+    def test_each_file_gets_a_distinct_batch_id(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+        files = self._make_files(tmp_path, ["a.json", "b.json"])
+        fake = _FakeProducer()
+        with patch("src.messaging.kafka_producer._build_producer", return_value=fake):
+            emit_raw_new_for_manifest(source="sunnah_api", local_dir=tmp_path, files=files)
+        batch_ids = {json.loads(v)["batch_id"] for _, v, _ in fake.sent}
+        assert len(batch_ids) == 2  # each landed object is its own batch
 
     def test_missing_file_is_skipped_not_fatal(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -324,7 +334,7 @@ class TestEmitRawNewForManifest:
             "2026-04-22T03:27:33-05:00",  # non-UTC offset, date in UTC-neutral local form
         ],
     )
-    def test_b2_key_date_extracted_from_iso(
+    def test_b2_path_date_extracted_from_iso(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, iso_input: str
     ) -> None:
         """acquired_at parsing must yield YYYY-MM-DD via fromisoformat, not slicing."""
@@ -341,48 +351,3 @@ class TestEmitRawNewForManifest:
         assert n == 1
         key = fake.sent[0][2].decode()
         assert key.startswith("raw/sunnah_api/2026-04-22/")
-
-
-class TestSha256AndContentType:
-    def test_sha256_of_file_matches_hashlib(self, tmp_path: Path) -> None:
-        import hashlib
-
-        p = tmp_path / "x.bin"
-        p.write_bytes(b"\x00\x01\x02")
-        assert sha256_of_file(p) == hashlib.sha256(b"\x00\x01\x02").hexdigest()
-
-    @pytest.mark.parametrize(
-        ("name", "expected"),
-        [
-            ("a.json", "application/json"),
-            ("a.csv", "text/csv"),
-            ("a.PARQUET", "application/x-parquet"),
-            ("a.unknown", "application/octet-stream"),
-        ],
-    )
-    def test_guess_content_type(self, tmp_path: Path, name: str, expected: str) -> None:
-        p = tmp_path / name
-        p.touch()
-        assert _guess_content_type(p) == expected
-
-
-class TestBuildProducer:
-    def test_returns_none_when_bootstrap_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("KAFKA_BOOTSTRAP_SERVERS", raising=False)
-        from src.messaging.kafka_producer import _build_producer
-
-        assert _build_producer() is None
-
-    def test_builds_kafka_producer_with_bootstrap(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("KAFKA_BOOTSTRAP_SERVERS", "broker-a:9092, broker-b:9092")
-        fake_kp_cls = MagicMock(return_value="producer-sentinel")
-        fake_kafka_mod = MagicMock(KafkaProducer=fake_kp_cls)
-        with patch.dict("sys.modules", {"kafka": fake_kafka_mod}):
-            from src.messaging.kafka_producer import _build_producer
-
-            result = _build_producer()
-        assert result == "producer-sentinel"
-        call_kwargs: dict[str, Any] = fake_kp_cls.call_args.kwargs
-        assert call_kwargs["bootstrap_servers"] == ["broker-a:9092", "broker-b:9092"]
-        assert call_kwargs["acks"] == "all"
-        assert call_kwargs["retries"] == 3

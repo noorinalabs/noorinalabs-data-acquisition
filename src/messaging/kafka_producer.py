@@ -5,19 +5,38 @@ After an acquire connector lands a raw artifact in B2, emit one
 (dedup, enrich, normalize, graph-load) can consume. The topic string
 is defined in :mod:`src.messaging.topics` as ``PIPELINE_RAW_LANDED``.
 
-Message schema (JSON, UTF-8, one message per file)
----------------------------------------------------
+Message schema — the pipeline pointer contract (da#492)
+-------------------------------------------------------
+
+The wire message is the pipeline *pointer* schema, aligned to the
+consumer's ``PipelineMessage`` in
+``noorinalabs-isnad-ingest-platform/workers/lib/message.py`` (contract
+issue #106). Kafka messages are lightweight pointers — the raw bytes
+live in S3-compatible storage (B2 in prod, MinIO for local dev) and the
+message carries a ``b2_path`` that identifies the object.
 
 ::
 
     {
-      "source":         "<connector_name>",          // e.g. sunnah_api, lk_corpus
-      "b2_key":         "raw/<source>/<date>/<filename>",
-      "content_type":   "application/json|text/csv|...",
-      "size_bytes":     12345,
-      "acquired_at":    "2026-04-21T12:34:56.789012+00:00",  // ISO-8601 UTC
-      "checksum_sha256": "<hex>"
+      "batch_id":     "uuid",                                   // this processing batch
+      "source":       "sunnah_api",                             // connector name
+      "b2_path":      "raw/sunnah_api/2026-04-21/collections.json",
+      "timestamp":    "2026-04-21T12:34:56.789012+00:00",       // ISO-8601 UTC
+      "record_count": 0                                         // records in the object
     }
+
+The consumer validates with ``extra="forbid"`` — the producer MUST emit
+exactly these five fields and no others. :class:`PipelineMessage` below
+is a faithful mirror of the consumer model; it must stay in sync with
+``workers/lib/message.py`` until a shared contracts package is extracted
+(audit A4). Drift here silently drops every message on the floor at the
+consumer's validation boundary — the failure mode da#492 fixed.
+
+``record_count`` at the raw-landed stage is the count of records in the
+referenced object. The acquire stage lands raw bytes without parsing
+them, so the count is not known here; it is emitted as ``0`` (the
+contract permits ``>= 0``) and the dedup/parse stage establishes the
+true count when it reads the object and hands off downstream.
 
 The message is a purely "eventually consistent" signal — emit failure
 MUST NOT fail the acquire. The downstream dedup worker is responsible
@@ -61,14 +80,13 @@ replaying keys from B2.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
-import re
-from dataclasses import asdict, dataclass
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.messaging.topics import PIPELINE_RAW_LANDED
 from src.utils.logging import get_logger
@@ -77,59 +95,55 @@ logger = get_logger(__name__)
 
 __all__ = [
     "DEFAULT_TOPIC",
-    "RAW_NEW_MESSAGE_SCHEMA",
-    "RawNewMessage",
+    "PIPELINE_MESSAGE_SCHEMA",
+    "PipelineMessage",
     "emit_raw_new",
     "emit_raw_new_for_manifest",
-    "sha256_of_file",
+    "serialize_message",
 ]
 
 DEFAULT_TOPIC = PIPELINE_RAW_LANDED
 
-_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-
-RAW_NEW_MESSAGE_SCHEMA: dict[str, str] = {
+PIPELINE_MESSAGE_SCHEMA: dict[str, str] = {
+    "batch_id": "UUID identifying this processing batch",
     "source": "connector name (e.g. sunnah_api)",
-    "b2_key": "full B2 object key, e.g. raw/sunnah_api/2026-04-21/collections.json",
-    "content_type": "MIME type of the raw object",
-    "size_bytes": "object size in bytes (int)",
-    "acquired_at": "ISO-8601 UTC timestamp of acquisition",
-    "checksum_sha256": "SHA-256 hex digest of raw bytes",
+    "b2_path": "full B2 object key, e.g. raw/sunnah_api/2026-04-21/collections.json",
+    "timestamp": "ISO-8601 UTC timestamp of production",
+    "record_count": "number of records in the referenced object (int >= 0)",
 }
 
 
-@dataclass(frozen=True, slots=True)
-class RawNewMessage:
-    """Typed payload for the ``pipeline.raw.landed`` topic."""
+class PipelineMessage(BaseModel):
+    """Pointer message flowing between pipeline stages (producer side).
 
-    source: str
-    b2_key: str
-    content_type: str
-    size_bytes: int
-    acquired_at: str
-    checksum_sha256: str
+    Faithful mirror of the consumer's ``PipelineMessage`` in
+    ``noorinalabs-isnad-ingest-platform/workers/lib/message.py`` (contract
+    issue #106). Field names, types and ``extra="forbid"`` must match the
+    consumer exactly — see the module docstring. Serialize with
+    :func:`serialize_message` for the wire.
+    """
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.source, str) or not self.source:
-            raise ValueError("source must be a non-empty string")
-        if not isinstance(self.b2_key, str) or not self.b2_key:
-            raise ValueError("b2_key must be a non-empty string")
-        if not isinstance(self.size_bytes, int) or isinstance(self.size_bytes, bool):
-            raise ValueError("size_bytes must be an int")
-        if self.size_bytes < 0:
-            raise ValueError("size_bytes must be >= 0")
-        if not isinstance(self.checksum_sha256, str) or not _SHA256_RE.match(self.checksum_sha256):
-            raise ValueError("checksum_sha256 must be a 64-char lowercase hex SHA-256 digest")
-        if not isinstance(self.acquired_at, str):
-            raise ValueError("acquired_at must be an ISO-8601 string")
-        try:
-            datetime.fromisoformat(self.acquired_at)
-        except ValueError as exc:
-            raise ValueError(f"acquired_at must be ISO-8601 parseable: {exc}") from exc
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    def to_json(self) -> bytes:
-        """Serialize to canonical JSON bytes (sorted keys, UTF-8)."""
-        return json.dumps(asdict(self), sort_keys=True, ensure_ascii=False).encode("utf-8")
+    batch_id: str = Field(..., description="UUID identifying this processing batch")
+    source: str = Field(..., description="Data source identifier, e.g. 'sunnah_api'")
+    b2_path: str = Field(..., description="S3 object key or folder prefix of the raw artifact")
+    timestamp: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="When this message was produced (ISO-8601 UTC)",
+    )
+    record_count: int = Field(..., ge=0, description="Number of records in the referenced object")
+
+
+def serialize_message(msg: PipelineMessage) -> bytes:
+    """Serialize a :class:`PipelineMessage` to Kafka wire bytes (UTF-8 JSON).
+
+    Mirrors the consumer's ``serialize_message`` so a producer→consumer
+    round-trip (``parse_message(serialize_message(msg))``) is a byte-faithful
+    identity. ``pydantic`` renders ``timestamp`` as an ISO-8601 string and
+    emits exactly the five contract fields.
+    """
+    return msg.model_dump_json().encode("utf-8")
 
 
 def _bootstrap_servers() -> str:
@@ -167,11 +181,10 @@ def _build_producer() -> Any:  # noqa: ANN401 — KafkaProducer has no public st
 def emit_raw_new(
     *,
     source: str,
-    b2_key: str,
-    content_type: str,
-    size_bytes: int,
-    checksum_sha256: str,
-    acquired_at: str | None = None,
+    b2_path: str,
+    record_count: int = 0,
+    batch_id: str | None = None,
+    timestamp: str | datetime | None = None,
     producer: Any | None = None,  # noqa: ANN401
 ) -> bool:
     """Emit a single ``pipeline.raw.landed`` message.
@@ -184,27 +197,40 @@ def emit_raw_new(
 
     Returns ``True`` on successful enqueue (or producer no-op when
     ``KAFKA_BOOTSTRAP_SERVERS`` is unset), ``False`` when the send call
-    itself raised. Never raises — failures are logged and swallowed
-    (see module docstring § Retry semantics).
+    itself raised. Never raises on send failure — failures are logged and
+    swallowed (see module docstring § Retry semantics). A malformed
+    payload (caught at :class:`PipelineMessage` construction) DOES raise:
+    an ill-formed message is a programming error, not a transient fault.
 
     Parameters
     ----------
-    source, b2_key, content_type, size_bytes, checksum_sha256
-        See :data:`RAW_NEW_MESSAGE_SCHEMA`.
-    acquired_at
-        ISO-8601 timestamp. Defaults to now (UTC).
+    source, b2_path, record_count
+        See :data:`PIPELINE_MESSAGE_SCHEMA`. ``record_count`` defaults to
+        ``0`` — the raw-landed stage does not parse the object, so the true
+        count is established downstream.
+    batch_id
+        UUID for this batch. Defaults to a fresh ``uuid4`` — each landed
+        object is an independently processed batch flowing 1:1 through the
+        pipeline stages.
+    timestamp
+        Production time. ISO-8601 string or ``datetime``; defaults to now
+        (UTC).
     producer
         Injected producer — used by tests and by
         :func:`emit_raw_new_for_manifest` to share a producer across
         many per-file emits. Production one-off callers omit this.
     """
-    msg = RawNewMessage(
-        source=source,
-        b2_key=b2_key,
-        content_type=content_type,
-        size_bytes=size_bytes,
-        acquired_at=acquired_at or datetime.now(UTC).isoformat(),
-        checksum_sha256=checksum_sha256,
+    # ``model_validate`` (not the typed kwargs constructor) so pydantic is the
+    # single validator/coercer for every field — including ``timestamp``, which
+    # callers may pass as an ISO-8601 string or a ``datetime``.
+    msg = PipelineMessage.model_validate(
+        {
+            "batch_id": batch_id if batch_id is not None else str(uuid.uuid4()),
+            "source": source,
+            "b2_path": b2_path,
+            "timestamp": timestamp if timestamp is not None else datetime.now(UTC),
+            "record_count": record_count,
+        }
     )
 
     topic = _topic()
@@ -217,18 +243,19 @@ def emit_raw_new(
                 "kafka_emit_skipped",
                 reason="KAFKA_BOOTSTRAP_SERVERS unset",
                 topic=topic,
-                b2_key=b2_key,
+                b2_path=b2_path,
             )
             return True
 
     try:
-        producer.send(topic, value=msg.to_json(), key=b2_key.encode("utf-8"))
+        producer.send(topic, value=serialize_message(msg), key=b2_path.encode("utf-8"))
         logger.info(
             "kafka_emit_enqueued",
             topic=topic,
             source=source,
-            b2_key=b2_key,
-            size_bytes=size_bytes,
+            b2_path=b2_path,
+            batch_id=msg.batch_id,
+            record_count=record_count,
         )
         return True
     except Exception as exc:  # noqa: BLE001 — must never propagate
@@ -236,7 +263,7 @@ def emit_raw_new(
             "kafka_emit_failed",
             topic=topic,
             source=source,
-            b2_key=b2_key,
+            b2_path=b2_path,
             error=str(exc),
             error_type=type(exc).__name__,
         )
@@ -260,12 +287,15 @@ def emit_raw_new_for_manifest(
 ) -> int:
     """Emit one ``pipeline.raw.landed`` message per file.
 
-    Computes the ``b2_key`` as ``<b2_prefix>/<relative-path>`` where
-    ``b2_prefix`` defaults to ``raw/<source>/<YYYY-MM-DD>/``. ``size_bytes``
-    and ``checksum_sha256`` are read from the local file on disk — the
-    acquire stage writes locally before the pipeline's B2 upload shim
-    mirrors to the bucket, so the local file is the authoritative
-    artifact.
+    Computes the ``b2_path`` as ``<b2_prefix>/<relative-path>`` where
+    ``b2_prefix`` defaults to ``raw/<source>/<YYYY-MM-DD>/``. Each file is
+    emitted as its own batch (fresh ``batch_id``) with ``record_count=0``
+    — the acquire stage lands raw bytes without parsing them, so the count
+    is established downstream when the object is read.
+
+    ``acquired_at`` is the acquisition time; it is mapped to the wire
+    ``timestamp`` field and also used to derive the ``YYYY-MM-DD`` date
+    segment of the default ``b2_prefix``.
 
     Emission failures are logged per-file and do NOT abort the batch.
     Returns the count of messages successfully sent.
@@ -293,14 +323,11 @@ def emit_raw_new_for_manifest(
                 logger.warning("kafka_emit_skipped_missing_file", path=str(f), source=source)
                 continue
             rel = f.relative_to(local_dir) if f.is_relative_to(local_dir) else Path(f.name)
-            b2_key = f"{prefix}/{rel.as_posix()}"
+            b2_path = f"{prefix}/{rel.as_posix()}"
             if emit_raw_new(
                 source=source,
-                b2_key=b2_key,
-                content_type=_guess_content_type(f),
-                size_bytes=f.stat().st_size,
-                checksum_sha256=sha256_of_file(f),
-                acquired_at=ts,
+                b2_path=b2_path,
+                timestamp=ts,
                 producer=producer,
             ):
                 sent += 1
@@ -312,29 +339,3 @@ def emit_raw_new_for_manifest(
                 producer.close(timeout=5)
             except Exception:  # noqa: BLE001
                 pass
-
-
-def sha256_of_file(path: Path) -> str:
-    """SHA-256 hex digest of a file on disk."""
-    h = hashlib.sha256()
-    with path.open("rb") as fp:
-        for chunk in iter(lambda: fp.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-_EXT_TO_CT = {
-    ".json": "application/json",
-    ".csv": "text/csv",
-    ".tsv": "text/tab-separated-values",
-    ".parquet": "application/x-parquet",
-    ".xml": "application/xml",
-    ".html": "text/html",
-    ".txt": "text/plain",
-    ".zip": "application/zip",
-    ".gz": "application/gzip",
-}
-
-
-def _guess_content_type(path: Path) -> str:
-    return _EXT_TO_CT.get(path.suffix.lower(), "application/octet-stream")
