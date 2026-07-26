@@ -62,7 +62,7 @@ from __future__ import annotations
 import hashlib
 
 from src.parse.identity import HADITH_ID_PREFIX, ID_DELIMITER
-from src.utils.arabic import is_arabic, normalize_arabic, strip_to_letters
+from src.utils.arabic import is_arabic, normalize_arabic_uncached, strip_to_letters
 
 # source_corpus -> allowed collection slugs.
 #   None           = load all collections for this source. Equivalent to the
@@ -189,8 +189,8 @@ def canonical_matn_identity(matn_ar: str | None, matn_en: str | None) -> str | N
     tokens) — a ``None`` identity is never deduped, so the hadith is kept.
 
     The Arabic matn is preferred and normalized via
-    :func:`src.utils.arabic.normalize_arabic` (diacritics / alif / hamza / taa
-    marbuta / tatweel folded, whitespace collapsed), then reduced to letters and
+    :func:`src.utils.arabic.normalize_arabic_uncached` (diacritics / alif / hamza /
+    taa marbuta / tatweel folded, whitespace collapsed), then reduced to letters and
     single spaces by :func:`src.utils.arabic.strip_to_letters`; the English matn
     (lowercased) is stripped the same way and is the fallback when no Arabic matn
     is present.
@@ -209,7 +209,12 @@ def canonical_matn_identity(matn_ar: str | None, matn_en: str | None) -> str | N
     index stays compact for the full ~650k-row corpus.
     """
     if matn_ar and is_arabic(matn_ar):
-        normalized = strip_to_letters(normalize_arabic(matn_ar))
+        # Full matn bodies (matn_ar / full_text_ar) are large and mostly unique,
+        # and the loader runs this over the full ~650k-row corpus, so bypass the
+        # lru_cache on normalize_arabic (da#495) — caching these would retain
+        # every distinct body for the process lifetime and risk OOM (memory-
+        # bounding history da#337/#723). Same reasoning as src/resolve/parallels.py.
+        normalized = strip_to_letters(normalize_arabic_uncached(matn_ar))
     elif matn_en and matn_en.strip():
         normalized = strip_to_letters(matn_en.lower())
     else:

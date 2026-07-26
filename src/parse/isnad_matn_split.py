@@ -40,7 +40,11 @@ from src.parse.narrator_extraction import (
     NarratorSpan,
     extract_narrator_mentions,
 )
-from src.utils.arabic import extract_transmission_phrases, normalize_arabic
+from src.utils.arabic import (
+    extract_transmission_phrases,
+    normalize_arabic,
+    normalize_arabic_uncached,
+)
 
 __all__ = [
     "DETECTOR_TOKEN_WINDOW",
@@ -148,7 +152,11 @@ def _head_opener(text: str) -> bool:
     editorial mark still counts; the comparison is on the *normalized* first
     Arabic word, so it is exact-token, never a substring of a longer word.
     """
-    match = _FIRST_AR_WORD_RE.match(normalize_arabic(text))
+    # `text` here is a full matn body (split_isnad_matn runs per corpus row), so
+    # use the uncached core: caching whole bodies would retain every distinct one
+    # for the process lifetime and risk OOM (da#495 review; da#337/#723). We only
+    # read the first word, but normalize_arabic would still cache the full string.
+    match = _FIRST_AR_WORD_RE.match(normalize_arabic_uncached(text))
     if match is None:
         return False
     return match.group(1) in _HEAD_OPENERS

@@ -13,6 +13,25 @@ from src.parse.composition import (
     is_cross_edition_dedup_source,
 )
 from src.parse.identity import DoubledCorpusPrefixError, hadith_node_id
+from src.utils.arabic import normalize_arabic
+
+
+class TestCanonicalMatnIdentityDoesNotCacheBodies:
+    def test_matn_body_bypasses_the_normalize_cache(self) -> None:
+        # da#495 review: canonical_matn_identity runs over the full ~650k-row
+        # corpus with full matn bodies (matn_ar / full_text_ar). It MUST normalize
+        # them via normalize_arabic_uncached — feeding them through the memoized
+        # normalize_arabic would retain every distinct body for the process
+        # lifetime (OOM risk; da#337/#723). Guard it structurally.
+        normalize_arabic.cache_clear()
+        body = " ".join(["حدثنا محمد بن إسماعيل قال حدثنا عبد الله"] * 40)
+        before = normalize_arabic.cache_info().currsize
+        assert canonical_matn_identity(body, None) is not None
+        after = normalize_arabic.cache_info().currsize
+        assert after == before == 0, (
+            "matn body leaked into the normalize_arabic cache — "
+            "canonical_matn_identity must use normalize_arabic_uncached"
+        )
 
 
 class TestIsCanonicalHadith:

@@ -16,9 +16,29 @@ from __future__ import annotations
 
 import pytest
 
-from src.parse.isnad_matn_split import detect_isnad, split_isnad_matn
+from src.parse.isnad_matn_split import _head_opener, detect_isnad, split_isnad_matn
 from src.parse.narrator_extraction import extract_narrator_mentions
-from src.utils.arabic import extract_transmission_phrases
+from src.utils.arabic import extract_transmission_phrases, normalize_arabic
+
+
+class TestHeadOpenerDoesNotCacheBodies:
+    def test_full_body_bypasses_the_normalize_cache(self) -> None:
+        # da#495 review: _head_opener normalizes the FULL text just to read its
+        # first word, and split_isnad_matn runs it per corpus row on full matn
+        # bodies. It MUST use normalize_arabic_uncached — else every distinct body
+        # is retained in the memoized cache for the process lifetime (OOM risk;
+        # da#337/#723). (split_isnad_matn itself still caches the bounded narrator
+        # NAMES it extracts, which is the intended use; this guards the body path.)
+        normalize_arabic.cache_clear()
+        body = "حدثنا محمد بن إسماعيل قال حدثنا عبد الله " + ("قال رسول الله " * 30)
+        before = normalize_arabic.cache_info().currsize
+        _head_opener(body)
+        after = normalize_arabic.cache_info().currsize
+        assert after == before == 0, (
+            "matn body leaked into the normalize_arabic cache — "
+            "_head_opener must use normalize_arabic_uncached"
+        )
+
 
 # --- positive recoveries --------------------------------------------------
 

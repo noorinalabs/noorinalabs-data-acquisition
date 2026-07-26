@@ -17,6 +17,7 @@ from src.resolve.parallels import (
     _tokenize,
     detect_parallels,
 )
+from src.utils.arabic import normalize_arabic, normalize_arabic_uncached
 from tests.test_graph.conftest import write_hadiths
 
 
@@ -66,6 +67,24 @@ class TestTokenize:
     def test_empty_when_neither(self) -> None:
         assert _tokenize(None, None) == frozenset()
         assert _tokenize("", "   ") == frozenset()
+
+    def test_matn_body_bypasses_the_normalize_cache(self) -> None:
+        # da#495 review: full matn bodies are large and mostly unique, so
+        # _tokenize MUST normalize them via the uncached core — feeding them
+        # through the memoized normalize_arabic would retain every distinct
+        # hadith body for the process lifetime (OOM risk; da#337/#723). Guard
+        # the invariant structurally so it can't silently regress.
+        assert not hasattr(normalize_arabic_uncached, "cache_info")
+        normalize_arabic.cache_clear()
+        # A body-sized, unique-per-call Arabic matn.
+        body = " ".join(["حدثنا محمد بن إسماعيل قال حدثنا عبد الله"] * 40)
+        before = normalize_arabic.cache_info().currsize
+        assert _tokenize(body, None)  # non-empty token set
+        after = normalize_arabic.cache_info().currsize
+        assert after == before == 0, (
+            "matn body leaked into the normalize_arabic cache — the parallels "
+            "full-corpus path must use normalize_arabic_uncached"
+        )
 
 
 def _coords(**over: object) -> dict[str, object]:
