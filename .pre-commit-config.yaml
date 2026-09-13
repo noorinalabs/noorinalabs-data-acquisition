@@ -194,6 +194,13 @@ repos:
           else echo "pytest-integration: Docker unreachable locally — skipping
           the local mirror (CI will still run test-integration for real, and
           it is a required check)."; fi'
+        # pre-commit suppresses a PASSING hook's stdout unless verbose: true.
+        # Without this, the skip branch's own echo — the whole point of it —
+        # never reaches the developer on a Docker-less push: they'd see only
+        # "pytest-integration (pre-push)...Passed" for both "58 tests ran and
+        # passed" and "nothing ran", the exact indistinguishable-success this
+        # story exists to eliminate, reintroduced here one layer up.
+        verbose: true
         language: system
         pass_filenames: false
         always_run: true
