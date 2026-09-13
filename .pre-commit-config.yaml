@@ -24,9 +24,19 @@
 #     pinned to v0.15.11 to match the org-canonical ruff version (parent
 #     noorinalabs-main + isnad-graph pin the same) — bump in lockstep.
 #   * pytest MUST run with ENVIRONMENT=test (the repo's test env-guard /
-#     conftest require it); the entry sets it inline. Integration tests require
-#     external services and run in CI only (the `-m "not integration"` filter
-#     here mirrors ci.yml's unit `test` job).
+#     conftest require it); the entry sets it inline. The unit hook's
+#     `-m "not integration"` filter mirrors ci.yml's unit `test` job exactly.
+#   * da#518: `test-integration` in ci.yml is a REQUIRED status check on `main`
+#     and can now genuinely fail (it used to carry `continue-on-error: true`,
+#     which is why the old note here said "integration tests ... run in CI
+#     only" — that rationale died with the fix). A separate `pytest-integration`
+#     pre-push hook mirrors ci.yml's `test-integration` job command exactly, so
+#     a developer with Docker sees the same red locally, before pushing, that
+#     the required check would show. `tests/integration/conftest.py` already
+#     degrades to a clean SKIP (never a red ERROR) when Docker is unreachable
+#     (#69), so this hook is a strict superset of value — it never turns a
+#     Docker-less machine's push red, it only gives a Docker-equipped one a
+#     chance to catch what CI would catch, first.
 #   * actionlint runs via the rhysd/actionlint pre-commit mirror pinned to
 #     v1.7.12 so the same workflow-lint runs locally that docs.yml runs in CI.
 #   * cspell runs via the streetsidesoftware/cspell-cli mirror pinned to v8.4.0
@@ -158,6 +168,39 @@ repos:
       - id: pytest
         name: pytest (pre-push)
         entry: bash -c 'ENVIRONMENT=test uv run pytest tests/ -x --tb=short -q -m "not integration"'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+      # Mirrors ci.yml's `test-integration` job command exactly (da#518). Gated
+      # on `docker info` succeeding, NOT on the `neo4j_container` fixture's own
+      # DockerException catch: that catch only wraps `container.start()`, so a
+      # machine with no `docker` daemon/socket at all (this box under WSL2
+      # without the Docker Desktop integration running, measured 2026-09-13)
+      # raises DockerException one level up, in `Neo4jContainer.__init__`,
+      # OUTSIDE the guarded try — every test then ERRORs instead of SKIPping,
+      # which would make this pre-push hook block a push it has no business
+      # blocking. Probing `docker info` here keeps the promise from #69's own
+      # rationale (a missing-infra environment must degrade cleanly) at the
+      # hook boundary rather than relying on a fixture-internal catch whose
+      # coverage doesn't reach every unavailable-Docker shape. When Docker IS
+      # reachable, this is a full local run of the required check, byte-for-
+      # byte the same command CI runs.
+      - id: pytest-integration
+        name: pytest-integration (pre-push)
+        entry: >-
+          bash -c 'if docker info >/dev/null 2>&1; then
+          ENVIRONMENT=test uv run pytest tests/integration/ -v -m integration;
+          else echo "pytest-integration: Docker unreachable locally — skipping
+          the local mirror (CI will still run test-integration for real, and
+          it is a required check)."; fi'
+        # pre-commit suppresses a PASSING hook's stdout unless verbose: true.
+        # Without this, the skip branch's own echo — the whole point of it —
+        # never reaches the developer on a Docker-less push: they'd see only
+        # "pytest-integration (pre-push)...Passed" for both "58 tests ran and
+        # passed" and "nothing ran", the exact indistinguishable-success this
+        # story exists to eliminate, reintroduced here one layer up.
+        verbose: true
         language: system
         pass_filenames: false
         always_run: true
