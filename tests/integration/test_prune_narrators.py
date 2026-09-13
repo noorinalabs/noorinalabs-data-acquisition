@@ -117,10 +117,7 @@ class TestPruneAgainstRealGraph:
         result = prune_narrators(neo4j_client, canonical, dry_run=True)
 
         assert result.dry_run is True
-        # DELIBERATE BREAKAGE for da#518 AC (proof the gate can fail) — will be
-        # reverted in the very next commit. Real value is 2; asserting 3 here
-        # must turn the `Integration Tests` CI job red.
-        assert result.orphans_identified == 3  # it counts
+        assert result.orphans_identified == 2  # it counts
         assert result.deleted == 0
         assert _narrator_ids(neo4j_client) == before, "dry-run mutated the graph"
         assert _transmitted_edge_count(neo4j_client) == 1
