@@ -93,7 +93,16 @@ jobs:
   test-integration:
     name: Integration Tests
     runs-on: ubuntu-latest
-    continue-on-error: true
+    # da#518: this job used to carry `continue-on-error: true`, which made its
+    # conclusion `success` regardless of what the tests did. No `services:`
+    # block is added here (and none is needed): `tests/integration/conftest.py`
+    # uses `testcontainers` to spin up its own throwaway Neo4j/Postgres
+    # containers directly against the Docker daemon GitHub-hosted `ubuntu-latest`
+    # runners ship with — the same self-provisioning pattern documented in
+    # noorinalabs-user-service's `pg-container-tests` job. The fixture already
+    # degrades to a clean SKIP (never a red ERROR) if Docker is ever unreachable
+    # (#69), so removing `continue-on-error` is what turns this from a job that
+    # runs 59 real tests and can never fail into an actual gate.
     steps:
       - uses: actions/checkout@v6
 
